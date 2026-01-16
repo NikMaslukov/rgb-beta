@@ -52,6 +52,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         services.AddHttpClient("RgbNode");
         services.AddSingleton<RgbNodeClient>();
         services.AddSingleton<RgbSdkService>();
+        services.AddSingleton<MnemonicProtectionService>();
         services.AddSingleton<RGBWalletService>();
         services.AddSingleton<RGBPaymentMethodHandler>();
         services.AddSingleton<IPaymentMethodHandler>(sp => sp.GetRequiredService<RGBPaymentMethodHandler>());

@@ -11,12 +11,14 @@ public class RGBWalletService
     readonly RgbSdkService _sdk;
     readonly RGBPluginDbContextFactory _db;
     readonly RGBConfiguration _cfg;
+    readonly MnemonicProtectionService _mnemonicProtection;
     readonly ILogger<RGBWalletService> _log;
 
     public RGBWalletService(RgbNodeClient node, RgbSdkService sdk, RGBPluginDbContextFactory db, 
-        RGBConfiguration cfg, ILogger<RGBWalletService> log)
+        RGBConfiguration cfg, MnemonicProtectionService mnemonicProtection, ILogger<RGBWalletService> log)
     {
-        _node = node; _sdk = sdk; _db = db; _cfg = cfg; _log = log;
+        _node = node; _sdk = sdk; _db = db; _cfg = cfg; 
+        _mnemonicProtection = mnemonicProtection; _log = log;
     }
 
     public async Task<RGBWallet> CreateWalletAsync(string storeId, string? name = null)
@@ -31,7 +33,7 @@ public class RGBWalletService
             XpubVanilla = keys.AccountXpubVanilla,
             XpubColored = keys.AccountXpubColored,
             MasterFingerprint = keys.MasterFingerprint,
-            EncryptedMnemonic = keys.Mnemonic,
+            EncryptedMnemonic = _mnemonicProtection.Protect(keys.Mnemonic),
             Network = _cfg.Network,
             CreatedAt = DateTimeOffset.UtcNow
         };
@@ -61,7 +63,7 @@ public class RGBWalletService
     {
         XpubVanilla = w.XpubVanilla, XpubColored = w.XpubColored,
         MasterFingerprint = w.MasterFingerprint,
-        Mnemonic = w.EncryptedMnemonic,
+        Mnemonic = _mnemonicProtection.Unprotect(w.EncryptedMnemonic),
         Network = w.Network
     };
 
