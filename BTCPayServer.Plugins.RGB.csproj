@@ -19,7 +19,17 @@
         <AddRazorSupportForMvc>true</AddRazorSupportForMvc>
         <PreserveCompilationContext>false</PreserveCompilationContext>
         <GenerateEmbeddedFilesManifest>true</GenerateEmbeddedFilesManifest>
+        <!-- Prevent Razor from compiling files in submodules -->
+        <EnableDefaultRazorComponentItems>false</EnableDefaultRazorComponentItems>
     </PropertyGroup>
+
+    <!-- Exclude submodules from compilation - they're referenced as a project, not compiled directly -->
+    <ItemGroup>
+        <Compile Remove="submodules\**" />
+        <Content Remove="submodules\**" />
+        <EmbeddedResource Remove="submodules\**" />
+        <None Remove="submodules\**" />
+    </ItemGroup>
 
     <ItemDefinitionGroup>
         <ProjectReference>
@@ -55,4 +65,3 @@
     </ItemGroup>
 
 </Project>
-
