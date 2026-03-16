@@ -95,7 +95,6 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         ctx.Prompt.Divisibility = precision;
         
         ctx.InvoiceEntity.Rates[ticker] = rate;
-        ctx.InvoiceEntity.Rates[$"{ticker}_{invoiceCurrency}"] = rate;
 
         ctx.Prompt.Destination = invoice.Invoice;
         ctx.Prompt.PaymentMethodFee = 0m;
