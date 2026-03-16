@@ -72,7 +72,6 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         var invoicePrice = ctx.InvoiceEntity.Price;
         
         var (rate, rateSource) = await TryFetchRateAsync(ticker, invoiceCurrency, ctx.Store);
-        
         var multiplier = (decimal)Math.Pow(10, precision);
         decimal unitsDecimal;
         if (rate > 0)
