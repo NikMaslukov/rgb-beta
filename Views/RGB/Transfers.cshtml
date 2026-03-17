@@ -20,6 +20,7 @@
             <thead>
                 <tr>
                     <th>#</th>
+                    <th>Asset</th>
                     <th>Type</th>
                     <th>Status</th>
                     <th>Amount</th>
@@ -31,6 +32,7 @@
                 {
                     <tr>
                         <td>@transfer.Idx</td>
+                        <td><strong>@transfer.AssetTicker</strong></td>
                         <td>
                             @if (transfer.Kind == "Receive Blind" || transfer.Kind == "Receive Witness")
                             {

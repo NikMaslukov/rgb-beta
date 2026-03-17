@@ -1,4 +1,3 @@
-using System.Text.Json;
 using System.Threading.Channels;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
@@ -22,7 +21,6 @@ public class RGBInvoiceListener : IHostedService
     readonly RGBPaymentMethodHandler _handler;
     readonly RGBWalletService _wallets;
     readonly RGBPluginDbContextFactory _db;
-    readonly ApplicationDbContextFactory _appDb;
     readonly EventAggregator _events;
     readonly PaymentService _payments;
     readonly ILogger<RGBInvoiceListener> _log;
@@ -35,11 +33,11 @@ public class RGBInvoiceListener : IHostedService
     const int PollSeconds = 10;
 
     public RGBInvoiceListener(IMemoryCache cache, InvoiceRepository invoices, RGBPaymentMethodHandler handler,
-        RGBWalletService wallets, RGBPluginDbContextFactory db, ApplicationDbContextFactory appDb,
+        RGBWalletService wallets, RGBPluginDbContextFactory db,
         EventAggregator events, PaymentService payments, ILogger<RGBInvoiceListener> log)
     {
         _cache = cache; _invoices = invoices; _handler = handler; _wallets = wallets;
-        _db = db; _appDb = appDb; _events = events; _payments = payments; _log = log;
+        _db = db; _events = events; _payments = payments; _log = log;
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -60,6 +58,7 @@ public class RGBInvoiceListener : IHostedService
 
     Task OnInvoice(InvoiceEvent e)
     {
+        if (e.Name != InvoiceEvent.Created) return Task.CompletedTask;
         _cache.Remove($"rgb:inv:{e.Invoice.Id}");
         _queue.Writer.TryWrite(e.Invoice.Id);
         return Task.CompletedTask;
@@ -118,7 +117,7 @@ public class RGBInvoiceListener : IHostedService
                 _log.LogInformation("Refreshing wallet {WalletId}...", w.Id);
                 await _wallets.RefreshWalletAsync(w.Id);
                 _log.LogInformation("Wallet {WalletId} refreshed, processing transfers...", w.Id);
-                await ProcessSettledTransfers(w.Id, ct);
+                await ProcessTransfers(w.Id, ct);
             }
             catch (Exception ex)
             {
@@ -128,11 +127,14 @@ public class RGBInvoiceListener : IHostedService
         _log.LogInformation("RefreshAllWallets completed");
     }
 
-    async Task ProcessSettledTransfers(string walletId, CancellationToken ct)
+    async Task ProcessTransfers(string walletId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
-        var pending = await ctx.RGBInvoices.Where(i => i.WalletId == walletId && i.Status == RGBInvoiceStatus.Pending).ToListAsync(ct);
-        _log.LogInformation("ProcessSettledTransfers: {Count} pending invoices for wallet {WalletId}", pending.Count, walletId);
+        var allInvoices = await ctx.RGBInvoices.Where(i => i.WalletId == walletId).ToListAsync(ct);
+        _log.LogInformation("ProcessTransfers: total={Total} invoices for wallet {WalletId}, statuses: {Statuses}",
+            allInvoices.Count, walletId, string.Join(",", allInvoices.Select(i => $"{i.Id[..8]}={i.Status}")));
+        var pending = allInvoices.Where(i => i.Status == RGBInvoiceStatus.Pending || i.Status == RGBInvoiceStatus.WaitingConfirmations).ToList();
+        _log.LogInformation("ProcessTransfers: {Count} pending/waiting invoices for wallet {WalletId}", pending.Count, walletId);
         if (pending.Count == 0) return;
 
         var assetIds = pending.Where(i => !string.IsNullOrEmpty(i.AssetId)).Select(i => i.AssetId!).Distinct().ToList();
@@ -141,7 +143,7 @@ public class RGBInvoiceListener : IHostedService
             try
             {
                 var allAssets = await _wallets.ListAssetsAsync(walletId);
-                _log.LogInformation("ProcessSettledTransfers: Listed {Count} assets for wildcard invoices", allAssets.Count);
+                _log.LogInformation("ProcessTransfers: Listed {Count} assets for wildcard invoices", allAssets.Count);
                 assetIds = assetIds.Union(allAssets.Select(a => a.AssetId)).ToList();
             }
             catch (Exception ex)
@@ -149,86 +151,150 @@ public class RGBInvoiceListener : IHostedService
                 _log.LogDebug(ex, "Failed to list assets for wallet {WalletId}", walletId);
             }
         }
-        _log.LogInformation("ProcessSettledTransfers: Checking {Count} asset IDs", assetIds.Count);
+        _log.LogInformation("ProcessTransfers: Checking {Count} asset IDs", assetIds.Count);
         if (assetIds.Count == 0) return;
-        
-        var settled = new List<RgbTransfer>();
+
+        var incomingTransfers = new List<RgbTransfer>();
         foreach (var aid in assetIds)
         {
-            _log.LogInformation("ProcessSettledTransfers: Fetching transfers for asset {AssetId}", aid);
+            _log.LogInformation("ProcessTransfers: Fetching transfers for asset {AssetId}", aid);
             try
             {
                 var transfers = await _wallets.GetTransfersAsync(walletId, aid);
-                _log.LogInformation("ProcessSettledTransfers: Asset {AssetId} has {Count} transfers", aid.Length > 30 ? aid[..30] : aid, transfers.Count);
+                _log.LogInformation("ProcessTransfers: Asset {AssetId} has {Count} transfers",
+                    aid.Length > 30 ? aid[..30] : aid, transfers.Count);
                 foreach (var t in transfers)
                 {
-                    _log.LogInformation("  Transfer idx={Idx} status={Status} kind={Kind} recipientId={RecipientId}", t.Idx, t.Status, t.Kind, t.RecipientId ?? "null");
+                    _log.LogInformation("  Transfer idx={Idx} status={Status} kind={Kind} recipientId={RecipientId}",
+                        t.Idx, t.Status, t.Kind, t.RecipientId ?? "null");
                 }
-                settled.AddRange(transfers.Where(t => t.Status == 2 && t.Kind is 1 or 2));
+                incomingTransfers.AddRange(transfers.Where(t => t.Kind is 1 or 2 && t.Status is 1 or 2 or 3));
             }
             catch (Exception ex)
             {
                 _log.LogWarning(ex, "Failed to get transfers for asset {AssetId}", aid);
             }
         }
-        _log.LogInformation("ProcessSettledTransfers: Found {Count} settled transfers to process", settled.Count);
-        
-        foreach (var tx in settled.GroupBy(t => t.Idx).Select(g => g.First()))
+        _log.LogInformation("ProcessTransfers: Found {Count} incoming transfers to process", incomingTransfers.Count);
+
+        foreach (var tx in incomingTransfers.GroupBy(t => t.Idx).Select(g => g.First()))
         {
             if (string.IsNullOrEmpty(tx.RecipientId)) continue;
             var inv = pending.Find(i => i.RecipientId == tx.RecipientId);
             if (inv == null) continue;
 
-            inv.Status = RGBInvoiceStatus.Settled;
-            inv.SettledAt = DateTimeOffset.UtcNow;
-            inv.Txid = tx.Txid;
-            inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : inv.Amount ?? 0;
-
-            if (!string.IsNullOrEmpty(inv.BtcPayInvoiceId))
+            if (tx.Status is 1 or 2 && inv.Status == RGBInvoiceStatus.Pending)
             {
-                try
+                inv.Status = RGBInvoiceStatus.WaitingConfirmations;
+                inv.Txid = tx.Txid;
+                inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : inv.Amount ?? 0;
+
+                if (!string.IsNullOrEmpty(inv.BtcPayInvoiceId))
                 {
-                    await RecordPayment(inv, tx, ct);
+                    try
+                    {
+                        await RecordOrUpdatePayment(inv, tx, BTCPayServer.Data.PaymentStatus.Processing, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "Failed to record processing payment for invoice {Id}", inv.BtcPayInvoiceId);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    _log.LogWarning(ex, "Failed to record payment for invoice {InvoiceId}", inv.BtcPayInvoiceId);
-                }
+                _log.LogInformation("invoice {Id} waiting confirmations (tx={Txid})", inv.Id, tx.Txid);
             }
-            _log.LogInformation("settled {Id}", inv.Id);
+            else if (tx.Status == 3 && inv.Status != RGBInvoiceStatus.Settled)
+            {
+                inv.Status = RGBInvoiceStatus.Settled;
+                inv.SettledAt = DateTimeOffset.UtcNow;
+                inv.Txid = tx.Txid;
+                inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : inv.Amount ?? 0;
+
+                if (!string.IsNullOrEmpty(inv.BtcPayInvoiceId))
+                {
+                    try
+                    {
+                        await RecordOrUpdatePayment(inv, tx, BTCPayServer.Data.PaymentStatus.Settled, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "Failed to record settled payment for invoice {Id}", inv.BtcPayInvoiceId);
+                    }
+                }
+                _log.LogInformation("settled {Id}", inv.Id);
+            }
         }
         await ctx.SaveChangesAsync(ct);
     }
 
-    async Task RecordPayment(RGBInvoice rgbInv, RgbTransfer tx, CancellationToken ct)
+    async Task RecordOrUpdatePayment(RGBInvoice rgbInv, RgbTransfer tx, BTCPayServer.Data.PaymentStatus targetStatus, CancellationToken ct)
     {
-        await using var appCtx = _appDb.CreateContext();
-        
-        var invoiceData = await appCtx.Invoices
-            .FirstOrDefaultAsync(i => i.Id == rgbInv.BtcPayInvoiceId, ct);
-        if (invoiceData == null)
+        var invoiceEntity = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
+        if (invoiceEntity == null)
         {
             _log.LogWarning("BTCPay invoice {Id} not found", rgbInv.BtcPayInvoiceId);
             return;
         }
 
-        var paymentId = $"rgb:{rgbInv.RecipientId}:{tx.Idx}";
-        var existingPayment = await appCtx.Payments
-            .FirstOrDefaultAsync(p => p.Id == paymentId && p.InvoiceDataId == rgbInv.BtcPayInvoiceId, ct);
-        if (existingPayment != null)
+        var prompt = invoiceEntity.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
+        if (prompt == null)
         {
-            _log.LogDebug("Payment {Id} already exists", paymentId);
+            _log.LogWarning("No RGB payment prompt on invoice {Id}", rgbInv.BtcPayInvoiceId);
             return;
         }
 
-        if (invoiceData.Status == "New" || invoiceData.Status == "Processing")
-        {
-            invoiceData.Status = "Settled";
-            _log.LogInformation("Updated BTCPay invoice {Id} status to Settled", rgbInv.BtcPayInvoiceId);
-        }
+        var details = _handler.ParsePaymentPromptDetails(prompt.Details);
+        var receivedAmount = tx.Amount > 0 ? tx.Amount : details.AmountInAssetUnits;
+        var divisibility = details.AssetPrecision;
+        var amountDecimal = divisibility > 0
+            ? receivedAmount / (decimal)Math.Pow(10, divisibility)
+            : receivedAmount;
+        var paymentId = $"rgb:{rgbInv.RecipientId}:{tx.Idx}";
 
-        await appCtx.SaveChangesAsync(ct);
-        _log.LogInformation("Invoice {InvoiceId} marked as Settled", rgbInv.BtcPayInvoiceId);
+        var existingPayment = invoiceEntity.GetPayments(false)
+            .FirstOrDefault(p => p.Id == paymentId);
+
+        if (existingPayment != null)
+        {
+            if (existingPayment.Status != targetStatus)
+            {
+                existingPayment.Status = targetStatus;
+                await _payments.UpdatePayments(new List<PaymentEntity> { existingPayment });
+                _events.Publish(new Events.InvoiceNeedUpdateEvent(rgbInv.BtcPayInvoiceId));
+                _log.LogInformation("Updated payment {PaymentId} to {Status} for invoice {InvoiceId}",
+                    paymentId, targetStatus, rgbInv.BtcPayInvoiceId);
+            }
+        }
+        else
+        {
+            var paymentData = new BTCPayServer.Data.PaymentData
+            {
+                Id = paymentId,
+                Created = DateTimeOffset.UtcNow,
+                Status = targetStatus,
+                Currency = details.AssetTicker ?? "RGB",
+                InvoiceDataId = rgbInv.BtcPayInvoiceId,
+                Amount = amountDecimal,
+                PaymentMethodId = RGBPlugin.RGBPaymentMethodId.ToString()
+            }.Set(invoiceEntity, _handler, new RGBPaymentData
+            {
+                RecipientId = rgbInv.RecipientId,
+                Txid = tx.Txid,
+                AssetId = rgbInv.AssetId,
+                Amount = receivedAmount,
+                TransferIdx = tx.Idx
+            });
+
+            var payment = await _payments.AddPayment(paymentData);
+            if (payment != null)
+            {
+                invoiceEntity = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
+                if (invoiceEntity != null)
+                    _events.Publish(new InvoiceEvent(invoiceEntity, InvoiceEvent.ReceivedPayment) { Payment = payment });
+
+                _log.LogInformation("Recorded {Status} payment {PaymentId} for invoice {InvoiceId}: {Amount} {Ticker}",
+                    targetStatus, paymentId, rgbInv.BtcPayInvoiceId, amountDecimal, details.AssetTicker);
+            }
+        }
     }
 
     async Task CheckSingleInvoice(string invoiceId, CancellationToken ct)
@@ -243,7 +309,7 @@ public class RGBInvoiceListener : IHostedService
             if (inv == null) return;
             var prompt = inv.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
             if (prompt?.Details == null) return;
-            await ProcessSettledTransfers(_handler.ParsePaymentPromptDetails(prompt.Details).WalletId, ct);
+            await ProcessTransfers(_handler.ParsePaymentPromptDetails(prompt.Details).WalletId, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

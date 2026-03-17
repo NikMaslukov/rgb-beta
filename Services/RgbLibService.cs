@@ -29,7 +29,8 @@ public class RgbLibService : IRgbLibService
     readonly MethodInfo _createUtxosBeginMethod;
     readonly MethodInfo _createUtxosEndMethod;
     readonly MethodInfo _refreshMethod;
-    
+    readonly MethodInfo _listTransactionsMethod;
+
     bool _disposed;
 
     public RgbLibService(
@@ -56,6 +57,7 @@ public class RgbLibService : IRgbLibService
         _createUtxosBeginMethod = _nativeMethodsType.GetMethod("rgblib_create_utxos_begin")!;
         _createUtxosEndMethod = _nativeMethodsType.GetMethod("rgblib_create_utxos_end")!;
         _refreshMethod = _nativeMethodsType.GetMethod("rgblib_refresh")!;
+        _listTransactionsMethod = _nativeMethodsType.GetMethod("rgblib_list_transactions")!;
     }
 
     public async Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default)
@@ -166,12 +168,13 @@ public class RgbLibService : IRgbLibService
                 Ticker = a.Ticker ?? "",
                 Name = a.Name ?? "",
                 Precision = a.Precision,
-                IssuedSupply = a.IssuedSupply
+                IssuedSupply = a.IssuedSupply,
+                Balance = a.Balance?.Spendable ?? 0
             }).ToList() ?? [];
         }, ct);
     }
 
-    public async Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, CancellationToken ct = default)
+    public async Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, int minConfirmations = 1, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
         
@@ -189,7 +192,7 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var args = new object?[] { walletStruct, assetId, assignment, duration, transportEndpoints, "1" };
+            var args = new object?[] { walletStruct, assetId, assignment, duration, transportEndpoints, minConfirmations.ToString() };
             var result = _blindReceiveMethod.Invoke(null, args);
             
             var invoiceJson = GetNativeResult(result);
@@ -243,6 +246,29 @@ public class RgbLibService : IRgbLibService
                     Settled = a.Settled
                 }).ToList() ?? []
             )).ToList() ?? [];
+        }, ct);
+    }
+
+    public async Task<List<BtcTransaction>> ListBtcTransactionsAsync(string walletId, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        return await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var walletStruct = _walletField.GetValue(wallet)!;
+            var onlineStruct = _onlineField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct, onlineStruct, false };
+            var result = _listTransactionsMethod.Invoke(null, args);
+
+            var json = GetNativeResult(result);
+            if (json == null)
+            {
+                return new List<BtcTransaction>();
+            }
+
+            return JsonSerializer.Deserialize<List<BtcTransaction>>(json) ?? [];
         }, ct);
     }
 
@@ -328,13 +354,15 @@ public class RgbLibService : IRgbLibService
         
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-            SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming
+            SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
+                   (SELECT json_extract(c.assignment, '$.Fungible')
+                    FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
             FROM transfer t
             JOIN asset_transfer at ON t.asset_transfer_idx = at.idx
             JOIN batch_transfer bt ON at.batch_transfer_idx = bt.idx
             WHERE at.asset_id = @assetId";
         cmd.Parameters.AddWithValue("@assetId", assetId);
-        
+
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -344,7 +372,8 @@ public class RgbLibService : IRgbLibService
                 Status = reader.GetInt32(1),
                 RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
-                Kind = reader.GetBoolean(4) ? 2 : 3
+                Kind = reader.GetBoolean(4) ? 2 : 3,
+                Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
             });
         }
         
@@ -355,31 +384,21 @@ public class RgbLibService : IRgbLibService
     public async Task RefreshAsync(string walletId, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
-        
+
         await handle.ExecuteAsync(wallet =>
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
             var onlineStruct = _onlineField.GetValue(wallet)!;
-            
+
             var args = new object?[] { walletStruct, onlineStruct, null, "[]", false };
             _refreshMethod.Invoke(null, args);
-            
+
             _walletField.SetValue(wallet, args[0]);
             _onlineField.SetValue(wallet, args[1]);
         }, ct);
-        
-        InvalidateWalletCache(walletId);
     }
     
-    void InvalidateWalletCache(string walletId)
-    {
-        if (_wallets.TryRemove(walletId, out var lazy) && lazy.IsValueCreated)
-        {
-            lazy.Value.Dispose();
-        }
-    }
-
     public async Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
@@ -481,6 +500,14 @@ class AssetNiaResponse
     [JsonPropertyName("name")] public string? Name { get; set; }
     [JsonPropertyName("precision")] public int Precision { get; set; }
     [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
+    [JsonPropertyName("balance")] public AssetBalanceResponse? Balance { get; set; }
+}
+
+class AssetBalanceResponse
+{
+    [JsonPropertyName("settled")] public long Settled { get; set; }
+    [JsonPropertyName("future")] public long Future { get; set; }
+    [JsonPropertyName("spendable")] public long Spendable { get; set; }
 }
 
 class BlindReceiveResponse

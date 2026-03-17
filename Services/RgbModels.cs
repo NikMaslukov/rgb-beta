@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
@@ -36,6 +37,7 @@ public class RgbAsset
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("precision")] public int Precision { get; set; }
     [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
+    public long Balance { get; set; }
 }
 
 public class InvoiceResponse
@@ -57,5 +59,37 @@ public class RgbTransfer
     [JsonPropertyName("txid")] public string? Txid { get; set; }
     [JsonPropertyName("recipient_id")] public string? RecipientId { get; set; }
     [JsonPropertyName("receive_utxo")] public Outpoint? ReceiveUtxo { get; set; }
+}
+
+public class BtcTransaction
+{
+    [JsonPropertyName("txid")] public string Txid { get; set; } = "";
+    [JsonPropertyName("transaction_type")] public JsonElement TransactionType { get; set; }
+    [JsonPropertyName("received")] public long Received { get; set; }
+    [JsonPropertyName("sent")] public long Sent { get; set; }
+    [JsonPropertyName("fee")] public long Fee { get; set; }
+    [JsonPropertyName("confirmation_time")] public BtcTxConfirmationTime? ConfirmationTime { get; set; }
+
+    public int GetTransactionTypeInt() => TransactionType.ValueKind switch
+    {
+        JsonValueKind.Number => TransactionType.GetInt32(),
+        JsonValueKind.String => ParseTxType(TransactionType.GetString()),
+        _ => -1
+    };
+
+    static int ParseTxType(string? s) => s?.ToLowerInvariant() switch
+    {
+        "user" => 0,
+        "createutxos" or "create_utxos" => 1,
+        "rgbsend" or "rgb_send" => 2,
+        "drain" => 3,
+        _ => int.TryParse(s, out var n) ? n : -1
+    };
+}
+
+public class BtcTxConfirmationTime
+{
+    [JsonPropertyName("height")] public long Height { get; set; }
+    [JsonPropertyName("timestamp")] public long Timestamp { get; set; }
 }
 

@@ -135,25 +135,6 @@ public class RGBController : Controller
         }
     }
 
-    [HttpPost("enable")]
-    public async Task<IActionResult> EnablePaymentMethod(string storeId)
-    {
-        var wallet = await RequireWallet(storeId);
-        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
-
-        try
-        {
-            await EnableRgbPaymentMethod(storeId, wallet.Id);
-            TempData["SuccessMessage"] = "RGB payments enabled";
-        }
-        catch (Exception ex)
-        {
-            TempData["ErrorMessage"] = ex.Message;
-        }
-
-        return RedirectToAction(nameof(Index), new { storeId });
-    }
-
     [HttpGet("assets")]
     public async Task<IActionResult> Assets(string storeId)
     {
@@ -248,6 +229,40 @@ public class RGBController : Controller
         return RedirectToAction(nameof(Utxos), new { storeId });
     }
 
+    [HttpGet("btc-transactions")]
+    public async Task<IActionResult> BtcTransactions(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        try
+        {
+            var txs = await _wallets.ListBtcTransactionsAsync(wallet.Id);
+
+            return View(new RGBBtcTransactionsViewModel
+            {
+                StoreId = storeId,
+                Transactions = txs.Select(t => new RGBBtcTransactionViewModel
+                {
+                    Txid = t.Txid,
+                    Type = BtcTxType(t.GetTransactionTypeInt()),
+                    Received = t.Received,
+                    Sent = t.Sent,
+                    Fee = t.Fee,
+                    Height = t.ConfirmationTime?.Height,
+                    Timestamp = t.ConfirmationTime != null
+                        ? DateTimeOffset.FromUnixTimeSeconds(t.ConfirmationTime.Timestamp)
+                        : null
+                }).OrderByDescending(t => t.Height ?? long.MaxValue).ToList()
+            });
+        }
+        catch (Exception ex)
+        {
+            TempData["ErrorMessage"] = $"Failed to load transactions: {ex.Message}";
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+    }
+
     [HttpGet("transfers")]
     public async Task<IActionResult> Transfers(string storeId, string? assetId = null)
     {
@@ -255,28 +270,30 @@ public class RGBController : Controller
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
         var assets = await _wallets.ListAssetsAsync(wallet.Id);
-        var selectedAsset = assetId ?? assets.FirstOrDefault()?.AssetId;
+        var assetLookup = assets.ToDictionary(a => a.AssetId, a => a.Ticker);
 
-        var transfers = string.IsNullOrEmpty(selectedAsset)
-            ? new List<RgbTransfer>()
-            : await _wallets.GetTransfersAsync(wallet.Id, selectedAsset);
+        var allTransfers = new List<RGBTransferViewModel>();
+        foreach (var asset in assets)
+        {
+            var transfers = await _wallets.GetTransfersAsync(wallet.Id, asset.AssetId);
+            allTransfers.AddRange(transfers.Select(t => new RGBTransferViewModel
+            {
+                Idx = t.Idx,
+                Status = TransferStatus(t.Status),
+                Kind = TransferKind(t.Kind),
+                Amount = t.Amount,
+                Txid = t.Txid,
+                RecipientId = t.RecipientId,
+                AssetTicker = asset.Ticker
+            }));
+        }
 
         return View(new RGBTransfersViewModel
         {
             StoreId = storeId,
-            SelectedAssetId = selectedAsset,
+            SelectedAssetId = assetId,
             Assets = assets.Select(a => a.ToViewModel()).ToList(),
-            Transfers = transfers
-                .OrderByDescending(t => t.Idx)
-                .Select(t => new RGBTransferViewModel
-                {
-                    Idx = t.Idx,
-                    Status = TransferStatus(t.Status),
-                    Kind = TransferKind(t.Kind),
-                    Amount = t.Amount,
-                    Txid = t.Txid,
-                    RecipientId = t.RecipientId
-                }).ToList()
+            Transfers = allTransfers.OrderByDescending(t => t.Idx).ToList()
         });
     }
 
@@ -294,6 +311,36 @@ public class RGBController : Controller
         catch (Exception ex)
         {
             TempData["ErrorMessage"] = ex.Message;
+        }
+
+        return RedirectToAction(nameof(Index), new { storeId });
+    }
+
+    [HttpPost("delete")]
+    public async Task<IActionResult> DeleteWallet(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        try
+        {
+            var store = await _stores.FindStore(storeId);
+            if (store != null)
+            {
+                store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], null);
+                var blob = store.GetStoreBlob();
+                blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, true);
+                store.SetStoreBlob(blob);
+                await _stores.UpdateStore(store);
+            }
+
+            await _wallets.DeleteWalletAsync(wallet.Id);
+            TempData["SuccessMessage"] = "RGB wallet deleted";
+        }
+        catch (Exception ex)
+        {
+            TempData["ErrorMessage"] = $"Failed to delete wallet: {ex.Message}";
+            return RedirectToAction(nameof(Settings), new { storeId });
         }
 
         return RedirectToAction(nameof(Index), new { storeId });
@@ -325,7 +372,8 @@ public class RGBController : Controller
             ElectrumUrl = networkSettings.ElectrumUrl,
             UtxoCount = config?.UtxoCount ?? 4,
             UtxoSize = config?.UtxoSize ?? 1000,
-            MaxAllocationsPerUtxo = config?.MaxAllocationsPerUtxo ?? 10
+            MaxAllocationsPerUtxo = config?.MaxAllocationsPerUtxo ?? 10,
+            MinConfirmations = config?.MinConfirmations ?? 1
         };
 
         try
@@ -382,7 +430,8 @@ public class RGBController : Controller
             AcceptAnyAsset = model.AcceptAnyAsset,
             UtxoCount = model.UtxoCount > 0 ? model.UtxoCount : 4,
             UtxoSize = model.UtxoSize >= 546 ? model.UtxoSize : 1000,
-            MaxAllocationsPerUtxo = model.MaxAllocationsPerUtxo > 0 ? model.MaxAllocationsPerUtxo : 10
+            MaxAllocationsPerUtxo = model.MaxAllocationsPerUtxo > 0 ? model.MaxAllocationsPerUtxo : 10,
+            MinConfirmations = model.MinConfirmations >= 1 ? model.MinConfirmations : 1
         };
 
         store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
@@ -439,12 +488,17 @@ public class RGBController : Controller
         0 => "Issuance", 1 => "Receive Blind", 2 => "Receive Witness", 3 => "Send",
         _ => $"Unknown ({k})"
     };
+
+    static string BtcTxType(int t) => t switch {
+        0 => "User", 1 => "Create UTXOs", 2 => "RGB Send", 3 => "Drain",
+        _ => $"Unknown ({t})"
+    };
 }
 
 static class RgbAssetExtensions
 {
     public static RGBAssetViewModel ToViewModel(this RgbAsset a) => new() {
         AssetId = a.AssetId, Ticker = a.Ticker, Name = a.Name,
-        Precision = a.Precision, IssuedSupply = a.IssuedSupply
+        Precision = a.Precision, IssuedSupply = a.IssuedSupply, Balance = a.Balance
     };
 }

@@ -101,6 +101,7 @@
                     <th>Ticker</th>
                     <th>Name</th>
                     <th>Asset ID</th>
+                    <th>Balance</th>
                     <th>Precision</th>
                 </tr>
             </thead>
@@ -111,6 +112,7 @@
                         <td><strong>@asset.Ticker</strong></td>
                         <td>@asset.Name</td>
                         <td><code class="small">@asset.AssetId</code></td>
+                        <td>@asset.Balance.ToString("N0")</td>
                         <td>@asset.Precision</td>
                     </tr>
                 }
@@ -128,11 +130,6 @@ else
 <div class="mt-4">
     <h4>Quick Actions</h4>
     <div class="d-flex gap-2 flex-wrap">
-        <form asp-action="EnablePaymentMethod" asp-route-storeId="@Model.StoreId" method="post" class="d-inline">
-            <button type="submit" class="btn btn-success">
-                <span class="fa fa-check-circle"></span> Enable RGB Payments
-            </button>
-        </form>
         <a asp-action="Assets" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
             <span class="fa fa-coins"></span> View All Assets
         </a>
@@ -141,6 +138,9 @@ else
         </a>
         <a asp-action="Transfers" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
             <span class="fa fa-exchange-alt"></span> View Transfers
+        </a>
+        <a asp-action="BtcTransactions" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
+            <span class="fab fa-bitcoin"></span> BTC Transactions
         </a>
     </div>
 </div>

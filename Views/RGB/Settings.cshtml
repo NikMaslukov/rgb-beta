@@ -129,8 +129,25 @@
                     </div>
                     <div class="alert alert-info small">
                         <i class="fa fa-info-circle"></i>
-                        <strong>Note:</strong> Max Allocations applies to newly created wallets only. 
+                        <strong>Note:</strong> Max Allocations applies to newly created wallets only.
                         Existing wallets retain their original configuration.
+                    </div>
+
+                    <hr class="my-4" />
+                    <h6 class="mb-3"><i class="fa fa-shield-alt"></i> Settlement</h6>
+                    <p class="text-muted small">
+                        Configure how many blockchain confirmations are required before an invoice is marked as settled.
+                    </p>
+
+                    <div class="row">
+                        <div class="col-md-4 mb-3">
+                            <label class="form-label">Min Confirmations</label>
+                            <input type="number" name="MinConfirmations" class="form-control"
+                                   value="@Model.MinConfirmations" min="1" max="100" />
+                            <div class="form-text">
+                                Number of blockchain confirmations required before marking an RGB payment as settled (default: 1)
+                            </div>
+                        </div>
                     </div>
 
                     <button type="submit" class="btn btn-primary">
@@ -191,10 +208,12 @@
                 <p class="text-muted">
                     These actions are irreversible. Make sure you have backed up your wallet before proceeding.
                 </p>
-                <button type="button" class="btn btn-outline-danger" disabled>
-                    <span class="fa fa-trash"></span> Delete Wallet
-                </button>
-                <small class="d-block mt-2 text-muted">Wallet deletion is not implemented yet.</small>
+                <form asp-action="DeleteWallet" asp-route-storeId="@Model.StoreId" method="post"
+                      onsubmit="return confirm('Are you sure you want to delete this wallet? This will remove the wallet from BTCPay (DB records, assets, invoices) but leave the wallet data directory on disk for backup. This action cannot be undone.');">
+                    <button type="submit" class="btn btn-outline-danger">
+                        <span class="fa fa-trash"></span> Delete Wallet
+                    </button>
+                </form>
             </div>
         </div>
     </div>

@@ -9,9 +9,10 @@ public interface IRgbLibService : IDisposable
     Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default);
     Task<List<RgbAsset>> ListAssetsAsync(string walletId, CancellationToken ct = default);
     
-    Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, CancellationToken ct = default);
+    Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, int minConfirmations = 1, CancellationToken ct = default);
     
     Task<List<UnspentOutput>> ListUnspentsAsync(string walletId, CancellationToken ct = default);
+    Task<List<BtcTransaction>> ListBtcTransactionsAsync(string walletId, CancellationToken ct = default);
     Task<string> CreateUtxosBeginAsync(string walletId, int count, int size, float feeRate, CancellationToken ct = default);
     Task<string> CreateUtxosEndAsync(string walletId, string signedPsbt, CancellationToken ct = default);
     
