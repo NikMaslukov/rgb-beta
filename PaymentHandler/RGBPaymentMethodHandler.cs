@@ -89,7 +89,7 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             invoicePrice, invoiceCurrency, units, ticker, rate, rateSource);
 
         var expiration = ctx.InvoiceEntity.ExpirationTime - DateTimeOffset.UtcNow;
-        var invoice = await _wallets.CreateInvoiceAsync(config.WalletId, assetId, units, expiration, ctx.InvoiceEntity.Id);
+        var invoice = await _wallets.CreateInvoiceAsync(config.WalletId, assetId, units, expiration, ctx.InvoiceEntity.Id, config.MinConfirmations);
         
         ctx.Prompt.Currency = ticker;
         ctx.Prompt.Divisibility = precision;

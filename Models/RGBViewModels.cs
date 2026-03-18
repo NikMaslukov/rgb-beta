@@ -11,18 +11,18 @@ public class RGBSetupViewModel : StoreViewModel
 {
     [Display(Name = "Wallet Name")]
     public string WalletName { get; set; } = "RGB Wallet";
-    
+
     [Display(Name = "Network")]
     public string SelectedNetwork { get; set; } = "regtest";
-    
+
     public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "mainnet"];
-    
+
     public string ElectrumUrl { get; set; } = "";
     public string ProxyEndpoint { get; set; } = "";
     public string Network { get; set; } = "";
-    
+
     public Dictionary<string, NetworkSettingsDto> AllNetworkSettings { get; set; } = new();
-    
+
     [Display(Name = "Max Allocations per UTXO")]
     [Range(1, 50)]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
@@ -68,16 +68,16 @@ public class RGBIssueAssetViewModel : StoreViewModel
     [RegularExpression(@"^[A-Za-z0-9]+$", ErrorMessage = "Ticker must contain only letters and numbers")]
     [Display(Name = "Ticker")]
     public string Ticker { get; set; } = "";
-    
+
     [Required, StringLength(64, MinimumLength = 1)]
     [RegularExpression(@"^[A-Za-z0-9\s\-_\.]+$", ErrorMessage = "Name contains invalid characters")]
     [Display(Name = "Name")]
     public string Name { get; set; } = "";
-    
+
     [Required, Range(1, long.MaxValue)]
     [Display(Name = "Amount")]
     public long Amount { get; set; } = 1000;
-    
+
     [Range(0, 18)]
     [Display(Name = "Precision")]
     public int Precision { get; set; }
@@ -119,6 +119,23 @@ public class RGBTransferViewModel
     public long Amount { get; set; }
     public string? Txid { get; set; }
     public string? RecipientId { get; set; }
+    public string AssetTicker { get; set; } = "";
+}
+
+public class RGBBtcTransactionsViewModel : StoreViewModel
+{
+    public List<RGBBtcTransactionViewModel> Transactions { get; set; } = [];
+}
+
+public class RGBBtcTransactionViewModel
+{
+    public string Txid { get; set; } = "";
+    public string Type { get; set; } = "";
+    public long Received { get; set; }
+    public long Sent { get; set; }
+    public long Fee { get; set; }
+    public long? Height { get; set; }
+    public DateTimeOffset? Timestamp { get; set; }
 }
 
 public class RGBSettingsViewModel : StoreViewModel
@@ -136,16 +153,20 @@ public class RGBSettingsViewModel : StoreViewModel
     public string ElectrumUrl { get; set; } = "";
     public bool IsConnected { get; set; }
     public string? ConnectionError { get; set; }
-    
+
     [Display(Name = "UTXO Count")]
     [Range(1, 20)]
     public int UtxoCount { get; set; } = 4;
-    
+
     [Display(Name = "UTXO Size (sats)")]
     [Range(546, 100000)]
     public int UtxoSize { get; set; } = 1000;
-    
+
     [Display(Name = "Max Allocations per UTXO")]
     [Range(1, 50)]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
+
+    [Display(Name = "Min Confirmations")]
+    [Range(1, 100)]
+    public int MinConfirmations { get; set; } = 1;
 }

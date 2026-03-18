@@ -1,0 +1,88 @@
+@model RGBBtcTransactionsViewModel
+@{
+    ViewData["Title"] = "BTC Transactions";
+}
+
+<div class="sticky-header-setup"></div>
+<div class="sticky-header d-flex align-items-center justify-content-between">
+    <h2>@ViewData["Title"]</h2>
+    <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+        <span class="fa fa-arrow-left"></span> Back
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+@if (Model.Transactions.Any())
+{
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    <th>Txid</th>
+                    <th>Type</th>
+                    <th>Received (sats)</th>
+                    <th>Sent (sats)</th>
+                    <th>Fee (sats)</th>
+                    <th>Block Height</th>
+                    <th>Time</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var tx in Model.Transactions)
+                {
+                    <tr>
+                        <td><code class="small">@tx.Txid[..Math.Min(16, tx.Txid.Length)]...</code></td>
+                        <td>
+                            @if (tx.Type == "RGB Send")
+                            {
+                                <span class="badge bg-primary">@tx.Type</span>
+                            }
+                            else if (tx.Type == "Create UTXOs")
+                            {
+                                <span class="badge bg-info">@tx.Type</span>
+                            }
+                            else if (tx.Type == "Drain")
+                            {
+                                <span class="badge bg-warning">@tx.Type</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary">@tx.Type</span>
+                            }
+                        </td>
+                        <td>@tx.Received.ToString("N0")</td>
+                        <td>@tx.Sent.ToString("N0")</td>
+                        <td>@tx.Fee.ToString("N0")</td>
+                        <td>
+                            @if (tx.Height.HasValue)
+                            {
+                                @tx.Height.Value.ToString("N0")
+                            }
+                            else
+                            {
+                                <span class="text-muted">Unconfirmed</span>
+                            }
+                        </td>
+                        <td>
+                            @if (tx.Timestamp.HasValue)
+                            {
+                                @tx.Timestamp.Value.ToString("yyyy-MM-dd HH:mm")
+                            }
+                            else
+                            {
+                                <span class="text-muted">-</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+else
+{
+    <div class="alert alert-info">
+        No BTC transactions yet. Transactions will appear here after funding the wallet or creating UTXOs.
+    </div>
+}

@@ -12,7 +12,7 @@ public class NetworkSettings
         ["regtest"] = new NetworkSettings
         {
             ElectrumUrl = "tcp://regtest.thunderstack.org:50001",
-            ProxyEndpoint = "rpc://proxy.iriswallet.com/0.2/json-rpc"
+            ProxyEndpoint = "rpc://regtest.thunderstack.org:3000/json-rpc"
         },
         ["testnet"] = new NetworkSettings
         {

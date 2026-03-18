@@ -131,18 +131,24 @@ public class RGBWalletService
         return await _rgbLib.ListUnspentsAsync(walletId, ct);
     }
 
+    public async Task<List<BtcTransaction>> ListBtcTransactionsAsync(string walletId, CancellationToken ct = default)
+    {
+        await GetWalletOrThrow(walletId, ct);
+        return await _rgbLib.ListBtcTransactionsAsync(walletId, ct);
+    }
+
     public async Task<RgbAsset> IssueAssetAsync(string walletId, string ticker, string name, long amt, int precision = 0, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
         return await _rgbLib.IssueAssetNiaAsync(walletId, ticker, name, [amt], precision, ct);
     }
 
-    public async Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, CancellationToken ct = default)
+    public async Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
 
         long? expTs = expiration.HasValue ? DateTimeOffset.UtcNow.Add(expiration.Value).ToUnixTimeSeconds() : null;
-        var resp = await _rgbLib.BlindReceiveAsync(walletId, assetId, amount, expTs, ct);
+        var resp = await _rgbLib.BlindReceiveAsync(walletId, assetId, amount, expTs, minConfirmations, ct);
 
         var inv = new RGBInvoice
         {
@@ -176,6 +182,21 @@ public class RGBWalletService
     {
         await GetWalletOrThrow(walletId, ct);
         return await _rgbLib.ListTransfersAsync(walletId, assetId, ct);
+    }
+
+    public async Task DeleteWalletAsync(string walletId, CancellationToken ct = default)
+    {
+        var wallet = await GetWalletOrThrow(walletId, ct);
+
+        _rgbLib.UnloadWallet(walletId);
+        _signerProvider.UnloadSigner(walletId);
+
+        await using var ctx = _db.CreateContext();
+        ctx.RGBWallets.Remove(wallet);
+        await ctx.SaveChangesAsync(ct);
+
+        _log.LogInformation("deleted wallet {Id}, data dir left at {Dir}",
+            walletId, Path.Combine(_cfg.RgbDataDir, walletId));
     }
 
     async Task<RGBWallet> GetWalletOrThrow(string id, CancellationToken ct = default) =>

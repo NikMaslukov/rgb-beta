@@ -11,6 +11,7 @@ public class RGBPaymentMethodConfig
     [JsonPropertyName("utxoCount")] public int UtxoCount { get; set; } = 4;
     [JsonPropertyName("utxoSize")] public int UtxoSize { get; set; } = 1000;
     [JsonPropertyName("maxAllocationsPerUtxo")] public int MaxAllocationsPerUtxo { get; set; } = 10;
+    [JsonPropertyName("minConfirmations")] public int MinConfirmations { get; set; } = 1;
 }
 
 

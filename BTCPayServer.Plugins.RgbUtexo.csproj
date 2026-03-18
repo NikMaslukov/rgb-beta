@@ -14,6 +14,7 @@
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
         <GenerateRuntimeConfigDevFile>true</GenerateRuntimeConfigDevFile>
         <MvcRazorCompileOnPublish>false</MvcRazorCompileOnPublish>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
 
     <PropertyGroup>
@@ -58,6 +59,7 @@
         <PackageReference Include="NBitcoin" Version="9.0.0" />
         
         <EmbeddedResource Include="rgb-icon.svg" />
+        <None Include="README.md" Pack="true" PackagePath="\" />
     </ItemGroup>
 
 </Project>
