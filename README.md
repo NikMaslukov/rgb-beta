@@ -11,8 +11,10 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 
 - Accept RGB20 token payments alongside Bitcoin
 - Issue new RGB assets directly from BTCPay
-- Automatic invoice settlement on payment confirmation
+- Two-step invoice settlement (Processing → Settled) matching BTCPay's native Bitcoin flow
 - Full UTXO management for RGB allocations
+- BTC transaction history for wallet operations
+- Configurable minimum confirmations for payment settlement
 - Native rgb-lib integration (no external RGB Node required)
 - Secure local PSBT signing (mnemonic never leaves .NET)
 
@@ -39,16 +41,16 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 # Electrum server for blockchain data
 RGB_ELECTRUM_URL=ssl://electrum.blockstream.info:60002
 
-# Directory for RGB wallet data
+# Directory for RGB wallet data (default: <btcpay-data-dir>/<network>/rgb-wallets)
 RGB_DATA_DIR=/data/rgb-wallets
 
-# RGB proxy endpoint
+# RGB proxy endpoint for consignment exchange
 RGB_PROXY_ENDPOINT=rpc://proxy.iriswallet.com:443/json-rpc
 ```
 
 ### Configuration File
 
-Create `rgb.json` in your BTCPay Server data directory:
+Alternatively, create `rgb.json` in your BTCPay Server data directory:
 ```json
 {
   "network": "mainnet",
@@ -60,43 +62,125 @@ Create `rgb.json` in your BTCPay Server data directory:
 
 ### Network Defaults
 
-| Network | Default Electrum URL |
-|---------|---------------------|
-| Mainnet | ssl://electrum.blockstream.info:60002 |
-| Testnet | ssl://electrum.blockstream.info:60002 |
-| Regtest | tcp://127.0.0.1:50001 (local electrs) |
+| Network | Default Electrum URL | Proxy Endpoint |
+|---------|---------------------|----------------|
+| Mainnet | ssl://electrum.blockstream.info:60002 | rpc://proxy.iriswallet.com:443/json-rpc |
+| Testnet | ssl://electrum.blockstream.info:60002 | rpc://proxy.iriswallet.com:443/json-rpc |
+| Regtest | tcp://127.0.0.1:50001 (local electrs) | rpc://regtest.thunderstack.org:3000/json-rpc |
 
-## Quick Start
+## User Guide
 
-1. **Create Store** - If you don't have one already
-2. **Setup RGB Wallet** - Go to Store → RGB Wallet → Setup
-3. **Issue Asset** (Optional) - RGB Wallet → Issue New Asset
-4. **Configure Payment** - RGB Wallet → Settings → Select asset to accept
-5. **Enable Payments** - Click "Enable RGB Payments"
+### Step 1: Create an RGB Wallet
 
-## Usage
+1. Open your BTCPay Server store
+2. In the left sidebar, click **RGB Wallet**
+3. You will land on the **Setup** page
+4. Enter a wallet name (e.g. "My RGB Wallet")
+5. Select the network (Mainnet, Testnet, or Regtest)
+6. Click **Create Wallet**
 
-### Accepting Payments
+The plugin generates a new wallet with two keypairs: one for regular BTC transactions and one for RGB (colored) operations. The mnemonic is encrypted and stored securely within BTCPay.
 
-1. Create an invoice in BTCPay
-2. Customer selects "RGB" payment method
-3. Customer scans QR code / copies RGB invoice
-4. Customer pays with RGB-compatible wallet
-5. Invoice auto-settles on confirmation
+### Step 2: Fund the Wallet with BTC
 
-### Managing UTXOs
+RGB operations require on-chain Bitcoin for transaction fees and UTXO creation.
 
-RGB requires "colorable" UTXOs for asset operations:
+1. On the **RGB Wallet** dashboard, copy the wallet address shown in the "Wallet Address" card
+2. Send a small amount of BTC to this address (0.01 BTC is enough for regtest/testnet)
+3. Wait for the transaction to confirm (30+ blocks on regtest)
+4. Click the **Refresh** button on the dashboard to update balances
 
-1. Go to RGB Wallet → UTXOs
-2. Click "Create UTXOs" if count is low
-3. Wait for confirmation
+You should see your BTC balance update in the "BTC Balance" card.
 
-### Issuing Assets
+### Step 3: Create Colorable UTXOs
 
-1. Go to RGB Wallet → Issue New Asset
-2. Enter ticker, name, amount, precision
-3. Click Issue
+RGB assets are stored on special "colorable" UTXOs. You need to create them before you can receive any RGB payments.
+
+1. On the dashboard, click **Manage UTXOs** (or navigate to **UTXOs** in the sidebar)
+2. Click the **Create UTXOs** button
+3. Wait for the transaction to confirm (30+ blocks on regtest)
+4. Go back to the dashboard and click **Refresh**
+
+The "Colorable UTXOs" card on the dashboard should now show a non-zero count. Each UTXO can hold multiple RGB allocations.
+
+### Step 4: Issue an RGB Asset (Optional)
+
+If you want to create your own token:
+
+1. On the dashboard, click **Issue New Asset** (or navigate to **Assets** → **Issue New Asset**)
+2. Fill in the form:
+   - **Ticker** — Short symbol, 2-8 characters (e.g. "USDT", "TOKEN")
+   - **Name** — Full name of the asset (e.g. "My Stablecoin")
+   - **Amount** — Total supply to issue
+   - **Precision** — Decimal places (0 = integer tokens, 2 = cents, 8 = like satoshis)
+3. Click **Issue Asset**
+
+The new asset will appear on your Assets page and in the dashboard.
+
+### Step 5: Configure Payment Settings
+
+1. Navigate to **Settings** (gear icon on the dashboard, or sidebar)
+2. Under **Payment Configuration**:
+   - **Accepted Asset** — Select which RGB asset customers must pay with
+   - **Accept any RGB asset** — Check this to accept any RGB asset (not recommended for production)
+3. Under **UTXO Settings** (optional):
+   - **UTXO Count** — How many colorable UTXOs to create at once (default: 4)
+   - **UTXO Size** — Size of each UTXO in satoshis (default: 1000)
+   - **Max Allocations per UTXO** — How many RGB allocations per UTXO (default: 10)
+4. Under **Settlement**:
+   - **Min Confirmations** — Number of blockchain confirmations required before marking a payment as settled (default: 1)
+5. Click **Save Payment Settings**
+
+### Step 6: Accept Payments
+
+Once configured, RGB will appear as a payment method on your invoices:
+
+1. Create an invoice in BTCPay (via UI or API)
+2. On the checkout page, the customer will see an **RGB** payment option
+3. The customer copies the RGB invoice string (starts with `rgb:`)
+4. The customer pays using any RGB-compatible wallet (e.g. Iris Wallet, BitMask)
+5. The invoice will transition through these states:
+   - **New** — Waiting for payment
+   - **Processing** — Payment detected, waiting for blockchain confirmations
+   - **Settled** — Payment fully confirmed
+
+### Monitoring
+
+- **Dashboard** — Overview of BTC balance, colored balance, UTXO count, and asset list
+- **Transfers** — View all incoming and outgoing RGB transfers with status (Pending → Settled)
+- **BTC Transactions** — View on-chain Bitcoin transactions (UTXO creation, RGB sends, etc.)
+- **UTXOs** — See which UTXOs hold RGB allocations and which are available
+
+### Deleting a Wallet
+
+1. Go to **Settings** → scroll to **Danger Zone**
+2. Click **Delete Wallet**
+3. Confirm the action
+
+This removes the wallet from BTCPay (DB records, assets, invoices) but leaves the wallet data directory on disk for backup purposes.
+
+## Invoice Settlement Flow
+
+The plugin follows BTCPay's native two-step payment lifecycle:
+
+```
+Customer pays
+       │
+       ▼
+RGB transfer detected (status: WaitingConfirmations)
+       │
+       ▼
+BTCPay invoice → Processing
+       │
+       ▼ (blockchain confirmations reach threshold)
+       │
+RGB transfer confirmed (status: Settled)
+       │
+       ▼
+BTCPay invoice → Settled
+```
+
+The plugin polls for transfer updates every 10 seconds. The number of confirmations required is configurable in Settings (default: 1).
 
 ## Building from Source
 
@@ -108,11 +192,8 @@ RGB requires "colorable" UTXOs for asset operations:
 ### Build
 
 ```bash
-# Clone with submodules
-git clone --recursive https://github.com/your-org/btcpay-rgb-plugin
-
-# Build
-cd BTCPayServer.Plugins.RGB
+git clone --recursive https://github.com/UTEXO-Protocol/rgb-btcpay-plugin
+cd rgb-btcpay-plugin
 dotnet build
 ```
 
@@ -128,19 +209,19 @@ This plugin is designed for the [BTCPay Plugin Builder](https://github.com/btcpa
 ## Architecture
 
 ```
-BTCPayServer.Plugins.RGB/
+BTCPayServer.Plugins.RgbUtexo/
 ├── Controllers/          # MVC controllers
 ├── Data/                 # EF Core entities & migrations
 ├── Models/               # View models
 ├── PaymentHandler/       # BTCPay payment integration
 ├── Services/
-│   ├── RgbLibService.cs       # rgb-lib-c-sharp wrapper (Lazy Loading)
+│   ├── RgbLibService.cs       # rgb-lib P/Invoke wrapper
 │   ├── RgbLibWalletHandle.cs  # Wallet lifecycle management
 │   ├── RGBWalletService.cs    # Wallet business logic
 │   ├── MemoryWalletSigner.cs  # Local PSBT signing (NBitcoin)
 │   ├── RgbWalletSignerProvider.cs # Signer management
 │   ├── MnemonicProtectionService.cs # Mnemonic encryption
-│   └── RGBInvoiceListener.cs  # Payment detection
+│   └── RGBInvoiceListener.cs  # Payment detection & settlement
 └── Views/                # Razor views
 ```
 
@@ -179,34 +260,49 @@ BTCPayServer.Plugins.RGB/
 
 ## Dependencies
 
-- **RgbLib** v0.3.0-beta.8 - Native rgb-lib bindings
+- **RgbLib** v0.3.0-beta.9 - Native rgb-lib bindings
 - **NBitcoin** - Bitcoin primitives and PSBT signing
 - **Npgsql.EntityFrameworkCore.PostgreSQL** - Database persistence
 
 ## Troubleshooting
 
 ### "InsufficientAllocationSlots"
-Create more colorable UTXOs via RGB Wallet → UTXOs → Create UTXOs
+Create more colorable UTXOs: go to **RGB Wallet** → **UTXOs** → **Create UTXOs**.
 
-### Invoice stays pending after payment
-1. Check Electrum connection (Settings → Test Connection)
-2. Ensure blocks are being mined (regtest)
-3. Click "Refresh" on RGB Wallet page
+### "InsufficientAssignments"
+The wallet has the asset but no spendable balance on colorable UTXOs. Create new UTXOs and wait for confirmations.
+
+### Invoice stays in "Processing"
+The blockchain hasn't reached the required number of confirmations yet. Wait for more blocks to be mined, or reduce Min Confirmations in Settings.
+
+### Invoice stays in "New" after payment
+1. Check Electrum connection: **Settings** → **Test Connection**
+2. Ensure blocks are being mined (relevant for regtest/testnet)
+3. Click **Refresh** on the RGB Wallet dashboard to trigger a manual sync
 
 ### Plugin not loading
-Check BTCPay logs: `docker logs btcpay`
+Check BTCPay logs for errors:
+```bash
+docker logs btcpay
+```
+
+If the plugin was auto-disabled after a crash, delete the disable command:
+```bash
+rm ~/.btcpayserver/Plugins/commands
+```
+Then restart BTCPay Server.
 
 ### Connection errors
-Verify `RGB_ELECTRUM_URL` environment variable or `rgb.json` configuration
+Verify your Electrum server is reachable. Check `RGB_ELECTRUM_URL` environment variable or `rgb.json` configuration.
 
 ## Platform Support
 
 | Platform | Status |
 |----------|--------|
-| Linux x64 | ✅ Supported |
-| macOS ARM64 (Apple Silicon) | ✅ Supported |
-| macOS x64 (Intel) | ❌ Not supported (native library not included) |
-| Windows | ❌ Not supported (native library not included) |
+| Linux x64 | Supported |
+| macOS ARM64 (Apple Silicon) | Supported |
+| macOS x64 (Intel) | Not supported (native library not included) |
+| Windows | Not supported (native library not included) |
 
 ## License
 
@@ -214,5 +310,5 @@ MIT License - See LICENSE file
 
 ## Support
 
-- GitHub Issues: [Create Issue](https://github.com/your-org/btcpay-rgb-plugin/issues)
+- GitHub Issues: [Create Issue](https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues)
 - BTCPay Server Community: https://chat.btcpayserver.org
