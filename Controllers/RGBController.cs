@@ -667,7 +667,8 @@ public class RGBController : Controller
     }
 
     static string TransferStatus(int s) => s switch {
-        0 => "Waiting Counterparty", 1 => "Waiting Confirmations", 2 => "Settled", 3 => "Failed",
+        0 => "Waiting Counterparty", 1 => "Waiting Confirmations", 2 => "Waiting Confirmations",
+        3 => "Settled", 4 => "Failed",
         _ => $"Unknown ({s})"
     };
 

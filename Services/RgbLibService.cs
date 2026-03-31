@@ -359,7 +359,8 @@ public class RgbLibService : IRgbLibService
         cmd.CommandText = @"
             SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
                    (SELECT json_extract(c.assignment, '$.Fungible')
-                    FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
+                    FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1),
+                   t.recipient_type
             FROM transfer t
             JOIN asset_transfer at ON t.asset_transfer_idx = at.idx
             JOIN batch_transfer bt ON at.batch_transfer_idx = bt.idx
@@ -369,13 +370,25 @@ public class RgbLibService : IRgbLibService
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
+            var incoming = reader.GetBoolean(4);
+            var recipientType = reader.IsDBNull(6) ? null : reader.GetString(6);
+            int kind;
+            if (!incoming)
+                kind = 3;
+            else if (recipientType == null)
+                kind = 0;
+            else if (recipientType.Contains("\"Blind\""))
+                kind = 1;
+            else
+                kind = 2;
+
             transfers.Add(new RgbTransfer
             {
                 Idx = reader.GetInt32(0),
                 Status = reader.GetInt32(1),
                 RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
-                Kind = reader.GetBoolean(4) ? 2 : 3,
+                Kind = kind,
                 Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
             });
         }
@@ -636,16 +649,16 @@ class TransferResponse
     {
         "waitingcounterparty" => 0,
         "waitingconfirmations" => 1,
-        "settled" => 2,
-        "failed" => 3,
+        "settled" => 3,
+        "failed" => 4,
         _ => int.TryParse(s, out var n) ? n : -1
     };
     
     static int ParseKind(string? s) => s?.ToLowerInvariant() switch
     {
         "issuance" => 0,
-        "receiveincoming" or "receive_incoming" => 1,
-        "receiveblind" or "receive_blind" => 2,
+        "receiveblind" or "receive_blind" => 1,
+        "receivewitness" or "receive_witness" => 2,
         "send" => 3,
         _ => int.TryParse(s, out var n) ? n : -1
     };
