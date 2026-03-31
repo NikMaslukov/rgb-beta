@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using BTCPayServer.Plugins.RgbUtexo.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using NBitcoin;
 using RgbLib;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
@@ -30,6 +31,7 @@ public class RgbLibService : IRgbLibService
     readonly MethodInfo _createUtxosEndMethod;
     readonly MethodInfo _refreshMethod;
     readonly MethodInfo _listTransactionsMethod;
+    readonly MethodInfo _restoreBackupMethod;
 
     bool _disposed;
 
@@ -58,6 +60,7 @@ public class RgbLibService : IRgbLibService
         _createUtxosEndMethod = _nativeMethodsType.GetMethod("rgblib_create_utxos_end")!;
         _refreshMethod = _nativeMethodsType.GetMethod("rgblib_refresh")!;
         _listTransactionsMethod = _nativeMethodsType.GetMethod("rgblib_list_transactions")!;
+        _restoreBackupMethod = _nativeMethodsType.GetMethod("rgblib_restore_backup")!;
     }
 
     public async Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default)
@@ -135,16 +138,16 @@ public class RgbLibService : IRgbLibService
         }, ct);
     }
 
-    public async Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default)
+    public async Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
-        
+
         return await handle.ExecuteAsync(wallet =>
         {
             ct.ThrowIfCancellationRequested();
-            var balanceJson = wallet.GetBtcBalance(false);
+            var balanceJson = wallet.GetBtcBalance(sync);
             var balance = JsonSerializer.Deserialize<BtcBalanceResponse>(balanceJson);
-            
+
             return new BtcBalance(
                 new BalanceInfo { Settled = balance?.Vanilla?.Settled ?? 0, Future = balance?.Vanilla?.Future ?? 0, Spendable = balance?.Vanilla?.Spendable ?? 0 },
                 new BalanceInfo { Settled = balance?.Colored?.Settled ?? 0, Future = balance?.Colored?.Future ?? 0, Spendable = balance?.Colored?.Spendable ?? 0 }
@@ -421,11 +424,56 @@ public class RgbLibService : IRgbLibService
         }, ct);
     }
 
+    public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+        var tempPath = Path.Combine(Path.GetTempPath(), $"rgb-backup-{walletId}-{Guid.NewGuid():N}.rgb");
+
+        await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            wallet.Backup(tempPath, password);
+        }, ct);
+
+        return tempPath;
+    }
+
+    public void RestoreBackup(string backupPath, string password, string targetDir)
+    {
+        var args = new object?[] { backupPath, password, targetDir };
+        var result = _restoreBackupMethod.Invoke(null, args);
+
+        if (result == null)
+            throw new RgbLibException("restore_backup returned null");
+
+        var cResultType = result.GetType();
+        var isSuccessProp = cResultType.GetProperty("IsSuccess");
+        if (isSuccessProp == null)
+            throw new RgbLibException("restore_backup: cannot read result type");
+
+        var isSuccess = (bool)(isSuccessProp.GetValue(result) ?? false);
+        if (!isSuccess)
+        {
+            var errorMsg = "restore_backup failed";
+            try
+            {
+                var getError = cResultType.GetMethod("GetError");
+                if (getError != null)
+                    errorMsg = getError.Invoke(result, null)?.ToString() ?? errorMsg;
+            }
+            catch (Exception ex)
+            {
+                _log.LogDebug(ex, "Could not extract error from CResult");
+            }
+            throw new RgbLibException(errorMsg);
+        }
+    }
+
     public RgbKeys GenerateKeys(string network)
     {
         var keysJson = RgbLibWallet.GenerateKeys(NetworkHelper.MapNetworkToRgbLibFormat(network));
         var keys = JsonSerializer.Deserialize<GenerateKeysResponse>(keysJson);
-        
+
         return new RgbKeys
         {
             Mnemonic = keys?.Mnemonic ?? "",
@@ -433,6 +481,31 @@ public class RgbLibService : IRgbLibService
             AccountXpubVanilla = keys?.AccountXpubVanilla ?? "",
             AccountXpubColored = keys?.AccountXpubColored ?? "",
             MasterFingerprint = keys?.MasterFingerprint ?? ""
+        };
+    }
+
+    public RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network)
+    {
+        var nbNetwork = NetworkHelper.GetNetwork(network);
+        var mnemonicObj = new Mnemonic(mnemonic, Wordlist.English);
+        var masterKey = mnemonicObj.DeriveExtKey();
+        var fingerprint = masterKey.GetPublicKey().GetHDFingerPrint().ToString();
+
+        var vanillaCoinType = nbNetwork == Network.Main ? 0 : 1;
+        var coloredCoinType = nbNetwork == Network.Main ? 827166 : 827167;
+        var vanillaPath = new KeyPath($"m/86'/{vanillaCoinType}'/0'");
+        var coloredPath = new KeyPath($"m/86'/{coloredCoinType}'/0'");
+
+        var vanillaXpub = masterKey.Derive(vanillaPath).Neuter().ToString(nbNetwork);
+        var coloredXpub = masterKey.Derive(coloredPath).Neuter().ToString(nbNetwork);
+
+        return new RgbKeys
+        {
+            Mnemonic = mnemonic,
+            Xpub = masterKey.Neuter().ToString(nbNetwork),
+            AccountXpubVanilla = vanillaXpub,
+            AccountXpubColored = coloredXpub,
+            MasterFingerprint = fingerprint
         };
     }
 

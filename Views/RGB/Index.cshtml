@@ -23,6 +23,16 @@
 
 <partial name="_StatusMessage" />
 
+@if (Model.PendingSync)
+{
+    <div class="alert alert-info" id="syncBanner">
+        <span class="fa fa-sync fa-spin"></span> Syncing wallet with the network... Balance will appear shortly.
+    </div>
+    <script>
+        setTimeout(function() { window.location.href = window.location.pathname + '?storeId=@Model.StoreId'; }, 5000);
+    </script>
+}
+
 @if (!Model.IsConnected)
 {
     <div class="alert alert-warning">
@@ -144,4 +154,5 @@ else
         </a>
     </div>
 </div>
+
 
