@@ -15,6 +15,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Controllers;
 
@@ -36,15 +37,15 @@ public class RGBController : Controller
     }
 
     [HttpGet]
-    public async Task<IActionResult> Index(string storeId)
+    public async Task<IActionResult> Index(string storeId, bool sync = false)
     {
         var wallet = await _wallets.GetWalletForStoreAsync(storeId);
         if (wallet == null)
         {
             var defaultNetwork = "regtest";
             var networkSettings = NetworkSettings.GetForNetwork(defaultNetwork);
-            return View("Setup", new RGBSetupViewModel 
-            { 
+            return View("Setup", new RGBSetupViewModel
+            {
                 StoreId = storeId,
                 SelectedNetwork = defaultNetwork,
                 AvailableNetworks = NetworkSettings.AvailableNetworks,
@@ -65,6 +66,12 @@ public class RGBController : Controller
 
         try
         {
+            if (sync)
+            {
+                try { await _wallets.RefreshWalletAsync(wallet.Id); }
+                catch (Exception ex) { _log.LogWarning(ex, "Post-restore sync failed"); }
+            }
+
             var (balance, assets, address) = await FetchWalletOverview(wallet.Id);
 
             vm.BtcBalance = balance.Vanilla.Spendable + balance.Colored.Spendable;
@@ -72,6 +79,7 @@ public class RGBController : Controller
             vm.Assets = assets.Select(a => a.ToViewModel()).ToList();
             vm.WalletAddress = address;
             vm.IsConnected = true;
+            vm.PendingSync = sync && vm.BtcBalance == 0;
         }
         catch (Exception ex)
         {
@@ -112,6 +120,9 @@ public class RGBController : Controller
     [HttpPost("setup")]
     public async Task<IActionResult> SetupWallet(string storeId, RGBSetupViewModel model)
     {
+        if (await _wallets.GetWalletForStoreAsync(storeId) != null)
+            return RedirectToAction(nameof(Index), new { storeId });
+
         if (!ModelState.IsValid)
         {
             model.AvailableNetworks = NetworkSettings.AvailableNetworks;
@@ -132,6 +143,98 @@ public class RGBController : Controller
             ModelState.AddModelError("", ex.Message);
             model.AvailableNetworks = NetworkSettings.AvailableNetworks;
             return View("Setup", model);
+        }
+    }
+
+    [HttpPost("restore")]
+    public async Task<IActionResult> RestoreWallet(string storeId, RGBSetupViewModel model)
+    {
+        if (await _wallets.GetWalletForStoreAsync(storeId) != null)
+            return RedirectToAction(nameof(Index), new { storeId });
+
+        if (!ValidateMnemonic(model.Mnemonic))
+        {
+            model.IsRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+
+        try
+        {
+            var maxAlloc = model.MaxAllocationsPerUtxo > 0 ? model.MaxAllocationsPerUtxo : 10;
+            var wallet = await _wallets.RestoreWalletAsync(storeId, model.Mnemonic!.Trim(), model.WalletName, model.SelectedNetwork, maxAlloc);
+            await EnableRgbPaymentMethod(storeId, wallet.Id, maxAlloc);
+
+            TempData["SuccessMessage"] = $"RGB wallet restored on {model.SelectedNetwork}!";
+            return RedirectToAction(nameof(Index), new { storeId, sync = true });
+        }
+        catch (Exception ex)
+        {
+            ModelState.AddModelError("", ex.Message);
+            model.IsRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+    }
+
+    [HttpPost("restore-backup")]
+    [RequestSizeLimit(50_000_000)]
+    public async Task<IActionResult> RestoreFromBackup(string storeId, RGBSetupViewModel model)
+    {
+        if (await _wallets.GetWalletForStoreAsync(storeId) != null)
+            return RedirectToAction(nameof(Index), new { storeId });
+
+        if (!ValidateMnemonic(model.Mnemonic))
+        {
+            model.IsBackupRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+
+        if (model.BackupFile == null || model.BackupFile.Length == 0)
+        {
+            ModelState.AddModelError("BackupFile", "Backup file is required");
+            model.IsBackupRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+
+        if (string.IsNullOrWhiteSpace(model.BackupPassword))
+        {
+            ModelState.AddModelError("BackupPassword", "Backup password is required");
+            model.IsBackupRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+
+        var tempPath = Path.Combine(Path.GetTempPath(), $"rgb-restore-{Guid.NewGuid():N}.rgb");
+        try
+        {
+            await using (var stream = System.IO.File.Create(tempPath))
+            {
+                await model.BackupFile.CopyToAsync(stream);
+            }
+
+            var maxAlloc = model.MaxAllocationsPerUtxo > 0 ? model.MaxAllocationsPerUtxo : 10;
+            var wallet = await _wallets.RestoreFromBackupAsync(
+                storeId, model.Mnemonic!.Trim(), tempPath, model.BackupPassword,
+                model.WalletName, model.SelectedNetwork, maxAlloc);
+            await EnableRgbPaymentMethod(storeId, wallet.Id, maxAlloc);
+
+            TempData["SuccessMessage"] = $"RGB wallet restored from backup on {model.SelectedNetwork}!";
+            return RedirectToAction(nameof(Index), new { storeId, sync = true });
+        }
+        catch (Exception ex)
+        {
+            ModelState.AddModelError("", $"Restore failed: {ex.Message}");
+            model.IsBackupRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(tempPath))
+                System.IO.File.Delete(tempPath);
         }
     }
 
@@ -346,6 +449,36 @@ public class RGBController : Controller
         return RedirectToAction(nameof(Index), new { storeId });
     }
 
+    [HttpPost("backup")]
+    public async Task<IActionResult> BackupWallet(string storeId, string password)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        if (string.IsNullOrWhiteSpace(password) || password.Length < 8)
+        {
+            TempData["ErrorMessage"] = "Password must be at least 8 characters";
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
+
+        string? tempPath = null;
+        try
+        {
+            tempPath = await _wallets.BackupWalletAsync(wallet.Id, password);
+            var stream = new FileStream(tempPath, FileMode.Open, FileAccess.Read,
+                FileShare.Read, 4096, FileOptions.DeleteOnClose);
+            return File(stream, "application/octet-stream", $"rgb-wallet-backup-{DateTime.UtcNow:yyyyMMdd}.rgb");
+        }
+        catch (Exception ex)
+        {
+            if (tempPath != null && System.IO.File.Exists(tempPath))
+                System.IO.File.Delete(tempPath);
+            _log.LogError(ex, "Backup failed for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = $"Backup failed: {ex.Message}";
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
+    }
+
     [HttpGet("settings")]
     public async Task<IActionResult> Settings(string storeId)
     {
@@ -389,6 +522,26 @@ public class RGBController : Controller
         }
 
         return View(vm);
+    }
+
+    [HttpPost("view-seed")]
+    public async Task<IActionResult> ViewSeed(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return NotFound();
+
+        try
+        {
+            var mnemonic = HttpContext.RequestServices
+                .GetRequiredService<MnemonicProtectionService>()
+                .Unprotect(wallet.EncryptedMnemonic);
+            return Json(new { seed = mnemonic });
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Failed to decrypt seed for wallet {WalletId}", wallet.Id);
+            return StatusCode(500, new { error = "Failed to decrypt seed phrase" });
+        }
     }
 
     [HttpPost("test-connection")]
@@ -472,6 +625,40 @@ public class RGBController : Controller
         await _stores.UpdateStore(store);
     }
 
+    bool ValidateMnemonic(string? mnemonic)
+    {
+        if (string.IsNullOrWhiteSpace(mnemonic))
+        {
+            ModelState.AddModelError("Mnemonic", "Recovery phrase is required");
+            return false;
+        }
+
+        var words = mnemonic.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length is not (12 or 15 or 18 or 21 or 24))
+        {
+            ModelState.AddModelError("Mnemonic", "Recovery phrase must be 12, 15, 18, 21 or 24 words");
+            return false;
+        }
+
+        try
+        {
+            _ = new Mnemonic(mnemonic.Trim(), NBitcoin.Wordlist.English);
+        }
+        catch
+        {
+            ModelState.AddModelError("Mnemonic", "Invalid BIP39 recovery phrase");
+            return false;
+        }
+
+        return true;
+    }
+
+    void PopulateSetupModel(RGBSetupViewModel model)
+    {
+        model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+        model.AllNetworkSettings = BuildAllNetworkSettings();
+    }
+
     static RGBPaymentMethodConfig? GetRgbConfig(StoreData? store)
     {
         if (store == null) return null;
@@ -480,7 +667,8 @@ public class RGBController : Controller
     }
 
     static string TransferStatus(int s) => s switch {
-        0 => "Waiting Counterparty", 1 => "Waiting Confirmations", 2 => "Settled", 3 => "Failed",
+        0 => "Waiting Counterparty", 1 => "Waiting Confirmations", 2 => "Waiting Confirmations",
+        3 => "Settled", 4 => "Failed",
         _ => $"Unknown ({s})"
     };
 

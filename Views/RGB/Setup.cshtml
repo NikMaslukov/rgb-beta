@@ -14,56 +14,208 @@
     <div class="col-lg-8">
         <div class="card">
             <div class="card-body">
-                <h4 class="card-title mb-4">Create Utexo Wallet</h4>
-                
                 <p class="text-muted mb-4">
-                    Accept native USDT and digital asset payments powered by Utexo. 
-                    Create a wallet to start receiving payments.
+                    Accept native USDT and digital asset payments powered by Utexo.
                 </p>
 
-                <form asp-action="SetupWallet" asp-route-storeId="@Model.StoreId" method="post">
-                    <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-                    
-                    <div class="mb-3">
-                        <label asp-for="WalletName" class="form-label"></label>
-                        <input asp-for="WalletName" class="form-control" placeholder="My Utexo Wallet" />
-                        <span asp-validation-for="WalletName" class="text-danger"></span>
-                    </div>
-                    
-                    <div class="mb-3">
-                        <label asp-for="SelectedNetwork" class="form-label">Network</label>
-                        <select asp-for="SelectedNetwork" class="form-select" id="networkSelect">
-                            @foreach (var network in Model.AvailableNetworks)
-                            {
-                                <option value="@network" selected="@(network == Model.SelectedNetwork)">@network</option>
-                            }
-                        </select>
-                        <div class="form-text">Select the Bitcoin network for this wallet.</div>
+                <ul class="nav nav-tabs mb-4" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link @(Model.IsRestore || Model.IsBackupRestore ? "" : "active")" id="create-tab" data-bs-toggle="tab" data-bs-target="#create-pane" type="button" role="tab">
+                            <i class="fa fa-plus"></i> Create New Wallet
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link @(Model.IsRestore ? "active" : "")" id="restore-tab" data-bs-toggle="tab" data-bs-target="#restore-pane" type="button" role="tab">
+                            <i class="fa fa-undo"></i> Restore from Seed
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link @(Model.IsBackupRestore ? "active" : "")" id="backup-restore-tab" data-bs-toggle="tab" data-bs-target="#backup-restore-pane" type="button" role="tab">
+                            <i class="fa fa-upload"></i> Restore from Backup
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content">
+                    <div class="tab-pane fade @(Model.IsRestore || Model.IsBackupRestore ? "" : "show active")" id="create-pane" role="tabpanel">
+                        <form asp-action="SetupWallet" asp-route-storeId="@Model.StoreId" method="post">
+                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+                            <div class="mb-3">
+                                <label asp-for="WalletName" class="form-label"></label>
+                                <input asp-for="WalletName" class="form-control" placeholder="My Utexo Wallet" />
+                                <span asp-validation-for="WalletName" class="text-danger"></span>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Network</label>
+                                <select name="SelectedNetwork" class="form-select networkSelect">
+                                    @foreach (var network in Model.AvailableNetworks)
+                                    {
+                                        <option value="@network" selected="@(network == Model.SelectedNetwork)">@network</option>
+                                    }
+                                </select>
+                                <div class="form-text">Select the Bitcoin network for this wallet.</div>
+                            </div>
+
+                            <div class="alert alert-info networkInfo">
+                                <strong>Network Configuration:</strong>
+                                <ul class="mb-0 mt-2">
+                                    <li>Electrum: <code class="electrumUrl">@Model.ElectrumUrl</code></li>
+                                    <li>Proxy: <code class="proxyUrl">@Model.ProxyEndpoint</code></li>
+                                </ul>
+                            </div>
+
+                            <hr class="my-4" />
+                            <h5 class="mb-3"><i class="fa fa-cog"></i> Advanced Settings</h5>
+
+                            <div class="mb-3">
+                                <label asp-for="MaxAllocationsPerUtxo" class="form-label">Max Allocations per UTXO</label>
+                                <input asp-for="MaxAllocationsPerUtxo" class="form-control" type="number" min="1" max="50" style="max-width: 150px;" />
+                                <div class="form-text">
+                                    Number of RGB allocations each UTXO can hold (1-50). Higher values = fewer UTXOs needed for receiving payments.
+                                </div>
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">
+                                <span class="fa fa-wallet"></span> Create Wallet
+                            </button>
+                        </form>
                     </div>
 
-                    <div class="alert alert-info" id="networkInfo">
-                        <strong>Network Configuration:</strong>
-                        <ul class="mb-0 mt-2">
-                            <li>Electrum: <code id="electrumUrl">@Model.ElectrumUrl</code></li>
-                            <li>Proxy: <code id="proxyUrl">@Model.ProxyEndpoint</code></li>
-                        </ul>
+                    <div class="tab-pane fade @(Model.IsRestore ? "show active" : "")" id="restore-pane" role="tabpanel">
+                        <form asp-action="RestoreWallet" asp-route-storeId="@Model.StoreId" method="post">
+                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+                            <input type="hidden" name="IsRestore" value="true" />
+
+                            <div class="mb-3">
+                                <label asp-for="WalletName" class="form-label"></label>
+                                <input name="WalletName" class="form-control" value="@Model.WalletName" placeholder="My Utexo Wallet" />
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Recovery Phrase</label>
+                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces">@Model.Mnemonic</textarea>
+                                <span asp-validation-for="Mnemonic" class="text-danger"></span>
+                                <div class="form-text">Enter the BIP39 recovery phrase (seed words) of the wallet you want to restore.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Network</label>
+                                <select name="SelectedNetwork" class="form-select networkSelect">
+                                    @foreach (var network in Model.AvailableNetworks)
+                                    {
+                                        <option value="@network" selected="@(network == Model.SelectedNetwork)">@network</option>
+                                    }
+                                </select>
+                                <div class="form-text">Select the Bitcoin network for this wallet.</div>
+                            </div>
+
+                            <div class="alert alert-info networkInfo">
+                                <strong>Network Configuration:</strong>
+                                <ul class="mb-0 mt-2">
+                                    <li>Electrum: <code class="electrumUrl">@Model.ElectrumUrl</code></li>
+                                    <li>Proxy: <code class="proxyUrl">@Model.ProxyEndpoint</code></li>
+                                </ul>
+                            </div>
+
+                            <hr class="my-4" />
+                            <h5 class="mb-3"><i class="fa fa-cog"></i> Advanced Settings</h5>
+
+                            <div class="mb-3">
+                                <label class="form-label">Max Allocations per UTXO</label>
+                                <input name="MaxAllocationsPerUtxo" class="form-control" type="number" min="1" max="50" value="@Model.MaxAllocationsPerUtxo" style="max-width: 150px;" />
+                                <div class="form-text">
+                                    Number of RGB allocations each UTXO can hold (1-50). Higher values = fewer UTXOs needed for receiving payments.
+                                </div>
+                            </div>
+
+                            <div class="alert alert-warning">
+                                <i class="fa fa-exclamation-triangle"></i>
+                                <strong>Note:</strong> Restoring a wallet will re-derive keys from your seed phrase.
+                                The wallet will need to sync with the network to discover existing transactions and balances.
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">
+                                <span class="fa fa-undo"></span> Restore Wallet
+                            </button>
+                        </form>
                     </div>
 
-                    <hr class="my-4" />
-                    <h5 class="mb-3"><i class="fa fa-cog"></i> Advanced Settings</h5>
-                    
-                    <div class="mb-3">
-                        <label asp-for="MaxAllocationsPerUtxo" class="form-label">Max Allocations per UTXO</label>
-                        <input asp-for="MaxAllocationsPerUtxo" class="form-control" type="number" min="1" max="50" style="max-width: 150px;" />
-                        <div class="form-text">
-                            Number of RGB allocations each UTXO can hold (1-50). Higher values = fewer UTXOs needed for receiving payments.
-                        </div>
-                    </div>
+                    <div class="tab-pane fade @(Model.IsBackupRestore ? "show active" : "")" id="backup-restore-pane" role="tabpanel">
+                        <form asp-action="RestoreFromBackup" asp-route-storeId="@Model.StoreId" method="post" enctype="multipart/form-data">
+                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+                            <input type="hidden" name="IsBackupRestore" value="true" />
 
-                    <button type="submit" class="btn btn-primary">
-                        <span class="fa fa-wallet"></span> Create Wallet
-                    </button>
-                </form>
+                            <div class="mb-3">
+                                <label asp-for="WalletName" class="form-label"></label>
+                                <input name="WalletName" class="form-control" value="@Model.WalletName" placeholder="My Utexo Wallet" />
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Recovery Phrase</label>
+                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces">@(Model.IsBackupRestore ? Model.Mnemonic : "")</textarea>
+                                <span asp-validation-for="Mnemonic" class="text-danger"></span>
+                                <div class="form-text">Your seed phrase is needed to restore signing keys for the wallet.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Backup File</label>
+                                <input type="file" name="BackupFile" class="form-control" accept=".rgb" />
+                                <span asp-validation-for="BackupFile" class="text-danger"></span>
+                                <div class="form-text">Upload the <code>.rgb</code> backup file previously downloaded from wallet settings.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Backup Password</label>
+                                <input type="password" name="BackupPassword" class="form-control" style="max-width: 400px;"
+                                       placeholder="Password used when creating the backup" />
+                                <span asp-validation-for="BackupPassword" class="text-danger"></span>
+                                <div class="form-text">Enter the password that was used to encrypt this backup.</div>
+                            </div>
+
+                            <div class="mb-3">
+                                <label class="form-label">Network</label>
+                                <select name="SelectedNetwork" class="form-select networkSelect">
+                                    @foreach (var network in Model.AvailableNetworks)
+                                    {
+                                        <option value="@network" selected="@(network == Model.SelectedNetwork)">@network</option>
+                                    }
+                                </select>
+                                <div class="form-text">Select the Bitcoin network for this wallet.</div>
+                            </div>
+
+                            <div class="alert alert-info networkInfo">
+                                <strong>Network Configuration:</strong>
+                                <ul class="mb-0 mt-2">
+                                    <li>Electrum: <code class="electrumUrl">@Model.ElectrumUrl</code></li>
+                                    <li>Proxy: <code class="proxyUrl">@Model.ProxyEndpoint</code></li>
+                                </ul>
+                            </div>
+
+                            <hr class="my-4" />
+                            <h5 class="mb-3"><i class="fa fa-cog"></i> Advanced Settings</h5>
+
+                            <div class="mb-3">
+                                <label class="form-label">Max Allocations per UTXO</label>
+                                <input name="MaxAllocationsPerUtxo" class="form-control" type="number" min="1" max="50" value="@Model.MaxAllocationsPerUtxo" style="max-width: 150px;" />
+                                <div class="form-text">
+                                    Number of RGB allocations each UTXO can hold (1-50). Higher values = fewer UTXOs needed for receiving payments.
+                                </div>
+                            </div>
+
+                            <div class="alert alert-warning">
+                                <i class="fa fa-exclamation-triangle"></i>
+                                <strong>Note:</strong> This restores your complete wallet state including RGB assets, transfers, and consignments
+                                from an encrypted backup file. Both the seed phrase and backup password are required.
+                            </div>
+
+                            <button type="submit" class="btn btn-primary">
+                                <span class="fa fa-upload"></span> Restore from Backup
+                            </button>
+                        </form>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -72,14 +224,17 @@
 @section PageFootContent {
 <script>
     const networkSettings = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.AllNetworkSettings));
-    
-    document.getElementById('networkSelect').addEventListener('change', function() {
-        const network = this.value;
-        const settings = networkSettings[network];
-        if (settings) {
-            document.getElementById('electrumUrl').textContent = settings.electrum;
-            document.getElementById('proxyUrl').textContent = settings.proxy;
-        }
+
+    document.querySelectorAll('.networkSelect').forEach(function(sel) {
+        sel.addEventListener('change', function() {
+            var settings = networkSettings[this.value];
+            if (!settings) return;
+            var card = this.closest('.tab-pane') || this.closest('.card-body');
+            var elUrl = card.querySelector('.electrumUrl');
+            var prUrl = card.querySelector('.proxyUrl');
+            if (elUrl) elUrl.textContent = settings.electrum;
+            if (prUrl) prUrl.textContent = settings.proxy;
+        });
     });
 </script>
 }

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using Microsoft.AspNetCore.Http;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Models;
 
@@ -26,6 +27,18 @@ public class RGBSetupViewModel : StoreViewModel
     [Display(Name = "Max Allocations per UTXO")]
     [Range(1, 50)]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
+
+    public bool IsRestore { get; set; }
+    public bool IsBackupRestore { get; set; }
+
+    [Display(Name = "Recovery Phrase")]
+    public string? Mnemonic { get; set; }
+
+    [Display(Name = "Backup File")]
+    public IFormFile? BackupFile { get; set; }
+
+    [Display(Name = "Backup Password")]
+    public string? BackupPassword { get; set; }
 }
 
 public class NetworkSettingsDto
@@ -45,6 +58,7 @@ public class RGBIndexViewModel : StoreViewModel
     public List<RGBAssetViewModel> Assets { get; set; } = [];
     public bool IsConnected { get; set; }
     public string? ConnectionError { get; set; }
+    public bool PendingSync { get; set; }
 }
 
 public class RGBAssetsViewModel : StoreViewModel

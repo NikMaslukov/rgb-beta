@@ -62,6 +62,47 @@ public class RGBWalletService
         return wallet;
     }
 
+    public async Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string? name = null, string? selectedNetwork = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
+    {
+        var walletNetwork = selectedNetwork ?? _cfg.Network;
+        var keys = _rgbLib.RestoreKeysFromMnemonic(mnemonic, walletNetwork);
+        var network = NetworkHelper.GetNetwork(walletNetwork);
+
+        var wallet = new RGBWallet
+        {
+            Id = Guid.NewGuid().ToString(),
+            StoreId = storeId,
+            Name = name ?? "RGB Wallet",
+            XpubVanilla = keys.AccountXpubVanilla,
+            XpubColored = keys.AccountXpubColored,
+            MasterFingerprint = keys.MasterFingerprint,
+            EncryptedMnemonic = _mnemonicProtection.Protect(mnemonic),
+            Network = walletNetwork,
+            CreatedAt = DateTimeOffset.UtcNow,
+            MaxAllocationsPerUtxo = maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo
+        };
+
+        await using var ctx = _db.CreateContext();
+        ctx.RGBWallets.Add(wallet);
+        await ctx.SaveChangesAsync(ct);
+
+        _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+        ClearSensitiveString(mnemonic);
+
+        try
+        {
+            await _rgbLib.RefreshAsync(wallet.Id, ct);
+            await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Post-restore sync failed for wallet {Id}", wallet.Id);
+        }
+
+        _log.LogInformation("restored wallet {Id} for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
+        return wallet;
+    }
+
     public async Task<RGBWallet?> GetWalletAsync(string id, CancellationToken ct = default)
     {
         await using var ctx = _db.CreateContext();
@@ -80,10 +121,10 @@ public class RGBWalletService
         return await _rgbLib.GetAddressAsync(walletId, ct);
     }
 
-    public async Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default)
+    public async Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false)
     {
         await GetWalletOrThrow(walletId, ct);
-        return await _rgbLib.GetBtcBalanceAsync(walletId, ct);
+        return await _rgbLib.GetBtcBalanceAsync(walletId, ct, sync: sync);
     }
 
     public async Task<int> CreateColorableUtxosAsync(string walletId, int count = 4, int size = 1000, CancellationToken ct = default)
@@ -176,12 +217,83 @@ public class RGBWalletService
     {
         await GetWalletOrThrow(walletId, ct);
         await _rgbLib.RefreshAsync(walletId, ct);
+        await _rgbLib.GetBtcBalanceAsync(walletId, ct, sync: true);
     }
 
     public async Task<List<RgbTransfer>> GetTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
         return await _rgbLib.ListTransfersAsync(walletId, assetId, ct);
+    }
+
+    public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
+    {
+        await GetWalletOrThrow(walletId, ct);
+        return await _rgbLib.BackupWalletAsync(walletId, password, ct);
+    }
+
+    public async Task<RGBWallet> RestoreFromBackupAsync(string storeId, string mnemonic, string backupPath, string password, string? name = null, string? selectedNetwork = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
+    {
+        var walletNetwork = selectedNetwork ?? _cfg.Network;
+        var keys = _rgbLib.RestoreKeysFromMnemonic(mnemonic, walletNetwork);
+        var network = NetworkHelper.GetNetwork(walletNetwork);
+
+        var wallet = new RGBWallet
+        {
+            Id = Guid.NewGuid().ToString(),
+            StoreId = storeId,
+            Name = name ?? "RGB Wallet",
+            XpubVanilla = keys.AccountXpubVanilla,
+            XpubColored = keys.AccountXpubColored,
+            MasterFingerprint = keys.MasterFingerprint,
+            EncryptedMnemonic = _mnemonicProtection.Protect(mnemonic),
+            Network = walletNetwork,
+            CreatedAt = DateTimeOffset.UtcNow,
+            MaxAllocationsPerUtxo = maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo
+        };
+
+        var walletDataDir = Path.Combine(_cfg.RgbDataDir, wallet.Id);
+        Directory.CreateDirectory(walletDataDir);
+
+        try
+        {
+            _rgbLib.RestoreBackup(backupPath, password, walletDataDir);
+        }
+        catch
+        {
+            try { Directory.Delete(walletDataDir, true); }
+            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after restore failure", walletDataDir); }
+            throw;
+        }
+
+        try
+        {
+            await using var ctx = _db.CreateContext();
+            ctx.RGBWallets.Add(wallet);
+            await ctx.SaveChangesAsync(ct);
+        }
+        catch
+        {
+            try { Directory.Delete(walletDataDir, true); }
+            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
+            throw;
+        }
+
+        _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+        ClearSensitiveString(mnemonic);
+
+        try
+        {
+            await _rgbLib.RefreshAsync(wallet.Id, ct);
+            await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Post-restore sync failed for wallet {Id}", wallet.Id);
+        }
+
+        _log.LogInformation("restored wallet {Id} from backup for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
+        return wallet;
     }
 
     public async Task DeleteWalletAsync(string walletId, CancellationToken ct = default)
