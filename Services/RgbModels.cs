@@ -93,3 +93,13 @@ public class BtcTxConfirmationTime
     [JsonPropertyName("timestamp")] public long Timestamp { get; set; }
 }
 
+public class RgbInvoiceData
+{
+    [JsonPropertyName("recipient_id")] public string RecipientId { get; set; } = "";
+    [JsonPropertyName("asset_id")] public string? AssetId { get; set; }
+    [JsonPropertyName("amount")] public long? Amount { get; set; }
+    [JsonPropertyName("network")] public string Network { get; set; } = "";
+    [JsonPropertyName("expiration_timestamp")] public long ExpirationTimestamp { get; set; }
+    [JsonPropertyName("transport_endpoints")] public List<string> TransportEndpoints { get; set; } = [];
+}
+

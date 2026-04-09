@@ -21,6 +21,10 @@ public interface IRgbLibService : IDisposable
 
     Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default);
 
+    Task<string> SendBeginAsync(string walletId, string recipientMapJson, float feeRate, int minConfirmations = 1, CancellationToken ct = default);
+    Task<string> SendEndAsync(string walletId, string signedPsbt, CancellationToken ct = default);
+    RgbInvoiceData DecodeInvoice(string invoiceString);
+
     Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default);
     void RestoreBackup(string backupPath, string password, string targetDir);
 

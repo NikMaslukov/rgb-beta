@@ -22,7 +22,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
     public override IBTCPayServerPlugin.PluginDependency[] Dependencies =>
     [
-        new() { Identifier = nameof(BTCPayServer), Condition = ">=2.1.0" }
+        new() { Identifier = nameof(BTCPayServer), Condition = ">=2.3.7" }
     ];
 
     public override void Execute(IServiceCollection services)

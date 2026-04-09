@@ -6,9 +6,14 @@
 <div class="sticky-header-setup"></div>
 <div class="sticky-header d-flex align-items-center justify-content-between">
     <h2>@ViewData["Title"]</h2>
-    <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
-        <span class="fa fa-arrow-left"></span> Back
-    </a>
+    <div class="d-flex gap-2">
+        <a asp-action="SendAsset" asp-route-storeId="@Model.StoreId" class="btn btn-primary">
+            <span class="fa fa-paper-plane"></span> Send Asset
+        </a>
+        <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+            <span class="fa fa-arrow-left"></span> Back
+        </a>
+    </div>
 </div>
 
 <partial name="_StatusMessage" />
@@ -19,36 +24,51 @@
         <table class="table table-hover">
             <thead>
                 <tr>
-                    <th>#</th>
                     <th>Asset</th>
                     <th>Type</th>
-                    <th>Status</th>
                     <th>Amount</th>
                     <th>Transaction</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach (var transfer in Model.Transfers.OrderByDescending(t => t.Idx))
                 {
+                    var isSend = transfer.Kind == "Send";
+                    var isSettled = transfer.Status == "Settled";
                     <tr>
-                        <td>@transfer.Idx</td>
-                        <td><strong>@transfer.AssetTicker</strong></td>
+                        <td><span class="badge bg-primary">@transfer.AssetTicker</span></td>
                         <td>
-                            @if (transfer.Kind == "Receive Blind" || transfer.Kind == "Receive Witness")
+                            @if (isSend)
                             {
-                                <span class="badge bg-success">@transfer.Kind</span>
+                                <span class="badge bg-danger">@transfer.Kind</span>
                             }
-                            else if (transfer.Kind == "Send")
-                            {
-                                <span class="badge bg-primary">@transfer.Kind</span>
-                            }
-                            else
+                            else if (transfer.Kind == "Issuance")
                             {
                                 <span class="badge bg-info">@transfer.Kind</span>
                             }
+                            else
+                            {
+                                <span class="badge bg-success">@transfer.Kind</span>
+                            }
                         </td>
                         <td>
-                            @if (transfer.Status == "Settled")
+                            <span class="@(isSend ? "text-danger" : "text-success")@(isSettled ? "" : " opacity-50")">
+                                @(isSend ? "-" : "+")@transfer.Amount.ToString("N0")
+                            </span>
+                        </td>
+                        <td>
+                            @if (!string.IsNullOrEmpty(transfer.Txid))
+                            {
+                                <code class="small text-break">@transfer.Txid</code>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td>
+                            @if (isSettled)
                             {
                                 <span class="badge bg-success">@transfer.Status</span>
                             }
@@ -59,17 +79,6 @@
                             else
                             {
                                 <span class="badge bg-warning">@transfer.Status</span>
-                            }
-                        </td>
-                        <td>@transfer.Amount.ToString("N0")</td>
-                        <td>
-                            @if (!string.IsNullOrEmpty(transfer.Txid))
-                            {
-                                <code class="small">@transfer.Txid.Substring(0, 16)...</code>
-                            }
-                            else
-                            {
-                                <span class="text-muted">-</span>
                             }
                         </td>
                     </tr>
@@ -84,4 +93,3 @@ else
         No transfers yet. Transfers will appear here when you send or receive RGB assets.
     </div>
 }
-

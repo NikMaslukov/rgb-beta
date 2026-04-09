@@ -32,6 +32,8 @@ public class RgbLibService : IRgbLibService
     readonly MethodInfo _refreshMethod;
     readonly MethodInfo _listTransactionsMethod;
     readonly MethodInfo _restoreBackupMethod;
+    readonly MethodInfo _sendBeginMethod;
+    readonly MethodInfo _sendEndMethod;
 
     bool _disposed;
 
@@ -61,6 +63,8 @@ public class RgbLibService : IRgbLibService
         _refreshMethod = _nativeMethodsType.GetMethod("rgblib_refresh")!;
         _listTransactionsMethod = _nativeMethodsType.GetMethod("rgblib_list_transactions")!;
         _restoreBackupMethod = _nativeMethodsType.GetMethod("rgblib_restore_backup")!;
+        _sendBeginMethod = _nativeMethodsType.GetMethod("rgblib_send_begin")!;
+        _sendEndMethod = _nativeMethodsType.GetMethod("rgblib_send_end")!;
     }
 
     public async Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default)
@@ -358,8 +362,14 @@ public class RgbLibService : IRgbLibService
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
-                   (SELECT json_extract(c.assignment, '$.Fungible')
-                    FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1),
+                   COALESCE(
+                       (SELECT json_extract(c.assignment, '$.Fungible')
+                        FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type = 4 LIMIT 1),
+                       (SELECT json_extract(c.assignment, '$.Fungible')
+                        FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type != 3 LIMIT 1),
+                       (SELECT json_extract(c.assignment, '$.Fungible')
+                        FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
+                   ),
                    t.recipient_type
             FROM transfer t
             JOIN asset_transfer at ON t.asset_transfer_idx = at.idx
@@ -437,6 +447,58 @@ public class RgbLibService : IRgbLibService
         }, ct);
     }
 
+    public async Task<string> SendBeginAsync(string walletId, string recipientMapJson, float feeRate, int minConfirmations = 1, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        return await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var walletStruct = _walletField.GetValue(wallet)!;
+            var onlineStruct = _onlineField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString() };
+            var result = _sendBeginMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+            _onlineField.SetValue(wallet, args[1]);
+
+            var psbt = GetNativeResult(result);
+            if (psbt == null)
+                throw new RgbLibException(GetNativeError(result) ?? "send_begin failed");
+
+            return psbt;
+        }, ct);
+    }
+
+    public async Task<string> SendEndAsync(string walletId, string signedPsbt, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        return await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var walletStruct = _walletField.GetValue(wallet)!;
+            var onlineStruct = _onlineField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct, onlineStruct, signedPsbt.Trim('"'), false };
+            var result = _sendEndMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+            _onlineField.SetValue(wallet, args[1]);
+
+            var json = GetNativeResult(result);
+            if (json == null)
+                throw new RgbLibException(GetNativeError(result) ?? "send_end failed");
+
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("txid", out var txidProp))
+                return txidProp.GetString() ?? json;
+
+            return json;
+        }, ct);
+    }
+
     public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
@@ -479,6 +541,44 @@ public class RgbLibService : IRgbLibService
                 _log.LogDebug(ex, "Could not extract error from CResult");
             }
             throw new RgbLibException(errorMsg);
+        }
+    }
+
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern CResult rgblib_invoice_new([MarshalAs(UnmanagedType.LPUTF8Str)] string invoiceString);
+
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern CResultString rgblib_invoice_data(ref COpaqueStruct invoice);
+
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern void free_invoice(COpaqueStruct invoice);
+
+    public RgbInvoiceData DecodeInvoice(string invoiceString)
+    {
+        var newResult = rgblib_invoice_new(invoiceString);
+        if (newResult.result != CResultValue.Ok)
+        {
+            throw new RgbLibException("Invalid RGB invoice");
+        }
+
+        var invoiceStruct = newResult.inner;
+        try
+        {
+            var dataResult = rgblib_invoice_data(ref invoiceStruct);
+            var json = (string?)null;
+            if (dataResult.result == CResultValue.Ok && dataResult.inner != IntPtr.Zero)
+                json = Marshal.PtrToStringUTF8(dataResult.inner);
+
+            if (json == null)
+                throw new RgbLibException("Failed to decode invoice data");
+
+            _log.LogDebug("Decoded invoice: {Json}", json);
+            return JsonSerializer.Deserialize<RgbInvoiceData>(json)
+                   ?? throw new RgbLibException("Failed to parse invoice data JSON");
+        }
+        finally
+        {
+            free_invoice(invoiceStruct);
         }
     }
 

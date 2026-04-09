@@ -39,6 +39,20 @@
                    asp-route-storeId="@storeId">Transfers</a>
             </li>
             <li class="nav-item nav-item-sub">
+                <a id="StoreNav-RGB-SendAsset"
+                   class="nav-link @ViewData.ActivePageClass("SendAsset", "RGB")"
+                   asp-controller="RGB"
+                   asp-action="SendAsset"
+                   asp-route-storeId="@storeId">Send Asset</a>
+            </li>
+            <li class="nav-item nav-item-sub">
+                <a id="StoreNav-RGB-SendBtc"
+                   class="nav-link @ViewData.ActivePageClass("SendBtc", "RGB")"
+                   asp-controller="RGB"
+                   asp-action="SendBtc"
+                   asp-route-storeId="@storeId">Send BTC</a>
+            </li>
+            <li class="nav-item nav-item-sub">
                 <a id="StoreNav-RGB-BtcTransactions"
                    class="nav-link @ViewData.ActivePageClass("BtcTransactions", "RGB")"
                    asp-controller="RGB"

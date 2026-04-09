@@ -1,5 +1,6 @@
 using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Data;
 
@@ -7,6 +8,12 @@ public class RGBPluginDbContext : DbContext
 {
     public RGBPluginDbContext(DbContextOptions<RGBPluginDbContext> options) : base(options)
     {
+    }
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+    {
+        base.OnConfiguring(optionsBuilder);
+        optionsBuilder.ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));
     }
 
     public DbSet<RGBWallet> RGBWallets { get; set; } = null!;

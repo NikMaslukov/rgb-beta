@@ -27,29 +27,44 @@
 </div>
 
 @{
-    var colorableEmpty = Model.Utxos.Count(u => u.Colorable && !u.HasAllocations);
-    var colorableUsed = Model.Utxos.Count(u => u.Colorable && u.HasAllocations);
+    var maxAlloc = Model.MaxAllocationsPerUtxo;
+    var colorable = Model.Utxos.Where(u => u.Colorable).ToList();
+    var slotsFromColorings = colorable.Sum(u => Math.Max(0, maxAlloc - u.Allocations.Count));
+    var freeSlots = Math.Max(0, slotsFromColorings - Model.PendingInvoices);
+    var fullyUsed = colorable.Count(u => u.Allocations.Count >= maxAlloc);
+    var hasCapacity = colorable.Count(u => u.Allocations.Count > 0 && u.Allocations.Count < maxAlloc);
+    var empty = colorable.Count(u => u.Allocations.Count == 0);
     var regular = Model.Utxos.Count(u => !u.Colorable);
 }
 
 <div class="row mb-4">
-    <div class="col-md-4">
+    <div class="col-md-3">
         <div class="card text-bg-success">
             <div class="card-body">
-                <h5 class="card-title">Available for RGB</h5>
-                <p class="card-text display-6">@colorableEmpty</p>
+                <h5 class="card-title">Free Allocation Slots</h5>
+                <p class="card-text display-6">@freeSlots</p>
+                <small>@slotsFromColorings total - @Model.PendingInvoices reserved by pending invoices</small>
             </div>
         </div>
     </div>
-    <div class="col-md-4">
+    <div class="col-md-3">
         <div class="card text-bg-warning">
             <div class="card-body">
-                <h5 class="card-title">Holding Assets</h5>
-                <p class="card-text display-6">@colorableUsed</p>
+                <h5 class="card-title">Fully Used</h5>
+                <p class="card-text display-6">@fullyUsed</p>
+                <small>@maxAlloc allocations per UTXO max</small>
             </div>
         </div>
     </div>
-    <div class="col-md-4">
+    <div class="col-md-3">
+        <div class="card text-bg-primary">
+            <div class="card-body">
+                <h5 class="card-title">Total Colorable</h5>
+                <p class="card-text display-6">@colorable.Count</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
         <div class="card text-bg-secondary">
             <div class="card-body">
                 <h5 class="card-title">Regular UTXOs</h5>
@@ -67,12 +82,14 @@
                 <th>Amount (sats)</th>
                 <th>Type</th>
                 <th>Allocations</th>
+                <th>Free Slots</th>
             </tr>
         </thead>
         <tbody>
-            @foreach (var utxo in Model.Utxos.OrderByDescending(u => u.Colorable && !u.HasAllocations))
+            @foreach (var utxo in Model.Utxos.OrderByDescending(u => u.Colorable).ThenByDescending(u => maxAlloc - u.Allocations.Count))
             {
-                <tr class="@(utxo.Colorable && !utxo.HasAllocations ? "table-success" : "")">
+                var slotsLeft = utxo.Colorable ? Math.Max(0, maxAlloc - utxo.Allocations.Count) : 0;
+                <tr class="@(utxo.Colorable && slotsLeft > 0 ? "table-success" : "")">
                     <td><code class="small">@utxo.Outpoint</code></td>
                     <td>@utxo.Amount.ToString("N0")</td>
                     <td>
@@ -102,6 +119,16 @@
                                     }
                                 </div>
                             }
+                        }
+                        else
+                        {
+                            <span class="text-muted">-</span>
+                        }
+                    </td>
+                    <td>
+                        @if (utxo.Colorable)
+                        {
+                            <span class="badge @(slotsLeft > 0 ? "bg-success" : "bg-danger")">@slotsLeft / @maxAlloc</span>
                         }
                         else
                         {

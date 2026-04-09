@@ -5,6 +5,7 @@ using BTCPayServer.Plugins.RgbUtexo.Data;
 using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 using BTCPayServer.Services.Invoices;
+using BTCPayServer.Services.Stores;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Hosting;
@@ -23,6 +24,7 @@ public class RGBInvoiceListener : IHostedService
     readonly RGBPluginDbContextFactory _db;
     readonly EventAggregator _events;
     readonly PaymentService _payments;
+    readonly StoreRepository _stores;
     readonly ILogger<RGBInvoiceListener> _log;
 
     readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
@@ -31,13 +33,15 @@ public class RGBInvoiceListener : IHostedService
     Task? _worker;
 
     const int PollSeconds = 10;
+    const int UtxoCheckMinutes = 10;
+    DateTimeOffset _lastUtxoCheck = DateTimeOffset.MinValue;
 
     public RGBInvoiceListener(IMemoryCache cache, InvoiceRepository invoices, RGBPaymentMethodHandler handler,
         RGBWalletService wallets, RGBPluginDbContextFactory db,
-        EventAggregator events, PaymentService payments, ILogger<RGBInvoiceListener> log)
+        EventAggregator events, PaymentService payments, StoreRepository stores, ILogger<RGBInvoiceListener> log)
     {
         _cache = cache; _invoices = invoices; _handler = handler; _wallets = wallets;
-        _db = db; _events = events; _payments = payments; _log = log;
+        _db = db; _events = events; _payments = payments; _stores = stores; _log = log;
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -88,6 +92,11 @@ public class RGBInvoiceListener : IHostedService
                     await RefreshAllWallets(ct);
                     lastPoll = DateTimeOffset.UtcNow;
                 }
+                if (DateTimeOffset.UtcNow - _lastUtxoCheck > TimeSpan.FromMinutes(UtxoCheckMinutes))
+                {
+                    await ReplenishUtxosAsync(ct);
+                    _lastUtxoCheck = DateTimeOffset.UtcNow;
+                }
                 while (_queue.Reader.TryRead(out var id))
                 {
                     if (ct.IsCancellationRequested) break;
@@ -125,6 +134,55 @@ public class RGBInvoiceListener : IHostedService
             }
         }
         _log.LogInformation("RefreshAllWallets completed");
+    }
+
+    async Task ReplenishUtxosAsync(CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var wallets = await ctx.RGBWallets.Where(w => w.IsActive).ToListAsync(ct);
+
+        foreach (var w in wallets)
+        {
+            try
+            {
+                var store = await _stores.FindStore(w.StoreId);
+                if (store == null) continue;
+
+                var config = store.GetPaymentMethodConfigs().TryGetValue(RGBPlugin.RGBPaymentMethodId, out var tok)
+                    ? tok.ToObject<RGBPaymentMethodConfig>() : null;
+                var minFreeSlots = config?.UtxoCount ?? 4;
+                var utxoSize = config?.UtxoSize ?? 1000;
+
+                var maxAlloc = w.MaxAllocationsPerUtxo;
+                var utxos = await _wallets.ListUnspentsAsync(w.Id, ct);
+                var colorable = utxos.Where(u => u.Utxo.Colorable).ToList();
+                var totalSlots = colorable.Count * maxAlloc;
+                var usedByColorings = colorable.Sum(u => u.RgbAllocations.Count);
+                var pendingInvoices = await ctx.RGBInvoices.CountAsync(
+                    i => i.WalletId == w.Id && i.Status == RGBInvoiceStatus.Pending, ct);
+                var usedSlots = usedByColorings + pendingInvoices;
+                var freeSlots = Math.Max(0, totalSlots - usedSlots);
+
+                if (freeSlots >= minFreeSlots)
+                {
+                    _log.LogDebug("Wallet {WalletId} has {FreeSlots} free slots ({Colorings} colorings + {Pending} pending invoices using {Used}/{Total} slots), skipping",
+                        w.Id, freeSlots, usedByColorings, pendingInvoices, usedSlots, totalSlots);
+                    continue;
+                }
+
+                var newUtxosNeeded = (int)Math.Ceiling((double)(minFreeSlots - freeSlots) / maxAlloc);
+                var requestCount = newUtxosNeeded + colorable.Count;
+                _log.LogInformation("Wallet {WalletId}: {FreeSlots} free slots ({Colorings} colorings + {Pending} pending, {Used}/{Total} slots). Need {New} new UTXOs, requesting {Request} total",
+                    w.Id, freeSlots, usedByColorings, pendingInvoices, usedSlots, totalSlots, newUtxosNeeded, requestCount);
+                await _wallets.CreateColorableUtxosAsync(w.Id, requestCount, utxoSize, ct);
+                _log.LogInformation("Wallet {WalletId}: requested {Request} total UTXOs (expected ~{New} new)",
+                    w.Id, requestCount, newUtxosNeeded);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Failed to replenish UTXOs for wallet {WalletId}", w.Id);
+            }
+        }
     }
 
     async Task ProcessTransfers(string walletId, CancellationToken ct)
