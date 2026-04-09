@@ -149,6 +149,12 @@ else
         <a asp-action="Transfers" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
             <span class="fa fa-exchange-alt"></span> View Transfers
         </a>
+        <a asp-action="SendAsset" asp-route-storeId="@Model.StoreId" class="btn btn-outline-primary">
+            <span class="fa fa-paper-plane"></span> Send Asset
+        </a>
+        <a asp-action="SendBtc" asp-route-storeId="@Model.StoreId" class="btn btn-outline-primary">
+            <span class="fa fa-paper-plane"></span> Send BTC
+        </a>
         <a asp-action="BtcTransactions" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
             <span class="fab fa-bitcoin"></span> BTC Transactions
         </a>

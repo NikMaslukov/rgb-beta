@@ -19,28 +19,40 @@
         <table class="table table-hover">
             <thead>
                 <tr>
-                    <th>Txid</th>
+                    <th>Date</th>
                     <th>Type</th>
-                    <th>Received (sats)</th>
-                    <th>Sent (sats)</th>
-                    <th>Fee (sats)</th>
-                    <th>Block Height</th>
-                    <th>Time</th>
+                    <th>Txid</th>
+                    <th class="text-end">Amount</th>
+                    <th class="text-end">Fee</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach (var tx in Model.Transactions)
                 {
+                    var net = tx.Received - tx.Sent;
+                    var isPositive = net >= 0;
+                    var isConfirmed = tx.Height.HasValue;
+                    var amountBtc = Math.Abs(net) / 100_000_000m;
                     <tr>
-                        <td><code class="small">@tx.Txid[..Math.Min(16, tx.Txid.Length)]...</code></td>
                         <td>
-                            @if (tx.Type == "RGB Send")
+                            @if (tx.Timestamp.HasValue)
                             {
-                                <span class="badge bg-primary">@tx.Type</span>
+                                @tx.Timestamp.Value.ToString("yyyy-MM-dd HH:mm")
                             }
-                            else if (tx.Type == "Create UTXOs")
+                            else
+                            {
+                                <span class="text-muted">Pending</span>
+                            }
+                        </td>
+                        <td>
+                            @if (tx.Type == "Create UTXOs")
                             {
                                 <span class="badge bg-info">@tx.Type</span>
+                            }
+                            else if (tx.Type == "RGB Send")
+                            {
+                                <span class="badge bg-primary">@tx.Type</span>
                             }
                             else if (tx.Type == "Drain")
                             {
@@ -51,27 +63,26 @@
                                 <span class="badge bg-secondary">@tx.Type</span>
                             }
                         </td>
-                        <td>@tx.Received.ToString("N0")</td>
-                        <td>@tx.Sent.ToString("N0")</td>
-                        <td>@tx.Fee.ToString("N0")</td>
-                        <td>
-                            @if (tx.Height.HasValue)
-                            {
-                                @tx.Height.Value.ToString("N0")
-                            }
-                            else
-                            {
-                                <span class="text-muted">Unconfirmed</span>
-                            }
+                        <td><code class="small text-break">@tx.Txid</code></td>
+                        <td class="text-end">
+                            <span class="text-@(isPositive ? "success" : "danger")@(isConfirmed ? "" : " opacity-50")">
+                                @(isPositive ? "+" : "-")@amountBtc.ToString("0.########") BTC
+                            </span>
+                            <br />
+                            <small class="text-muted">@(isPositive ? "+" : "-")@Math.Abs(net).ToString("N0") sats</small>
+                        </td>
+                        <td class="text-end@(isConfirmed ? "" : " opacity-50")">
+                            <span class="text-muted">@tx.Fee.ToString("N0") sats</span>
                         </td>
                         <td>
-                            @if (tx.Timestamp.HasValue)
+                            @if (isConfirmed)
                             {
-                                @tx.Timestamp.Value.ToString("yyyy-MM-dd HH:mm")
+                                <span class="badge bg-success">Confirmed</span>
+                                <br /><small class="text-muted">Block @tx.Height!.Value.ToString("N0")</small>
                             }
                             else
                             {
-                                <span class="text-muted">-</span>
+                                <span class="badge bg-warning">Unconfirmed</span>
                             }
                         </td>
                     </tr>

@@ -1,0 +1,138 @@
+@model RGBSendAssetViewModel
+@{
+    ViewData["Title"] = "Send RGB Asset";
+}
+
+<div class="sticky-header-setup"></div>
+<div class="sticky-header d-flex align-items-center justify-content-between">
+    <h2>@ViewData["Title"]</h2>
+    <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+        <span class="fa fa-arrow-left"></span> Back
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+@if (!Model.AvailableAssets.Any())
+{
+    <div class="alert alert-warning">
+        No RGB assets in this wallet. You need to
+        <a asp-action="IssueAsset" asp-route-storeId="@Model.StoreId">issue an asset</a>
+        or receive one first.
+    </div>
+}
+else
+{
+    <div class="row">
+        <div class="col-lg-6">
+            <div class="card mb-4">
+                <div class="card-body">
+                    <h5 class="card-title">Asset Balances</h5>
+                    @foreach (var asset in Model.AvailableAssets)
+                    {
+                        <div class="d-flex justify-content-between mb-2">
+                            <span>
+                                <span class="badge bg-primary me-1">@asset.Ticker</span>
+                                @asset.Name
+                            </span>
+                            <strong>@asset.Balance.ToString("N0")</strong>
+                        </div>
+                    }
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-body">
+                    <form asp-action="SendAsset" asp-route-storeId="@Model.StoreId" method="post" id="sendForm">
+                        <div asp-validation-summary="ModelOnly" class="text-danger mb-3"></div>
+
+                        <div class="mb-3">
+                            <label asp-for="AssetId" class="form-label"></label>
+                            <select asp-for="AssetId" class="form-select" id="assetSelect">
+                                <option value="">-- Select asset --</option>
+                                @foreach (var asset in Model.AvailableAssets.Where(a => a.Balance > 0))
+                                {
+                                    <option value="@asset.AssetId"
+                                            data-balance="@asset.Balance"
+                                            data-ticker="@asset.Ticker">
+                                        @asset.Ticker — @asset.Balance.ToString("N0") available
+                                    </option>
+                                }
+                            </select>
+                            <span asp-validation-for="AssetId" class="text-danger"></span>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="RgbInvoice" class="form-label"></label>
+                            <textarea asp-for="RgbInvoice" class="form-control font-monospace" rows="3"
+                                      placeholder="rgb:..."></textarea>
+                            <span asp-validation-for="RgbInvoice" class="text-danger"></span>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="Amount" class="form-label"></label>
+                            <div class="input-group">
+                                <input asp-for="Amount" type="number" class="form-control" min="1" id="amountInput" />
+                                <span class="input-group-text" id="amountUnit">units</span>
+                            </div>
+                            <span asp-validation-for="Amount" class="text-danger"></span>
+                            <div class="form-text" id="sendMaxHint" style="display:none;">
+                                <a href="#" id="sendMaxLink">
+                                    Send max (<span id="maxAmount"></span>)
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label asp-for="FeeRate" class="form-label"></label>
+                            <div class="input-group">
+                                <input asp-for="FeeRate" type="number" class="form-control" min="1" max="1000" step="0.1" />
+                                <span class="input-group-text">sat/vB</span>
+                            </div>
+                            <span asp-validation-for="FeeRate" class="text-danger"></span>
+                        </div>
+
+                        <div class="alert alert-info">
+                            The recipient's RGB invoice contains the delivery address and transport
+                            endpoint. A Bitcoin transaction will be broadcast to anchor the RGB
+                            state transition.
+                        </div>
+
+                        <button type="submit" class="btn btn-primary" id="sendBtn"
+                                onclick="if(!this.form.reportValidity()) return false; var sel=document.getElementById('assetSelect'); var ticker=sel.options[sel.selectedIndex].getAttribute('data-ticker')||'tokens'; if(!confirm('Send ' + document.getElementById('amountInput').value + ' ' + ticker + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
+                            <span class="fa fa-paper-plane"></span> Send Asset
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('assetSelect').addEventListener('change', function() {
+            var opt = this.options[this.selectedIndex];
+            var balance = opt.getAttribute('data-balance');
+            var ticker = opt.getAttribute('data-ticker');
+            var hint = document.getElementById('sendMaxHint');
+            var unit = document.getElementById('amountUnit');
+            var input = document.getElementById('amountInput');
+
+            if (balance && parseInt(balance) > 0) {
+                document.getElementById('maxAmount').textContent = balance + ' ' + ticker;
+                input.setAttribute('max', balance);
+                unit.textContent = ticker || 'units';
+                hint.style.display = '';
+            } else {
+                hint.style.display = 'none';
+                unit.textContent = 'units';
+                input.removeAttribute('max');
+            }
+        });
+
+        document.getElementById('sendMaxLink').addEventListener('click', function(e) {
+            e.preventDefault();
+            var opt = document.getElementById('assetSelect').options[document.getElementById('assetSelect').selectedIndex];
+            document.getElementById('amountInput').value = opt.getAttribute('data-balance');
+        });
+    </script>
+}

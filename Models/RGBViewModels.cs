@@ -100,6 +100,8 @@ public class RGBIssueAssetViewModel : StoreViewModel
 public class RGBUtxosViewModel : StoreViewModel
 {
     public List<RGBUtxoViewModel> Utxos { get; set; } = [];
+    public int MaxAllocationsPerUtxo { get; set; } = 10;
+    public int PendingInvoices { get; set; }
 }
 
 public class RGBUtxoViewModel
@@ -107,7 +109,6 @@ public class RGBUtxoViewModel
     public string Outpoint { get; set; } = "";
     public long Amount { get; set; }
     public bool Colorable { get; set; }
-    public bool HasAllocations { get; set; }
     public List<RGBAllocationViewModel> Allocations { get; set; } = [];
 }
 
@@ -150,6 +151,50 @@ public class RGBBtcTransactionViewModel
     public long Fee { get; set; }
     public long? Height { get; set; }
     public DateTimeOffset? Timestamp { get; set; }
+}
+
+public class RGBSendBtcViewModel : StoreViewModel
+{
+    [Required]
+    [Display(Name = "Destination Address")]
+    public string DestinationAddress { get; set; } = "";
+
+    [Required]
+    [Range(546, long.MaxValue, ErrorMessage = "Amount must be at least 546 sats (dust limit)")]
+    [Display(Name = "Amount (sats)")]
+    public long Amount { get; set; }
+
+    [Required]
+    [Range(1, 1000, ErrorMessage = "Fee rate must be between 1 and 1000 sat/vB")]
+    [Display(Name = "Fee Rate (sat/vB)")]
+    public float FeeRate { get; set; } = 2.0f;
+
+    public long VanillaBalance { get; set; }
+    public long ColoredBalance { get; set; }
+    public int VanillaUtxoCount { get; set; }
+}
+
+public class RGBSendAssetViewModel : StoreViewModel
+{
+    [Required]
+    [Display(Name = "Asset")]
+    public string AssetId { get; set; } = "";
+
+    [Required]
+    [Display(Name = "RGB Invoice")]
+    public string RgbInvoice { get; set; } = "";
+
+    [Required]
+    [Range(1, long.MaxValue, ErrorMessage = "Amount must be at least 1")]
+    [Display(Name = "Amount")]
+    public long Amount { get; set; }
+
+    [Required]
+    [Range(1, 1000, ErrorMessage = "Fee rate must be between 1 and 1000 sat/vB")]
+    [Display(Name = "Fee Rate (sat/vB)")]
+    public float FeeRate { get; set; } = 2.0f;
+
+    public List<RGBAssetViewModel> AvailableAssets { get; set; } = [];
 }
 
 public class RGBSettingsViewModel : StoreViewModel

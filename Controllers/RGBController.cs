@@ -13,6 +13,7 @@ using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using NBitcoin;
@@ -28,12 +29,13 @@ public class RGBController : Controller
     readonly RGBWalletService _wallets;
     readonly StoreRepository _stores;
     readonly PaymentMethodHandlerDictionary _handlers;
+    readonly RGBPluginDbContextFactory _db;
     readonly ILogger<RGBController> _log;
 
     public RGBController(RGBWalletService wallets, StoreRepository stores,
-        PaymentMethodHandlerDictionary handlers, ILogger<RGBController> log)
+        PaymentMethodHandlerDictionary handlers, RGBPluginDbContextFactory db, ILogger<RGBController> log)
     {
-        _wallets = wallets; _stores = stores; _handlers = handlers; _log = log;
+        _wallets = wallets; _stores = stores; _handlers = handlers; _db = db; _log = log;
     }
 
     [HttpGet]
@@ -290,16 +292,20 @@ public class RGBController : Controller
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
         var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
+        await using var ctx = _db.CreateContext();
+        var pendingInvoices = await ctx.RGBInvoices.CountAsync(
+            i => i.WalletId == wallet.Id && i.Status == RGBInvoiceStatus.Pending);
 
         return View(new RGBUtxosViewModel
         {
             StoreId = storeId,
+            MaxAllocationsPerUtxo = wallet.MaxAllocationsPerUtxo,
+            PendingInvoices = pendingInvoices,
             Utxos = unspents.Select(u => new RGBUtxoViewModel
             {
                 Outpoint = $"{u.Utxo.Outpoint.Txid}:{u.Utxo.Outpoint.Vout}",
                 Amount = u.Utxo.BtcAmount,
                 Colorable = u.Utxo.Colorable,
-                HasAllocations = u.RgbAllocations.Count > 0,
                 Allocations = u.RgbAllocations.Select(a => new RGBAllocationViewModel
                 {
                     AssetId = a.AssetId, Amount = a.Amount, Settled = a.Settled
@@ -330,6 +336,131 @@ public class RGBController : Controller
         }
 
         return RedirectToAction(nameof(Utxos), new { storeId });
+    }
+
+    [HttpGet("send-btc")]
+    public async Task<IActionResult> SendBtc(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        var vm = new RGBSendBtcViewModel { StoreId = storeId };
+        try
+        {
+            var balance = await _wallets.GetBtcBalanceAsync(wallet.Id);
+            var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
+            vm.VanillaBalance = balance.Vanilla.Spendable;
+            vm.ColoredBalance = balance.Colored.Spendable;
+            vm.VanillaUtxoCount = unspents.Count(u => !u.Utxo.Colorable);
+        }
+        catch (Exception ex)
+        {
+            TempData["ErrorMessage"] = $"Failed to load wallet data: {ex.Message}";
+        }
+
+        return View(vm);
+    }
+
+    [HttpPost("send-btc")]
+    public async Task<IActionResult> SendBtc(string storeId, RGBSendBtcViewModel model)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        if (!ModelState.IsValid)
+        {
+            await PopulateSendBtcBalance(wallet, model);
+            return View(model);
+        }
+
+        var network = NetworkHelper.GetNetwork(
+            HttpContext.RequestServices.GetRequiredService<RGBConfiguration>().Network);
+        try
+        {
+            BitcoinAddress.Create(model.DestinationAddress.Trim(), network);
+        }
+        catch
+        {
+            ModelState.AddModelError("DestinationAddress", "Invalid Bitcoin address for this network");
+            await PopulateSendBtcBalance(wallet, model);
+            return View(model);
+        }
+
+        try
+        {
+            var result = await _wallets.SendBtcAsync(
+                wallet.Id, model.DestinationAddress.Trim(), model.Amount, model.FeeRate);
+            TempData["SuccessMessage"] = $"Sent {result.AmountSent:N0} sats (fee: {result.Fee:N0} sats). Txid: {result.Txid}";
+            return RedirectToAction(nameof(BtcTransactions), new { storeId });
+        }
+        catch (Exception ex)
+        {
+            ModelState.AddModelError("", ex.Message);
+            await PopulateSendBtcBalance(wallet, model);
+            return View(model);
+        }
+    }
+
+    async Task PopulateSendBtcBalance(Data.Entities.RGBWallet wallet, RGBSendBtcViewModel model)
+    {
+        try
+        {
+            var balance = await _wallets.GetBtcBalanceAsync(wallet.Id);
+            var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
+            model.VanillaBalance = balance.Vanilla.Spendable;
+            model.ColoredBalance = balance.Colored.Spendable;
+            model.VanillaUtxoCount = unspents.Count(u => !u.Utxo.Colorable);
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "Failed to populate balance for send form"); }
+    }
+
+    [HttpGet("send-asset")]
+    public async Task<IActionResult> SendAsset(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        var vm = new RGBSendAssetViewModel { StoreId = storeId };
+        await PopulateSendAssetData(wallet, vm);
+        return View(vm);
+    }
+
+    [HttpPost("send-asset")]
+    public async Task<IActionResult> SendAsset(string storeId, RGBSendAssetViewModel model)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        if (!ModelState.IsValid)
+        {
+            await PopulateSendAssetData(wallet, model);
+            return View(model);
+        }
+
+        try
+        {
+            var result = await _wallets.SendAssetAsync(
+                wallet.Id, model.RgbInvoice.Trim(), model.AssetId, model.Amount, model.FeeRate);
+            TempData["SuccessMessage"] =
+                $"Sent {result.AmountSent:N0} {result.AssetTicker} — Txid: {result.Txid}";
+            return RedirectToAction(nameof(Transfers), new { storeId });
+        }
+        catch (Exception ex)
+        {
+            ModelState.AddModelError("", ex.Message);
+            await PopulateSendAssetData(wallet, model);
+            return View(model);
+        }
+    }
+
+    async Task PopulateSendAssetData(Data.Entities.RGBWallet wallet, RGBSendAssetViewModel model)
+    {
+        try
+        {
+            var assets = await _wallets.ListAssetsAsync(wallet.Id);
+            model.AvailableAssets = assets.Select(a => a.ToViewModel()).ToList();
+        }
+        catch (Exception ex) { _log.LogWarning(ex, "Failed to populate assets for send form"); }
     }
 
     [HttpGet("btc-transactions")]

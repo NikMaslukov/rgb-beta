@@ -1,0 +1,89 @@
+@model RGBSendBtcViewModel
+@{
+    ViewData["Title"] = "Send BTC";
+}
+
+<div class="sticky-header-setup"></div>
+<div class="sticky-header d-flex align-items-center justify-content-between">
+    <h2>@ViewData["Title"]</h2>
+    <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+        <span class="fa fa-arrow-left"></span> Back
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="row">
+    <div class="col-lg-6">
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Available Balance</h5>
+                <div class="d-flex justify-content-between mb-2">
+                    <span>Vanilla (sendable)</span>
+                    <strong>@Model.VanillaBalance.ToString("N0") sats</strong>
+                </div>
+                <div class="d-flex justify-content-between mb-2 text-muted">
+                    <span>Colored (reserved for RGB)</span>
+                    <span>@Model.ColoredBalance.ToString("N0") sats</span>
+                </div>
+                <div class="d-flex justify-content-between text-muted">
+                    <span>Vanilla UTXOs</span>
+                    <span>@Model.VanillaUtxoCount</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-body">
+                <form asp-action="SendBtc" asp-route-storeId="@Model.StoreId" method="post" id="sendForm">
+                    <div asp-validation-summary="ModelOnly" class="text-danger mb-3"></div>
+
+                    <div class="mb-3">
+                        <label asp-for="DestinationAddress" class="form-label"></label>
+                        <input asp-for="DestinationAddress" class="form-control font-monospace"
+                               placeholder="bc1q... or bcrt1..." />
+                        <span asp-validation-for="DestinationAddress" class="text-danger"></span>
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="Amount" class="form-label"></label>
+                        <div class="input-group">
+                            <input asp-for="Amount" type="number" class="form-control" min="546"
+                                   max="@Model.VanillaBalance" />
+                            <span class="input-group-text">sats</span>
+                        </div>
+                        <span asp-validation-for="Amount" class="text-danger"></span>
+                        @if (Model.VanillaBalance > 0)
+                        {
+                            <div class="form-text">
+                                <a href="#" onclick="document.getElementById('Amount').value = '@Model.VanillaBalance'; return false;">
+                                    Send max (@Model.VanillaBalance.ToString("N0") sats)
+                                </a>
+                            </div>
+                        }
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="FeeRate" class="form-label"></label>
+                        <div class="input-group">
+                            <input asp-for="FeeRate" type="number" class="form-control" min="1" max="1000" step="0.1" />
+                            <span class="input-group-text">sat/vB</span>
+                        </div>
+                        <span asp-validation-for="FeeRate" class="text-danger"></span>
+                    </div>
+
+                    <div class="alert alert-warning">
+                        <strong>Warning:</strong> Only vanilla (non-colorable) UTXOs will be spent.
+                        Colored UTXOs reserved for RGB assets are never touched.
+                        This action is irreversible.
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" id="sendBtn"
+                            onclick="if(!this.form.reportValidity()) return false; if(!confirm('Send ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
+                        <span class="fa fa-paper-plane"></span> Send BTC
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
