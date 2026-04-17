@@ -103,16 +103,21 @@ public class RgbLibService : IRgbLibService
             ["bitcoin_network"] = NetworkHelper.MapNetworkToRgbLibFormat(walletNetwork),
             ["database_type"] = "Sqlite",
             ["max_allocations_per_utxo"] = maxAllocationsPerUtxo,
-            ["account_xpub_vanilla"] = xpubVanilla,
-            ["account_xpub_colored"] = xpubColored,
-            ["mnemonic"] = null,
-            ["master_fingerprint"] = masterFingerprint,
-            ["vanilla_keychain"] = (int?)null,
             ["supported_schemas"] = new[] { "Nia", "Cfa" }
         };
-        
+
+        var keysConfig = new Dictionary<string, object?>
+        {
+            ["account_xpub_vanilla"] = xpubVanilla,
+            ["account_xpub_colored"] = xpubColored,
+            ["master_fingerprint"] = masterFingerprint,
+            ["vanilla_keychain"] = (int?)null,
+            ["mnemonic"] = (string?)null
+        };
+
         var configJson = JsonSerializer.Serialize(walletConfig);
-        var wallet = new RgbLibWallet(configJson);
+        var keysJson = JsonSerializer.Serialize(keysConfig);
+        var wallet = new RgbLibWallet(configJson, keysJson);
         wallet.GoOnline(networkSettings.ElectrumUrl, true);
 
         _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
@@ -189,9 +194,9 @@ public class RgbLibService : IRgbLibService
             ? JsonSerializer.Serialize(new { Fungible = amount.Value })
             : "{\"NonFungible\":null}";
         
-        var duration = expiration.HasValue 
-            ? (expiration.Value - DateTimeOffset.UtcNow.ToUnixTimeSeconds()).ToString()
-            : "3600";
+        var expirationTs = expiration.HasValue
+            ? expiration.Value.ToString()
+            : DateTimeOffset.UtcNow.AddSeconds(3600).ToUnixTimeSeconds().ToString();
         
         var transportEndpoints = JsonSerializer.Serialize(new[] { _config.ProxyEndpoint });
         
@@ -199,7 +204,7 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var args = new object?[] { walletStruct, assetId, assignment, duration, transportEndpoints, minConfirmations.ToString() };
+            var args = new object?[] { walletStruct, assetId, assignment, expirationTs, transportEndpoints, minConfirmations.ToString() };
             var result = _blindReceiveMethod.Invoke(null, args);
             
             var invoiceJson = GetNativeResult(result);
@@ -457,7 +462,7 @@ public class RgbLibService : IRgbLibService
             var walletStruct = _walletField.GetValue(wallet)!;
             var onlineStruct = _onlineField.GetValue(wallet)!;
 
-            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString() };
+            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString(), "", false };
             var result = _sendBeginMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);
