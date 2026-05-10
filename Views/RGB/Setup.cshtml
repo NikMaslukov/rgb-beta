@@ -39,7 +39,7 @@
                 <div class="tab-content">
                     <div class="tab-pane fade @(Model.IsRestore || Model.IsBackupRestore ? "" : "show active")" id="create-pane" role="tabpanel">
                         <form asp-action="SetupWallet" asp-route-storeId="@Model.StoreId" method="post">
-                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+                            <div asp-validation-summary="ModelOnly"></div>
 
                             <div class="mb-3">
                                 <label asp-for="WalletName" class="form-label"></label>
@@ -85,7 +85,7 @@
 
                     <div class="tab-pane fade @(Model.IsRestore ? "show active" : "")" id="restore-pane" role="tabpanel">
                         <form asp-action="RestoreWallet" asp-route-storeId="@Model.StoreId" method="post">
-                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+                            <div asp-validation-summary="ModelOnly"></div>
                             <input type="hidden" name="IsRestore" value="true" />
 
                             <div class="mb-3">
@@ -144,7 +144,7 @@
 
                     <div class="tab-pane fade @(Model.IsBackupRestore ? "show active" : "")" id="backup-restore-pane" role="tabpanel">
                         <form asp-action="RestoreFromBackup" asp-route-storeId="@Model.StoreId" method="post" enctype="multipart/form-data">
-                            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+                            <div asp-validation-summary="ModelOnly"></div>
                             <input type="hidden" name="IsBackupRestore" value="true" />
 
                             <div class="mb-3">

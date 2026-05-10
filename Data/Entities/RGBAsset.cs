@@ -1,10 +1,7 @@
-using System.ComponentModel.DataAnnotations;
-
 namespace BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 
 public class RGBAsset
 {
-    [Key]
     public string AssetId { get; set; } = "";
     
     public string WalletId { get; set; } = "";
@@ -12,7 +9,7 @@ public class RGBAsset
     public string Name { get; set; } = "";
     public int Precision { get; set; }
     public long IssuedSupply { get; set; }
-    public bool AcceptForPayment { get; set; } = true;
+    public bool AcceptForPayment { get; set; } = false;
     public string? DisplayName { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     

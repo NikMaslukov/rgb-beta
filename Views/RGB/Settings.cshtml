@@ -83,17 +83,36 @@
                         </div>
                     </div>
 
-                    <div class="form-check mb-3">
-                        <input type="checkbox" name="AcceptAnyAsset" value="true" 
-                               class="form-check-input" id="acceptAny"
-                               checked="@Model.AcceptAnyAsset" />
-                        <label class="form-check-label" for="acceptAny">
-                            Accept any RGB asset (not recommended for production)
-                        </label>
-                        <div class="form-text">
-                            If enabled, customers can pay with any RGB asset. The amount will be in asset units.
+                    @if (Model.AvailableAssets.Count > 0)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label">Accept for Payment</label>
+                            <div class="form-text mb-2">
+                                Select which assets can be accepted as payment on wildcard invoices (no default asset).
+                                Self-issued assets are approved by default.
+                            </div>
+                            @foreach (var asset in Model.AvailableAssets)
+                            {
+                                <div class="form-check">
+                                    <input type="checkbox" name="ApprovedAssetIds" value="@asset.AssetId"
+                                           class="form-check-input" id="accept_@asset.AssetId"
+                                           checked="@asset.AcceptForPayment" />
+                                    <label class="form-check-label" for="accept_@asset.AssetId">
+                                        @asset.Ticker - @asset.Name (@asset.AssetId[..20]...)
+                                    </label>
+                                </div>
+                            }
                         </div>
-                    </div>
+                    }
+
+                    @if (string.IsNullOrEmpty(Model.DefaultAssetId) && !Model.AvailableAssets.Any(a => a.AcceptForPayment))
+                    {
+                        <div class="alert alert-warning">
+                            <i class="fa fa-exclamation-triangle"></i>
+                            <strong>RGB payments disabled.</strong> No default asset configured and no assets approved for payment.
+                            RGB invoices will not be created until you select a default asset above or approve assets for payment.
+                        </div>
+                    }
 
                     <hr class="my-4" />
                     <h6 class="mb-3"><i class="fa fa-cubes"></i> UTXO Settings</h6>
@@ -226,6 +245,15 @@
                 <button type="button" id="showSeedBtn" class="btn btn-outline-warning" onclick="showSeed()">
                     <i class="fa fa-eye"></i> View Recovery Phrase
                 </button>
+                <div id="seedPasswordContainer" style="display:none" class="mt-2">
+                    <div class="input-group" style="max-width: 400px;">
+                        <input type="password" id="seedPassword" class="form-control" placeholder="Enter your account password" />
+                        <button type="button" class="btn btn-danger" onclick="showSeed()">
+                            <i class="fa fa-unlock"></i> Confirm
+                        </button>
+                    </div>
+                    <div id="seedError" class="text-danger mt-1"></div>
+                </div>
             </div>
         </div>
 
@@ -296,37 +324,42 @@
     }
 
     function showSeed() {
-        if (!confirm('Are you sure you want to view your recovery phrase? Make sure no one is looking at your screen.'))
+        var container = document.getElementById('seedPasswordContainer');
+        if (container.style.display === 'none') {
+            container.style.display = '';
+            document.getElementById('seedPassword').focus();
             return;
+        }
+
+        var pwd = document.getElementById('seedPassword').value;
+        if (!pwd) { document.getElementById('seedError').textContent = 'Password required'; return; }
 
         var btn = document.getElementById('showSeedBtn');
         btn.disabled = true;
-        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Loading...';
+        btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> Verifying...';
+        document.getElementById('seedError').textContent = '';
+
+        var formData = new FormData();
+        formData.append('password', pwd);
 
         fetch('@Url.Action("ViewSeed", "RGB", new { storeId = Model.StoreId })', {
                 method: 'POST',
-                headers: { 'RequestVerificationToken': document.querySelector('input[name="__RequestVerificationToken"]').value }
+                headers: { 'RequestVerificationToken': document.querySelector('input[name="__RequestVerificationToken"]').value },
+                body: formData
             })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (data.error) {
-                    alert(data.error);
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fa fa-eye"></i> View Recovery Phrase';
-                    return;
-                }
-                var words = data.seed.split(' ');
-                var html = '<div class="row g-2">';
-                for (var i = 0; i < words.length; i++) {
-                    html += '<div class="col-4 col-md-3"><span class="text-muted me-1">' + (i+1) + '.</span>' + words[i] + '</div>';
-                }
-                html += '</div>';
+            .then(function(r) {
+                if (r.ok) return r.text();
+                return r.text().then(function(t) { throw new Error(r.status === 429 ? 'Rate limit exceeded. Try again later.' : t || 'Invalid password'); });
+            })
+            .then(function(html) {
                 document.getElementById('seedWords').innerHTML = html;
                 document.getElementById('seedContainer').style.display = '';
+                document.getElementById('seedPasswordContainer').style.display = 'none';
+                document.getElementById('seedPassword').value = '';
                 btn.style.display = 'none';
             })
-            .catch(function() {
-                alert('Failed to load recovery phrase');
+            .catch(function(err) {
+                document.getElementById('seedError').textContent = err.message;
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fa fa-eye"></i> View Recovery Phrase';
             });

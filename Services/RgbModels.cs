@@ -38,6 +38,8 @@ public class RgbAsset
     [JsonPropertyName("precision")] public int Precision { get; set; }
     [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
     public long Balance { get; set; }
+    public long FutureBalance { get; set; }
+    public long SpendableBalance { get; set; }
 }
 
 public class InvoiceResponse

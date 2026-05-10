@@ -1,4 +1,5 @@
 using BTCPayServer.Abstractions.Contracts;
+using BTCPayServer.Services.Rates;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Abstractions.Services;
@@ -10,7 +11,6 @@ using BTCPayServer.Plugins.RgbUtexo.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using NBitcoin;
 using System.Text.Json;
 
 namespace BTCPayServer.Plugins.RgbUtexo;
@@ -40,6 +40,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         });
         services.AddStartupTask<RGBPluginMigrationRunner>();
 
+        services.AddSingleton<CurrencyDataProvider, RgbCurrencyDataProvider>();
         services.AddSingleton<IRgbLibService, RgbLibService>();
         services.AddSingleton<MnemonicProtectionService>();
         services.AddSingleton<RgbWalletSignerProvider>();
@@ -61,17 +62,6 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
     private static RGBConfiguration? LoadConfiguration(PluginServiceCollection ctx)
     {
-        var netType = DefaultConfiguration.GetNetworkType(
-            ctx.BootstrapServices.GetRequiredService<IConfiguration>());
-
-        var network = netType.ToString() switch
-        {
-            "Main" => "mainnet",
-            "TestNet" => "testnet",
-            "Signet" => "signet",
-            _ => "regtest"
-        };
-
         var dataDir = new DataDirectories()
             .Configure(ctx.BootstrapServices.GetRequiredService<IConfiguration>())
             .DataDir;
@@ -96,71 +86,16 @@ public class RGBPlugin : BaseBTCPayServerPlugin
             }
         }
 
-        var electrumUrl = ResolveElectrumUrl(netType);
-        var rgbDataDir = ResolveRgbDataDir(dataDir, netType);
-        var proxyEndpoint = ResolveProxyEndpoint(netType);
-
-        return new RGBConfiguration(network, electrumUrl, rgbDataDir, proxyEndpoint);
+        var rgbBaseDir = ResolveRgbBaseDir(dataDir);
+        return new RGBConfiguration(rgbBaseDir);
     }
 
-    private static string ResolveElectrumUrl(ChainName net)
+    private static string ResolveRgbBaseDir(string btcPayDataDir)
     {
-        var env = Environment.GetEnvironmentVariable("RGB_ELECTRUM_URL");
+        var env = Environment.GetEnvironmentVariable("RGB_BASE_DIR");
         if (!string.IsNullOrEmpty(env))
             return env;
 
-        var network = net.ToString() switch
-        {
-            "Main" => "mainnet",
-            "TestNet" => "testnet",
-            "Regtest" => "regtest",
-            _ => "regtest"
-        };
-        
-        var defaults = NetworkSettings.GetForNetwork(network);
-        
-        if (net.ToString() == "Regtest" && IsRunningInDocker())
-            return "tcp://electrs:50001";
-            
-        return defaults.ElectrumUrl;
+        return Directory.GetParent(btcPayDataDir)?.FullName ?? btcPayDataDir;
     }
-
-    private static string ResolveRgbDataDir(string btcPayDataDir, ChainName net)
-    {
-        var env = Environment.GetEnvironmentVariable("RGB_DATA_DIR");
-        if (!string.IsNullOrEmpty(env))
-            return env;
-
-        var networkFolder = net.ToString() switch
-        {
-            "Main" => "Main",
-            "TestNet" => "TestNet",
-            "Regtest" => "RegTest",
-            "Signet" => "Signet",
-            _ => "RegTest"
-        };
-
-        return Path.Combine(btcPayDataDir, networkFolder, "rgb-wallets");
-    }
-
-    private static string ResolveProxyEndpoint(ChainName net)
-    {
-        var env = Environment.GetEnvironmentVariable("RGB_PROXY_ENDPOINT");
-        if (!string.IsNullOrEmpty(env))
-            return env;
-
-        var network = net.ToString() switch
-        {
-            "Main" => "mainnet",
-            "TestNet" => "testnet",
-            "Regtest" => "regtest",
-            _ => "regtest"
-        };
-        
-        return NetworkSettings.GetForNetwork(network).ProxyEndpoint;
-    }
-
-    private static bool IsRunningInDocker() =>
-        Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER") == "true"
-        || File.Exists("/.dockerenv");
 }

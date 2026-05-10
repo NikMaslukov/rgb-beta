@@ -16,7 +16,7 @@ public class RGBSetupViewModel : StoreViewModel
     [Display(Name = "Network")]
     public string SelectedNetwork { get; set; } = "regtest";
 
-    public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "mainnet"];
+    public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "signet", "mainnet"];
 
     public string ElectrumUrl { get; set; } = "";
     public string ProxyEndpoint { get; set; } = "";
@@ -74,6 +74,11 @@ public class RGBAssetViewModel
     public int Precision { get; set; }
     public long IssuedSupply { get; set; }
     public long Balance { get; set; }
+    public long FutureBalance { get; set; }
+    public long SpendableBalance { get; set; }
+    public long PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
+    public long PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
+    public bool AcceptForPayment { get; set; }
 }
 
 public class RGBIssueAssetViewModel : StoreViewModel
@@ -95,6 +100,7 @@ public class RGBIssueAssetViewModel : StoreViewModel
     [Range(0, 18)]
     [Display(Name = "Precision")]
     public int Precision { get; set; }
+
 }
 
 public class RGBUtxosViewModel : StoreViewModel
@@ -207,7 +213,6 @@ public class RGBSettingsViewModel : StoreViewModel
     public string Network { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
     public string? DefaultAssetId { get; set; }
-    public bool AcceptAnyAsset { get; set; }
     public List<RGBAssetViewModel> AvailableAssets { get; set; } = [];
     public string ElectrumUrl { get; set; } = "";
     public bool IsConnected { get; set; }

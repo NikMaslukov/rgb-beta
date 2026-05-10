@@ -6,7 +6,7 @@ public class NetworkSettings
 {
     public string ElectrumUrl { get; set; } = "";
     public string ProxyEndpoint { get; set; } = "";
-    
+
     public static readonly Dictionary<string, NetworkSettings> Defaults = new()
     {
         ["regtest"] = new NetworkSettings
@@ -23,52 +23,75 @@ public class NetworkSettings
         {
             ElectrumUrl = "ssl://electrum.iriswallet.com:50003",
             ProxyEndpoint = "rpcs://proxy.iriswallet.com/0.2/json-rpc"
+        },
+        ["signet"] = new NetworkSettings
+        {
+            ElectrumUrl = "ssl://electrum.iriswallet.com:50033",
+            ProxyEndpoint = "rpcs://proxy.iriswallet.com/0.2/json-rpc"
         }
     };
-    
+
     public static NetworkSettings GetForNetwork(string network)
     {
         var key = network.ToLowerInvariant();
         return Defaults.TryGetValue(key, out var settings) ? settings : Defaults["regtest"];
     }
-    
-    public static string[] AvailableNetworks => ["regtest", "testnet", "mainnet"];
+
+    public static string[] AvailableNetworks => ["regtest", "testnet", "signet", "mainnet"];
 }
 
 public class RGBConfiguration
 {
-    [JsonPropertyName("network")]
-    public string Network { get; set; } = "regtest";
-
-    [JsonPropertyName("electrum_url")]
-    public string ElectrumUrl { get; set; } = "tcp://electrs:50001";
-
-    [JsonPropertyName("rgb_data_dir")]
-    public string RgbDataDir { get; set; } = "/data/rgb-wallets";
+    [JsonPropertyName("rgb_base_dir")]
+    public string RgbBaseDir { get; set; } = "/data";
 
     [JsonPropertyName("max_allocations_per_utxo")]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
-    
-    [JsonPropertyName("proxy_endpoint")]
-    public string ProxyEndpoint { get; set; } = "rpc://proxy.iriswallet.com/0.2/json-rpc";
 
     public RGBConfiguration() { }
 
-    public RGBConfiguration(string network, string? electrumUrl = null, string? rgbDataDir = null, string? proxyEndpoint = null)
+    public RGBConfiguration(string rgbBaseDir)
     {
-        Network = network;
-        if (electrumUrl != null) ElectrumUrl = electrumUrl;
-        if (rgbDataDir != null) RgbDataDir = rgbDataDir;
-        if (proxyEndpoint != null) ProxyEndpoint = proxyEndpoint;
+        RgbBaseDir = rgbBaseDir;
     }
-    
-    public NetworkSettings GetNetworkSettings(string? walletNetwork = null)
+
+    static readonly object _migrationLock = new();
+
+    public string GetWalletDataDir(string walletId, string walletNetwork)
     {
-        var network = walletNetwork ?? Network;
+        var networkFolder = MapNetworkFolder(walletNetwork);
+        var newPath = Path.Combine(RgbBaseDir, networkFolder, "rgb-wallets", walletId);
+        if (Directory.Exists(newPath)) return newPath;
+
+        var legacyPath = Path.Combine(RgbBaseDir, networkFolder, networkFolder, "rgb-wallets", walletId);
+        lock (_migrationLock)
+        {
+            if (Directory.Exists(newPath)) return newPath;
+            if (Directory.Exists(legacyPath))
+            {
+                var newParent = Path.GetDirectoryName(newPath)!;
+                Directory.CreateDirectory(newParent);
+                Directory.Move(legacyPath, newPath);
+            }
+        }
+
+        return newPath;
+    }
+
+    static string MapNetworkFolder(string network) => network.ToLowerInvariant() switch
+    {
+        "mainnet" or "main" => "Main",
+        "testnet" => "TestNet",
+        "signet" => "Signet",
+        _ => "RegTest"
+    };
+
+    public static NetworkSettings GetNetworkSettings(string walletNetwork)
+    {
         var envElectrum = Environment.GetEnvironmentVariable("RGB_ELECTRUM_URL");
         var envProxy = Environment.GetEnvironmentVariable("RGB_PROXY_ENDPOINT");
-        
-        var defaults = NetworkSettings.GetForNetwork(network);
+
+        var defaults = NetworkSettings.GetForNetwork(walletNetwork);
         return new NetworkSettings
         {
             ElectrumUrl = !string.IsNullOrEmpty(envElectrum) ? envElectrum : defaults.ElectrumUrl,

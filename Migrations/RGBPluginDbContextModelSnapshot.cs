@@ -54,9 +54,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
-                    b.HasKey("AssetId");
-
-                    b.HasIndex("WalletId");
+                    b.HasKey("WalletId", "AssetId");
 
                     b.ToTable("RGB_Assets", (string)null);
                 });

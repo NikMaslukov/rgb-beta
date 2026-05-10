@@ -125,6 +125,7 @@ public class RGBInvoiceListener : IHostedService
             {
                 _log.LogInformation("Refreshing wallet {WalletId}...", w.Id);
                 await _wallets.RefreshWalletAsync(w.Id);
+                await CleanupExpiredTransfers(w, ct);
                 _log.LogInformation("Wallet {WalletId} refreshed, processing transfers...", w.Id);
                 await ProcessTransfers(w.Id, ct);
             }
@@ -134,6 +135,18 @@ public class RGBInvoiceListener : IHostedService
             }
         }
         _log.LogInformation("RefreshAllWallets completed");
+    }
+
+    async Task CleanupExpiredTransfers(RGBWallet wallet, CancellationToken ct)
+    {
+        try
+        {
+            await _wallets.CleanupExpiredTransfersAsync(wallet.Id, wallet.Network, wallet.MasterFingerprint, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Failed to cleanup expired transfers for wallet {WalletId}", wallet.Id);
+        }
     }
 
     async Task ReplenishUtxosAsync(CancellationToken ct)
@@ -188,6 +201,30 @@ public class RGBInvoiceListener : IHostedService
     async Task ProcessTransfers(string walletId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
+
+        var wallet = await ctx.RGBWallets.FindAsync(walletId);
+        if (wallet == null) return;
+
+        RGBPaymentMethodConfig? paymentConfig = null;
+        try
+        {
+            var store = await _stores.FindStore(wallet.StoreId);
+            if (store != null && store.GetPaymentMethodConfigs().TryGetValue(RGBPlugin.RGBPaymentMethodId, out var configToken))
+                paymentConfig = _handler.ParsePaymentMethodConfig(configToken);
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex, "Failed to load payment config for wallet {WalletId}", walletId);
+        }
+
+        var approvedAssetIds = await ctx.RGBAssets
+            .Where(a => a.WalletId == walletId && a.AcceptForPayment)
+            .Select(a => a.AssetId)
+            .ToListAsync(ct);
+        if (!string.IsNullOrEmpty(paymentConfig?.DefaultAssetId) && !approvedAssetIds.Contains(paymentConfig.DefaultAssetId))
+            approvedAssetIds.Add(paymentConfig.DefaultAssetId);
+        var approvedSet = new HashSet<string>(approvedAssetIds);
+
         var allInvoices = await ctx.RGBInvoices.Where(i => i.WalletId == walletId).ToListAsync(ct);
         _log.LogInformation("ProcessTransfers: total={Total} invoices for wallet {WalletId}, statuses: {Statuses}",
             allInvoices.Count, walletId, string.Join(",", allInvoices.Select(i => $"{i.Id[..8]}={i.Status}")));
@@ -198,21 +235,20 @@ public class RGBInvoiceListener : IHostedService
         var assetIds = pending.Where(i => !string.IsNullOrEmpty(i.AssetId)).Select(i => i.AssetId!).Distinct().ToList();
         if (pending.Any(i => string.IsNullOrEmpty(i.AssetId)))
         {
-            try
+            if (approvedAssetIds.Count > 0)
             {
-                var allAssets = await _wallets.ListAssetsAsync(walletId);
-                _log.LogInformation("ProcessTransfers: Listed {Count} assets for wildcard invoices", allAssets.Count);
-                assetIds = assetIds.Union(allAssets.Select(a => a.AssetId)).ToList();
+                assetIds = assetIds.Union(approvedAssetIds).ToList();
+                _log.LogInformation("ProcessTransfers: Added {Count} approved assets for wildcard invoices", approvedAssetIds.Count);
             }
-            catch (Exception ex)
+            else
             {
-                _log.LogDebug(ex, "Failed to list assets for wallet {WalletId}", walletId);
+                _log.LogWarning("ProcessTransfers: Skipping wildcard invoices for wallet {WalletId} — no assets approved for payment", walletId);
             }
         }
         _log.LogInformation("ProcessTransfers: Checking {Count} asset IDs", assetIds.Count);
         if (assetIds.Count == 0) return;
 
-        var incomingTransfers = new List<RgbTransfer>();
+        var incomingTransfers = new List<(RgbTransfer Transfer, string AssetId)>();
         foreach (var aid in assetIds)
         {
             _log.LogInformation("ProcessTransfers: Fetching transfers for asset {AssetId}", aid);
@@ -226,7 +262,7 @@ public class RGBInvoiceListener : IHostedService
                     _log.LogInformation("  Transfer idx={Idx} status={Status} kind={Kind} recipientId={RecipientId}",
                         t.Idx, t.Status, t.Kind, t.RecipientId ?? "null");
                 }
-                incomingTransfers.AddRange(transfers.Where(t => t.Kind is 1 or 2 && t.Status is 1 or 2 or 3));
+                incomingTransfers.AddRange(transfers.Where(t => t.Kind is 1 or 2 && t.Status is 1 or 2 or 3).Select(t => (t, aid)));
             }
             catch (Exception ex)
             {
@@ -235,19 +271,25 @@ public class RGBInvoiceListener : IHostedService
         }
         _log.LogInformation("ProcessTransfers: Found {Count} incoming transfers to process", incomingTransfers.Count);
 
-        foreach (var tx in incomingTransfers.GroupBy(t => t.Idx).Select(g => g.First()))
+        foreach (var (tx, transferAssetId) in incomingTransfers.GroupBy(t => t.Transfer.Idx).Select(g => g.First()))
         {
             if (string.IsNullOrEmpty(tx.RecipientId)) continue;
             var inv = pending.Find(i => i.RecipientId == tx.RecipientId);
             if (inv == null) continue;
 
+            if (string.IsNullOrEmpty(inv.AssetId) && !approvedSet.Contains(transferAssetId))
+            {
+                _log.LogWarning("Transfer for wildcard invoice {Id} uses unapproved asset {AssetId} — skipping", inv.Id, transferAssetId);
+                continue;
+            }
+
             if (tx.Status is 1 or 2 && inv.Status == RGBInvoiceStatus.Pending)
             {
                 inv.Status = RGBInvoiceStatus.WaitingConfirmations;
                 inv.Txid = tx.Txid;
-                inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : inv.Amount ?? 0;
+                inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : 0;
 
-                if (!string.IsNullOrEmpty(inv.BtcPayInvoiceId))
+                if (tx.Amount > 0 && !string.IsNullOrEmpty(inv.BtcPayInvoiceId))
                 {
                     try
                     {
@@ -258,14 +300,31 @@ public class RGBInvoiceListener : IHostedService
                         _log.LogWarning(ex, "Failed to record processing payment for invoice {Id}", inv.BtcPayInvoiceId);
                     }
                 }
-                _log.LogInformation("invoice {Id} waiting confirmations (tx={Txid})", inv.Id, tx.Txid);
+                else if (tx.Amount <= 0)
+                {
+                    _log.LogWarning("Transfer for invoice {Id} has Amount={Amount} at status {Status} — skipping BTCPay payment record", inv.Id, tx.Amount, tx.Status);
+                }
+                _log.LogInformation("invoice {Id} waiting confirmations (tx={Txid}, amount={Amount})", inv.Id, tx.Txid, tx.Amount);
             }
             else if (tx.Status == 3 && inv.Status != RGBInvoiceStatus.Settled)
             {
-                inv.Status = RGBInvoiceStatus.Settled;
-                inv.SettledAt = DateTimeOffset.UtcNow;
+                if (tx.Amount <= 0)
+                {
+                    _log.LogCritical("Transfer settled for invoice {Id} but Amount={Amount} — cannot verify payment. Manual review required.", inv.Id, tx.Amount);
+                    _events.Publish(new RgbAmountVerificationFailedEvent(inv.BtcPayInvoiceId ?? inv.Id, inv.WalletId, tx.Idx));
+                    continue;
+                }
+
                 inv.Txid = tx.Txid;
-                inv.ReceivedAmount = tx.Amount > 0 ? tx.Amount : inv.Amount ?? 0;
+                inv.ReceivedAmount = tx.Amount;
+
+                var isFullyPaid = inv.Amount == null || tx.Amount >= inv.Amount.Value;
+
+                if (isFullyPaid)
+                {
+                    inv.Status = RGBInvoiceStatus.Settled;
+                    inv.SettledAt = DateTimeOffset.UtcNow;
+                }
 
                 if (!string.IsNullOrEmpty(inv.BtcPayInvoiceId))
                 {
@@ -275,10 +334,14 @@ public class RGBInvoiceListener : IHostedService
                     }
                     catch (Exception ex)
                     {
-                        _log.LogWarning(ex, "Failed to record settled payment for invoice {Id}", inv.BtcPayInvoiceId);
+                        _log.LogWarning(ex, "Failed to record payment for invoice {Id}", inv.BtcPayInvoiceId);
                     }
                 }
-                _log.LogInformation("settled {Id}", inv.Id);
+
+                if (isFullyPaid)
+                    _log.LogInformation("settled {Id} (amount={Amount})", inv.Id, tx.Amount);
+                else
+                    _log.LogWarning("underpayment on {Id}: received={Received}, required={Required}", inv.Id, tx.Amount, inv.Amount);
             }
         }
         await ctx.SaveChangesAsync(ct);
@@ -301,7 +364,7 @@ public class RGBInvoiceListener : IHostedService
         }
 
         var details = _handler.ParsePaymentPromptDetails(prompt.Details);
-        var receivedAmount = tx.Amount > 0 ? tx.Amount : details.AmountInAssetUnits;
+        var receivedAmount = tx.Amount;
         var divisibility = details.AssetPrecision;
         var amountDecimal = divisibility > 0
             ? receivedAmount / (decimal)Math.Pow(10, divisibility)
@@ -382,5 +445,20 @@ public class RGBInvoiceListener : IHostedService
     {
         var left = inv.ExpirationTime - DateTimeOffset.UtcNow;
         return DateTimeOffset.UtcNow + (left > TimeSpan.FromMinutes(5) ? left : TimeSpan.FromMinutes(5));
+    }
+}
+
+public class RgbAmountVerificationFailedEvent
+{
+    public string InvoiceId { get; }
+    public string WalletId { get; }
+    public int TransferIdx { get; }
+    public DateTimeOffset Timestamp { get; } = DateTimeOffset.UtcNow;
+
+    public RgbAmountVerificationFailedEvent(string invoiceId, string walletId, int transferIdx)
+    {
+        InvoiceId = invoiceId;
+        WalletId = walletId;
+        TransferIdx = transferIdx;
     }
 }
