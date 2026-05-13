@@ -112,6 +112,8 @@
                     <th>Name</th>
                     <th>Asset ID</th>
                     <th>Balance</th>
+                    <th>Pending</th>
+                    <th>Spendable</th>
                     <th>Precision</th>
                 </tr>
             </thead>
@@ -122,7 +124,22 @@
                         <td><strong>@asset.Ticker</strong></td>
                         <td>@asset.Name</td>
                         <td><code class="small">@asset.AssetId</code></td>
-                        <td>@asset.Balance.ToString("N0")</td>
+                        <td>@asset.FutureBalance.ToString("N0")</td>
+                        <td>
+                            @if (asset.PendingOutgoing > 0)
+                            {
+                                <span class="text-warning">-@asset.PendingOutgoing.ToString("N0") sending</span>
+                            }
+                            else if (asset.PendingIncoming > 0)
+                            {
+                                <span class="text-success">+@asset.PendingIncoming.ToString("N0") receiving</span>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td>@asset.SpendableBalance.ToString("N0")</td>
                         <td>@asset.Precision</td>
                     </tr>
                 }

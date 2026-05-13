@@ -35,6 +35,16 @@
                             <code class="text-break">@asset.AssetId</code>
                         </p>
                         <ul class="list-unstyled mb-0">
+                            <li><strong>Balance:</strong> @asset.FutureBalance.ToString("N0")</li>
+                            @if (asset.PendingOutgoing > 0)
+                            {
+                                <li><span class="text-warning">-@asset.PendingOutgoing.ToString("N0") sending</span></li>
+                            }
+                            else if (asset.PendingIncoming > 0)
+                            {
+                                <li><span class="text-success">+@asset.PendingIncoming.ToString("N0") receiving</span></li>
+                            }
+                            <li><strong>Spendable:</strong> @asset.SpendableBalance.ToString("N0")</li>
                             <li><strong>Precision:</strong> @asset.Precision</li>
                             <li><strong>Issued Supply:</strong> @asset.IssuedSupply.ToString("N0")</li>
                         </ul>

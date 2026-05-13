@@ -16,7 +16,6 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 - BTC transaction history for wallet operations
 - Configurable minimum confirmations for payment settlement
 - Native rgb-lib integration (no external RGB Node required)
-- Secure local PSBT signing (mnemonic never leaves .NET)
 
 ## Installation
 
@@ -225,38 +224,21 @@ BTCPayServer.Plugins.RgbUtexo/
 └── Views/                # Razor views
 ```
 
-### Security Architecture
+## Security Model
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    rgb-lib-c-sharp (watch-only)                  │
-│                                                                  │
-│   Initialized with pubkey only (NO mnemonic!)                    │
-│                                                                  │
-│   • blind_receive()      → RGB invoice                          │
-│   • send_begin()         → unsigned PSBT                        │
-│   • create_utxos_begin() → unsigned PSBT                        │
-│   • list_assets()        → asset list                           │
-└─────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼ Unsigned PSBT
-┌─────────────────────────────────────────────────────────────────┐
-│                 MemoryWalletSigner (C# / .NET)                   │
-│                                                                  │
-│   Mnemonic stored ONLY here (encrypted at rest)                 │
-│   SignPsbtAsync() → signed PSBT                                 │
-└─────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼ Signed PSBT
-┌─────────────────────────────────────────────────────────────────┐
-│                    rgb-lib-c-sharp                               │
-│                                                                  │
-│   • send_end()           → broadcast RGB transfer               │
-│   • create_utxos_end()   → broadcast UTXO creation              │
-└─────────────────────────────────────────────────────────────────┘
-```
+This plugin implements a **server-side custodial hot-wallet**. The BTCPay server operator holds the keys.
 
-**Key principle:** Mnemonic NEVER leaves C# code to native Rust.
+- **Mnemonic storage:** BIP-39 seed phrases are generated server-side and stored in the BTCPay database, encrypted with ASP.NET DataProtection.
+- **Signing:** All transaction signing happens in-process on the BTCPay server. Any user with `CanModifyStoreSettings` permission can trigger signing operations.
+- **Key access:** The seed phrase can be viewed by store admins after password re-verification (rate-limited).
+
+> **Important:** This is custodial software. If the server is compromised, wallet funds are at risk. For production deployments, ensure your BTCPay server is properly secured. Back up your DataProtection key ring — losing it means losing access to all encrypted mnemonics.
+
+A non-custodial mode with external signer support (offline PSBT signing, hardware wallet integration) is planned for a future release.
+
+### DataProtection Key Backup
+
+The mnemonic encryption keys are stored in your BTCPay data directory (e.g., `~/.btcpayserver/Main/DataProtection/`). If these files are lost (disk failure, container recreation without persistent volume), all encrypted mnemonics become permanently unrecoverable. **Back up these files alongside your database.**
 
 ## Dependencies
 

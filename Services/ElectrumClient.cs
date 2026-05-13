@@ -12,9 +12,15 @@ public class ElectrumClient : IDisposable
     int _requestId;
     static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
 
-    public async Task ConnectAsync(string electrumUrl, CancellationToken ct = default)
+    public async Task ConnectAsync(string electrumUrl, CancellationToken ct = default, bool allowInsecure = false)
     {
         var useSsl = electrumUrl.StartsWith("ssl://", StringComparison.OrdinalIgnoreCase);
+        var useTcp = electrumUrl.StartsWith("tcp://", StringComparison.OrdinalIgnoreCase);
+
+        if (useTcp && !allowInsecure)
+            throw new InvalidOperationException(
+                "Unencrypted Electrum connections are not allowed outside regtest. Use ssl:// endpoint.");
+
         var normalized = electrumUrl
             .Replace("tcp://", "", StringComparison.OrdinalIgnoreCase)
             .Replace("ssl://", "", StringComparison.OrdinalIgnoreCase);
@@ -28,8 +34,11 @@ public class ElectrumClient : IDisposable
 
         if (useSsl)
         {
-            // TODO: enforce certificate validation on non-regtest networks
-            var ssl = new SslStream(_tcp.GetStream(), false, (_, _, _, _) => true);
+            SslStream ssl;
+            if (allowInsecure)
+                ssl = new SslStream(_tcp.GetStream(), false, (_, _, _, _) => true);
+            else
+                ssl = new SslStream(_tcp.GetStream(), false);
             await ssl.AuthenticateAsClientAsync(host);
             _stream = ssl;
         }

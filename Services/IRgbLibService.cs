@@ -4,6 +4,7 @@ public interface IRgbLibService : IDisposable
 {
     Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default);
     void UnloadWallet(string walletId);
+    string GetWalletDataDir(string walletId, string walletNetwork);
     
     Task<string> GetAddressAsync(string walletId, CancellationToken ct = default);
     Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false);

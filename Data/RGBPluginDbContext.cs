@@ -53,7 +53,7 @@ public class RGBPluginDbContext : DbContext
         modelBuilder.Entity<RGBAsset>(entity =>
         {
             entity.ToTable("RGB_Assets");
-            entity.HasKey(e => e.AssetId);
+            entity.HasKey(e => new { e.WalletId, e.AssetId });
             entity.HasIndex(e => e.WalletId);
             
             entity.HasOne(e => e.Wallet)

@@ -45,7 +45,6 @@ public class RgbLibService : IRgbLibService
         _config = config;
         _db = db;
         _log = log;
-        Directory.CreateDirectory(config.RgbDataDir);
         
         var assembly = typeof(RgbLibWallet).Assembly;
         _nativeMethodsType = assembly.GetType("RgbLib.NativeMethods")!;
@@ -92,10 +91,10 @@ public class RgbLibService : IRgbLibService
     {
         _log.LogInformation("Lazy loading wallet {WalletId} on network {Network} with max_allocations={MaxAlloc}", walletId, walletNetwork, maxAllocationsPerUtxo);
 
-        var dataDir = Path.Combine(_config.RgbDataDir, walletId);
+        var dataDir = _config.GetWalletDataDir(walletId, walletNetwork);
         Directory.CreateDirectory(dataDir);
         
-        var networkSettings = _config.GetNetworkSettings(walletNetwork);
+        var networkSettings = RGBConfiguration.GetNetworkSettings(walletNetwork);
 
         var walletConfig = new Dictionary<string, object?>
         {
@@ -136,6 +135,9 @@ public class RgbLibService : IRgbLibService
         }
     }
 
+    public string GetWalletDataDir(string walletId, string walletNetwork) =>
+        _config.GetWalletDataDir(walletId, walletNetwork);
+
     public async Task<string> GetAddressAsync(string walletId, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
@@ -173,7 +175,7 @@ public class RgbLibService : IRgbLibService
             ct.ThrowIfCancellationRequested();
             var assetsJson = wallet.ListAssets("[]");
             var assets = JsonSerializer.Deserialize<ListAssetsResponse>(assetsJson);
-            
+
             return assets?.Nia?.Select(a => new RgbAsset
             {
                 AssetId = a.AssetId ?? "",
@@ -181,7 +183,9 @@ public class RgbLibService : IRgbLibService
                 Name = a.Name ?? "",
                 Precision = a.Precision,
                 IssuedSupply = a.IssuedSupply,
-                Balance = a.Balance?.Spendable ?? 0
+                Balance = a.Balance?.Settled ?? 0,
+                FutureBalance = a.Balance?.Future ?? 0,
+                SpendableBalance = a.Balance?.Spendable ?? 0
             }).ToList() ?? [];
         }, ct);
     }
@@ -189,16 +193,21 @@ public class RgbLibService : IRgbLibService
     public async Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, int minConfirmations = 1, CancellationToken ct = default)
     {
         var handle = await GetOrCreateWalletAsync(walletId, ct);
-        
-        var assignment = amount.HasValue 
+
+        await using var ctx = _db.CreateContext();
+        var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
+        var networkSettings = RGBConfiguration.GetNetworkSettings(dbWallet.Network);
+
+        var assignment = amount.HasValue
             ? JsonSerializer.Serialize(new { Fungible = amount.Value })
             : "{\"NonFungible\":null}";
-        
+
         var expirationTs = expiration.HasValue
             ? expiration.Value.ToString()
             : DateTimeOffset.UtcNow.AddSeconds(3600).ToUnixTimeSeconds().ToString();
-        
-        var transportEndpoints = JsonSerializer.Serialize(new[] { _config.ProxyEndpoint });
+
+        var transportEndpoints = JsonSerializer.Serialize(new[] { networkSettings.ProxyEndpoint });
         
         return await handle.ExecuteAsync(wallet =>
         {
@@ -352,7 +361,7 @@ public class RgbLibService : IRgbLibService
         var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
             ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
         
-        var dbPath = Path.Combine(_config.RgbDataDir, walletId, dbWallet.MasterFingerprint, "rgb_lib_db");
+        var dbPath = Path.Combine(_config.GetWalletDataDir(walletId, dbWallet.Network), dbWallet.MasterFingerprint, "rgb_lib_db");
         if (!File.Exists(dbPath))
         {
             _log.LogWarning("RGB sqlite db not found at {Path}", dbPath);
@@ -367,14 +376,19 @@ public class RgbLibService : IRgbLibService
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
-                   COALESCE(
-                       (SELECT json_extract(c.assignment, '$.Fungible')
-                        FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type = 4 LIMIT 1),
-                       (SELECT json_extract(c.assignment, '$.Fungible')
-                        FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type != 3 LIMIT 1),
-                       (SELECT json_extract(c.assignment, '$.Fungible')
-                        FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
-                   ),
+                   CASE
+                       WHEN t.incoming = 0 THEN
+                           json_extract(t.requested_assignment, '$.Fungible')
+                       ELSE
+                           COALESCE(
+                               (SELECT json_extract(c.assignment, '$.Fungible')
+                                FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type IN (1, 2) LIMIT 1),
+                               (SELECT json_extract(c.assignment, '$.Fungible')
+                                FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type != 3 LIMIT 1),
+                               (SELECT json_extract(c.assignment, '$.Fungible')
+                                FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
+                           )
+                   END,
                    t.recipient_type
             FROM transfer t
             JOIN asset_transfer at ON t.asset_transfer_idx = at.idx
@@ -462,7 +476,7 @@ public class RgbLibService : IRgbLibService
             var walletStruct = _walletField.GetValue(wallet)!;
             var onlineStruct = _onlineField.GetValue(wallet)!;
 
-            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString(), "", false };
+            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString(), null, false };
             var result = _sendBeginMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);

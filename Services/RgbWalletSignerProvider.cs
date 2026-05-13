@@ -11,22 +11,19 @@ public class RgbWalletSignerProvider : IHostedService, IRgbWalletSignerProvider
 {
     readonly RGBPluginDbContextFactory _dbFactory;
     readonly MnemonicProtectionService _mnemonicProtection;
-    readonly RGBConfiguration _config;
     readonly ILogger<RgbWalletSignerProvider> _logger;
-    
+
     readonly ConcurrentDictionary<string, IRgbWalletSigner> _signers = new();
-    
+
     TaskCompletionSource _started = new();
 
     public RgbWalletSignerProvider(
         RGBPluginDbContextFactory dbFactory,
         MnemonicProtectionService mnemonicProtection,
-        RGBConfiguration config,
         ILogger<RgbWalletSignerProvider> logger)
     {
         _dbFactory = dbFactory;
         _mnemonicProtection = mnemonicProtection;
-        _config = config;
         _logger = logger;
     }
 
@@ -41,12 +38,11 @@ public class RgbWalletSignerProvider : IHostedService, IRgbWalletSignerProvider
                 .Select(w => new { w.Id, w.EncryptedMnemonic, w.Network })
                 .ToListAsync(cancellationToken);
             
-            var network = NetworkHelper.GetNetwork(_config.Network);
-            
             foreach (var wallet in wallets)
             {
                 try
                 {
+                    var network = NetworkHelper.GetNetwork(wallet.Network);
                     LoadWalletSigner(wallet.Id, wallet.EncryptedMnemonic, network);
                 }
                 catch (Exception ex)

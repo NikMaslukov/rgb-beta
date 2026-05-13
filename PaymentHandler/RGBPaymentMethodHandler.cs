@@ -1,9 +1,11 @@
 using BTCPayServer.Data;
 using BTCPayServer.Payments;
+using BTCPayServer.Plugins.RgbUtexo.Data;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 using BTCPayServer.Rating;
 using BTCPayServer.Services;
 using BTCPayServer.Services.Rates;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -13,18 +15,20 @@ namespace BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 public class RGBPaymentMethodHandler : IPaymentMethodHandler
 {
     readonly RGBWalletService _wallets;
+    readonly RGBPluginDbContextFactory _db;
     readonly RateFetcher _rateFetcher;
     readonly DefaultRulesCollection _defaultRules;
     readonly ILogger<RGBPaymentMethodHandler> _log;
 
     public RGBPaymentMethodHandler(
-        RGBWalletService wallets, 
-        RGBConfiguration config, 
+        RGBWalletService wallets,
+        RGBPluginDbContextFactory db,
         RateFetcher rateFetcher,
         DefaultRulesCollection defaultRules,
         ILogger<RGBPaymentMethodHandler> log)
     {
         _wallets = wallets;
+        _db = db;
         _rateFetcher = rateFetcher;
         _defaultRules = defaultRules;
         _log = log;
@@ -43,6 +47,15 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         var wallet = await _wallets.GetWalletAsync(config.WalletId);
         if (wallet == null)
             throw new PaymentMethodUnavailableException("RGB wallet missing");
+
+        if (string.IsNullOrEmpty(config.DefaultAssetId))
+        {
+            await using var dbContext = _db.CreateContext();
+            var hasApproved = await dbContext.RGBAssets.AnyAsync(a => a.WalletId == config.WalletId && a.AcceptForPayment);
+            if (!hasApproved)
+                throw new PaymentMethodUnavailableException(
+                    "Configure a default RGB asset or approve assets for payment in store Settings before accepting payments");
+        }
 
         var assetId = config.DefaultAssetId;
         var ticker = "RGB";

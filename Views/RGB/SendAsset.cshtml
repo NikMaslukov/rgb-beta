@@ -35,7 +35,18 @@ else
                                 <span class="badge bg-primary me-1">@asset.Ticker</span>
                                 @asset.Name
                             </span>
-                            <strong>@asset.Balance.ToString("N0")</strong>
+                            <span>
+                                <strong>@asset.FutureBalance.ToString("N0")</strong>
+                                @if (asset.PendingOutgoing > 0)
+                                {
+                                    <span class="text-warning small">(-@asset.PendingOutgoing.ToString("N0") sending)</span>
+                                }
+                                else if (asset.PendingIncoming > 0)
+                                {
+                                    <span class="text-success small">(+@asset.PendingIncoming.ToString("N0") receiving)</span>
+                                }
+                                <span class="text-muted small ms-1">(@asset.SpendableBalance.ToString("N0") spendable)</span>
+                            </span>
                         </div>
                     }
                 </div>
@@ -44,18 +55,18 @@ else
             <div class="card">
                 <div class="card-body">
                     <form asp-action="SendAsset" asp-route-storeId="@Model.StoreId" method="post" id="sendForm">
-                        <div asp-validation-summary="ModelOnly" class="text-danger mb-3"></div>
+                        <div asp-validation-summary="ModelOnly"></div>
 
                         <div class="mb-3">
                             <label asp-for="AssetId" class="form-label"></label>
                             <select asp-for="AssetId" class="form-select" id="assetSelect">
                                 <option value="">-- Select asset --</option>
-                                @foreach (var asset in Model.AvailableAssets.Where(a => a.Balance > 0))
+                                @foreach (var asset in Model.AvailableAssets.Where(a => a.SpendableBalance > 0))
                                 {
                                     <option value="@asset.AssetId"
-                                            data-balance="@asset.Balance"
+                                            data-balance="@asset.SpendableBalance"
                                             data-ticker="@asset.Ticker">
-                                        @asset.Ticker — @asset.Balance.ToString("N0") available
+                                        @asset.Ticker — @asset.SpendableBalance.ToString("N0") spendable
                                     </option>
                                 }
                             </select>
