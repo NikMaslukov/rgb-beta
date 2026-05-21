@@ -38,7 +38,8 @@ public enum RGBInvoiceStatus
     WaitingConfirmations = 1,
     Settled = 2,
     Failed = 3,
-    Expired = 4
+    Expired = 4,
+    Underpaid = 5
 }
 
 

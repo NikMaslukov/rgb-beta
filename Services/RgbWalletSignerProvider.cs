@@ -86,18 +86,34 @@ public class RgbWalletSignerProvider : IHostedService, IRgbWalletSignerProvider
     public void LoadWalletSigner(string walletId, string encryptedMnemonic, Network network)
     {
         var mnemonic = _mnemonicProtection.Unprotect(encryptedMnemonic);
-        
+
         if (string.IsNullOrEmpty(mnemonic))
             return;
-        
+
         var signer = new MemoryWalletSigner(mnemonic, network, _logger);
-        _signers[walletId] = signer;
+        if (_signers.TryGetValue(walletId, out var old))
+        {
+            _signers[walletId] = signer;
+            try { old.Dispose(); } catch { }
+        }
+        else
+        {
+            _signers[walletId] = signer;
+        }
     }
 
     public void RegisterSigner(string walletId, string mnemonic, Network network)
     {
         var signer = new MemoryWalletSigner(mnemonic, network, _logger);
-        _signers[walletId] = signer;
+        if (_signers.TryGetValue(walletId, out var old))
+        {
+            _signers[walletId] = signer;
+            try { old.Dispose(); } catch { }
+        }
+        else
+        {
+            _signers[walletId] = signer;
+        }
     }
 
     public void UnloadSigner(string walletId)

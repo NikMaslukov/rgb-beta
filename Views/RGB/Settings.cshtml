@@ -56,61 +56,42 @@
                 </div>
                 <div class="card-body">
                     <p class="text-muted">
-                        Configure which RGB asset customers must use when paying invoices.
+                        Select the RGB asset that customers must use when paying invoices.
                     </p>
-                    
+
                     <div class="mb-3">
                         <label class="form-label">Accepted Asset</label>
-                        <select name="DefaultAssetId" class="form-select" id="assetSelect">
+                        <select name="DefaultAssetId" class="form-select">
                             <option value="">-- Select an asset --</option>
                             @foreach (var asset in Model.AvailableAssets)
                             {
-                                <option value="@asset.AssetId" 
-                                        selected="@(Model.DefaultAssetId == asset.AssetId)">
+                                <option value="@asset.AssetId"
+                                        selected="@(Model.DefaultAssetId == asset.AssetId ? "selected" : null)">
                                     @asset.Ticker - @asset.Name (@asset.AssetId[..20]...)
                                 </option>
                             }
                         </select>
                         <div class="form-text">
-                            Select the RGB asset that customers must use for payments.
                             @if (Model.AvailableAssets.Count == 0)
                             {
                                 <span class="text-warning">
-                                    <i class="fa fa-exclamation-triangle"></i> 
+                                    <i class="fa fa-exclamation-triangle"></i>
                                     No assets found. <a asp-action="IssueAsset" asp-route-storeId="@Model.StoreId">Issue an asset</a> first.
                                 </span>
+                            }
+                            else
+                            {
+                                <span>RGB invoices will only accept payment in this asset.</span>
                             }
                         </div>
                     </div>
 
-                    @if (Model.AvailableAssets.Count > 0)
-                    {
-                        <div class="mb-3">
-                            <label class="form-label">Accept for Payment</label>
-                            <div class="form-text mb-2">
-                                Select which assets can be accepted as payment on wildcard invoices (no default asset).
-                                Self-issued assets are approved by default.
-                            </div>
-                            @foreach (var asset in Model.AvailableAssets)
-                            {
-                                <div class="form-check">
-                                    <input type="checkbox" name="ApprovedAssetIds" value="@asset.AssetId"
-                                           class="form-check-input" id="accept_@asset.AssetId"
-                                           checked="@asset.AcceptForPayment" />
-                                    <label class="form-check-label" for="accept_@asset.AssetId">
-                                        @asset.Ticker - @asset.Name (@asset.AssetId[..20]...)
-                                    </label>
-                                </div>
-                            }
-                        </div>
-                    }
-
-                    @if (string.IsNullOrEmpty(Model.DefaultAssetId) && !Model.AvailableAssets.Any(a => a.AcceptForPayment))
+                    @if (Model.AvailableAssets.Count > 0 && string.IsNullOrEmpty(Model.DefaultAssetId))
                     {
                         <div class="alert alert-warning">
                             <i class="fa fa-exclamation-triangle"></i>
-                            <strong>RGB payments disabled.</strong> No default asset configured and no assets approved for payment.
-                            RGB invoices will not be created until you select a default asset above or approve assets for payment.
+                            <strong>RGB payments disabled.</strong> No asset selected.
+                            RGB invoices will not be created until you select an asset above.
                         </div>
                     }
 
@@ -167,6 +148,23 @@
                                 Number of blockchain confirmations required before marking an RGB payment as settled (default: 1)
                             </div>
                         </div>
+                    </div>
+
+                    <hr class="my-4" />
+                    <h6 class="mb-3"><i class="fa fa-exchange-alt"></i> Exchange Rate</h6>
+
+                    <div class="form-check mb-2">
+                        <input type="checkbox" name="AllowOneToOneRateFallback" value="true"
+                               class="form-check-input" id="allowFallback"
+                               @(Model.AllowOneToOneRateFallback ? "checked" : "") />
+                        <label class="form-check-label" for="allowFallback">
+                            Allow 1:1 rate fallback when exchange rate is unavailable
+                        </label>
+                    </div>
+                    <div class="alert alert-warning small">
+                        <i class="fa fa-exclamation-triangle"></i>
+                        Enable only for stablecoin assets (e.g., USDT, USDC) where 1:1 rate is correct.
+                        When disabled, invoices will not offer RGB payment if exchange rate is unavailable.
                     </div>
 
                     <button type="submit" class="btn btn-primary">

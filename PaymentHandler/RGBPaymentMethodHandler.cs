@@ -49,53 +49,33 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             throw new PaymentMethodUnavailableException("RGB wallet missing");
 
         if (string.IsNullOrEmpty(config.DefaultAssetId))
-        {
-            await using var dbContext = _db.CreateContext();
-            var hasApproved = await dbContext.RGBAssets.AnyAsync(a => a.WalletId == config.WalletId && a.AcceptForPayment);
-            if (!hasApproved)
-                throw new PaymentMethodUnavailableException(
-                    "Configure a default RGB asset or approve assets for payment in store Settings before accepting payments");
-        }
+            throw new PaymentMethodUnavailableException(
+                "Select a default RGB asset in store Settings to accept payments");
 
-        var assetId = config.DefaultAssetId;
-        var ticker = "RGB";
-        var name = "RGB Asset";
-        var precision = 0;
+        await using var dbContext = _db.CreateContext();
+        var asset = await dbContext.RGBAssets.FirstOrDefaultAsync(
+            a => a.WalletId == config.WalletId && a.AssetId == config.DefaultAssetId);
+        if (asset == null)
+            throw new PaymentMethodUnavailableException(
+                $"Configured asset {config.DefaultAssetId[..Math.Min(20, config.DefaultAssetId.Length)]}... not found in wallet");
 
-        if (!string.IsNullOrEmpty(assetId))
-        {
-            try
-            {
-                var assets = await _wallets.ListAssetsAsync(config.WalletId);
-                var match = assets.Find(a => a.AssetId == assetId);
-                if (match != null)
-                {
-                    ticker = match.Ticker;
-                    name = match.Name;
-                    precision = match.Precision;
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "Could not fetch asset {Id} details", assetId);
-            }
-        }
+        var assetId = asset.AssetId;
+        var ticker = asset.Ticker ?? "RGB";
+        var name = asset.Name ?? "RGB Asset";
+        var precision = asset.Precision;
 
         var invoiceCurrency = ctx.InvoiceEntity.Currency;
         var invoicePrice = ctx.InvoiceEntity.Price;
         
-        var (rate, rateSource) = await TryFetchRateAsync(ticker, invoiceCurrency, ctx.Store);
+        var (rate, rateSource) = await TryFetchRateAsync(ticker, invoiceCurrency, ctx.Store, config.AllowOneToOneRateFallback);
+        if (precision > 18)
+            throw new PaymentMethodUnavailableException(
+                $"Asset precision {precision} exceeds maximum supported (18)");
         var multiplier = (decimal)Math.Pow(10, precision);
-        decimal unitsDecimal;
-        if (rate > 0)
-        {
-            unitsDecimal = invoicePrice / rate * multiplier;
-        }
-        else
-        {
-            unitsDecimal = invoicePrice * multiplier;
-            rate = 1m;
-        }
+        var unitsDecimal = invoicePrice / rate * multiplier;
+        if (unitsDecimal > long.MaxValue)
+            throw new PaymentMethodUnavailableException(
+                $"Calculated amount exceeds maximum ({unitsDecimal:N0} units)");
         var units = invoicePrice > 0 ? (long)Math.Ceiling(unitsDecimal) : 1L;
         
         _log.LogInformation("RGB invoice: {Price} {Currency} → {Units} {Ticker} (rate: {Rate} from {Source})", 
@@ -146,37 +126,59 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         d.ToObject<RGBPaymentData>(Serializer) ?? throw new FormatException("bad payment");
     object IPaymentMethodHandler.ParsePaymentDetails(JToken d) => ParsePaymentDetails(d);
 
-    public void StripDetailsForNonOwner(object details) { }
+    public void StripDetailsForNonOwner(object details)
+    {
+        if (details is RGBPromptDetails d)
+        {
+            d.WalletId = "";
+            d.RgbInvoiceId = "";
+            d.RecipientId = "";
+        }
+    }
 
-    async Task<(decimal Rate, string Source)> TryFetchRateAsync(string ticker, string invoiceCurrency, StoreData store)
+    async Task<(decimal Rate, string Source)> TryFetchRateAsync(string ticker, string invoiceCurrency, StoreData store, bool allowFallback)
     {
         try
         {
             var pair = new CurrencyPair(ticker, invoiceCurrency);
             var storeBlob = store.GetStoreBlob();
             var rateRules = storeBlob.GetRateRules(_defaultRules);
-            
+
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            
+
             var result = await _rateFetcher.FetchRate(pair, rateRules, new StoreIdRateContext(store.Id), cts.Token);
-            
+
             if (result.BidAsk != null && result.BidAsk.Bid > 0)
             {
                 _log.LogInformation("Found exchange rate for {Pair}: {Rate}", pair, result.BidAsk.Bid);
                 return (result.BidAsk.Bid, result.Rule ?? "exchange");
             }
-            
-            _log.LogInformation("No exchange rate found for {Pair}, using 1:1 fallback", pair);
+
+            if (allowFallback)
+            {
+                _log.LogWarning("No exchange rate found for {Pair}, using opted-in 1:1 fallback", pair);
+                return (1m, "fallback-1:1-opted-in");
+            }
+            throw new PaymentMethodUnavailableException($"Exchange rate for {ticker}/{invoiceCurrency} unavailable");
         }
+        catch (PaymentMethodUnavailableException) { throw; }
         catch (OperationCanceledException)
         {
-            _log.LogWarning("Rate fetch timed out for {Ticker}/{Currency}, using 1:1 fallback", ticker, invoiceCurrency);
+            if (allowFallback)
+            {
+                _log.LogWarning("Rate fetch timed out for {Ticker}/{Currency}, using opted-in 1:1 fallback", ticker, invoiceCurrency);
+                return (1m, "fallback-1:1-opted-in");
+            }
+            throw new PaymentMethodUnavailableException($"Exchange rate for {ticker}/{invoiceCurrency} unavailable");
         }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "Failed to fetch rate for {Ticker}/{Currency}, using 1:1 fallback", ticker, invoiceCurrency);
+            if (allowFallback)
+            {
+                _log.LogWarning(ex, "Failed to fetch rate for {Ticker}/{Currency}, using opted-in 1:1 fallback", ticker, invoiceCurrency);
+                return (1m, "fallback-1:1-opted-in");
+            }
+            throw new PaymentMethodUnavailableException($"Exchange rate for {ticker}/{invoiceCurrency} unavailable");
         }
-        
-        return (1m, "fallback-1:1");
     }
 }

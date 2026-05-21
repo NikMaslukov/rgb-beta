@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Bumps direct references in submodule projects to patched versions.
+    Runs AFTER the project's own PackageReference declarations so Update wins.
+    - MailKit: GHSA-9j88-vvj5-vhgr (moderate) — fixed in 4.16.0+
+  -->
+  <ItemGroup>
+    <PackageReference Update="MailKit" Version="4.16.0" />
+  </ItemGroup>
+</Project>

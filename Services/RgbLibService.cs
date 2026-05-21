@@ -591,7 +591,8 @@ public class RgbLibService : IRgbLibService
             if (json == null)
                 throw new RgbLibException("Failed to decode invoice data");
 
-            _log.LogDebug("Decoded invoice: {Json}", json);
+            _log.LogDebug("Decoded invoice for recipient {RecipientId}",
+                json.Length > 200 ? "(large payload)" : "(ok)");
             return JsonSerializer.Deserialize<RgbInvoiceData>(json)
                    ?? throw new RgbLibException("Failed to parse invoice data JSON");
         }
@@ -623,10 +624,9 @@ public class RgbLibService : IRgbLibService
         var masterKey = mnemonicObj.DeriveExtKey();
         var fingerprint = masterKey.GetPublicKey().GetHDFingerPrint().ToString();
 
-        var vanillaCoinType = nbNetwork == Network.Main ? 0 : 1;
-        var coloredCoinType = nbNetwork == Network.Main ? 827166 : 827167;
-        var vanillaPath = new KeyPath($"m/86'/{vanillaCoinType}'/0'");
-        var coloredPath = new KeyPath($"m/86'/{coloredCoinType}'/0'");
+        var coinType = nbNetwork == Network.Main ? 0 : 1;
+        var vanillaPath = new KeyPath($"m/84'/{coinType}'/0'");
+        var coloredPath = new KeyPath($"m/86'/{coinType}'/0'");
 
         var vanillaXpub = masterKey.Derive(vanillaPath).Neuter().ToString(nbNetwork);
         var coloredXpub = masterKey.Derive(coloredPath).Neuter().ToString(nbNetwork);

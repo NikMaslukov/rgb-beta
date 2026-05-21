@@ -5,7 +5,7 @@
 Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 
 [![BTCPay Server](https://img.shields.io/badge/BTCPay%20Server-Plugin-brightgreen)](https://btcpayserver.org)
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-blue)](https://dotnet.microsoft.com)
+[![.NET 10](https://img.shields.io/badge/.NET-10.0-blue)](https://dotnet.microsoft.com)
 
 ## Features
 
@@ -120,8 +120,7 @@ The new asset will appear on your Assets page and in the dashboard.
 
 1. Navigate to **Settings** (gear icon on the dashboard, or sidebar)
 2. Under **Payment Configuration**:
-   - **Accepted Asset** — Select which RGB asset customers must pay with
-   - **Accept any RGB asset** — Check this to accept any RGB asset (not recommended for production)
+   - **Accepted Asset** — Select the RGB asset customers must use for payment. RGB invoices will only accept this asset.
 3. Under **UTXO Settings** (optional):
    - **UTXO Count** — How many colorable UTXOs to create at once (default: 4)
    - **UTXO Size** — Size of each UTXO in satoshis (default: 1000)
@@ -185,7 +184,7 @@ The plugin polls for transfer updates every 10 seconds. The number of confirmati
 
 ### Prerequisites
 
-- .NET 8.0 SDK
+- .NET 10.0 SDK
 - BTCPay Server source (as submodule)
 
 ### Build
@@ -242,7 +241,7 @@ The mnemonic encryption keys are stored in your BTCPay data directory (e.g., `~/
 
 ## Dependencies
 
-- **RgbLib** v0.3.0-beta.9 - Native rgb-lib bindings
+- **RgbLib** v0.3.0-beta.18 - Native rgb-lib bindings
 - **NBitcoin** - Bitcoin primitives and PSBT signing
 - **Npgsql.EntityFrameworkCore.PostgreSQL** - Database persistence
 

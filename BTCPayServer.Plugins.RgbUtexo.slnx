@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/submodules/" />
+  <Folder Name="/submodules/btcpayserver/">
+    <Project Path="submodules/btcpayserver/BTCPayServer.Abstractions/BTCPayServer.Abstractions.csproj" />
+    <Project Path="submodules/btcpayserver/BTCPayServer.Client/BTCPayServer.Client.csproj" />
+    <Project Path="submodules/btcpayserver/BTCPayServer.Common/BTCPayServer.Common.csproj" />
+    <Project Path="submodules/btcpayserver/BTCPayServer.Data/BTCPayServer.Data.csproj" />
+    <Project Path="submodules/btcpayserver/BTCPayServer.Rating/BTCPayServer.Rating.csproj" />
+    <Project Path="submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" />
+  </Folder>
+  <Project Path="BTCPayServer.Plugins.RgbUtexo.csproj" />
+  <Project Path="BTCPayServer.Plugins.RgbUtexo.Tests/BTCPayServer.Plugins.RgbUtexo.Tests.csproj" />
+</Solution>

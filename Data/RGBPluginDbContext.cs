@@ -28,7 +28,7 @@ public class RGBPluginDbContext : DbContext
         {
             entity.ToTable("RGB_Wallets");
             entity.HasKey(e => e.Id);
-            entity.HasIndex(e => e.StoreId);
+            entity.HasIndex(e => e.StoreId).IsUnique().HasFilter("\"IsActive\" = true");
             entity.Property(e => e.XpubVanilla).IsRequired();
             entity.Property(e => e.XpubColored).IsRequired();
             entity.Property(e => e.MasterFingerprint).IsRequired();

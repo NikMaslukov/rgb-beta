@@ -223,7 +223,7 @@
 
 @section PageFootContent {
 <script>
-    const networkSettings = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.AllNetworkSettings));
+    const networkSettings = JSON.parse(@Html.Raw(System.Text.Json.JsonSerializer.Serialize(System.Text.Json.JsonSerializer.Serialize(Model.AllNetworkSettings))));
 
     document.querySelectorAll('.networkSelect').forEach(function(sel) {
         sel.addEventListener('change', function() {

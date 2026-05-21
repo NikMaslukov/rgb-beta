@@ -14,7 +14,7 @@ public class RGBSetupViewModel : StoreViewModel
     public string WalletName { get; set; } = "RGB Wallet";
 
     [Display(Name = "Network")]
-    public string SelectedNetwork { get; set; } = "regtest";
+    public string SelectedNetwork { get; set; } = "";
 
     public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "signet", "mainnet"];
 
@@ -78,7 +78,6 @@ public class RGBAssetViewModel
     public long SpendableBalance { get; set; }
     public long PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
     public long PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
-    public bool AcceptForPayment { get; set; }
 }
 
 public class RGBIssueAssetViewModel : StoreViewModel
@@ -233,4 +232,6 @@ public class RGBSettingsViewModel : StoreViewModel
     [Display(Name = "Min Confirmations")]
     [Range(1, 100)]
     public int MinConfirmations { get; set; } = 1;
+
+    public bool AllowOneToOneRateFallback { get; set; }
 }

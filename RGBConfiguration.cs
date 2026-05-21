@@ -34,7 +34,9 @@ public class NetworkSettings
     public static NetworkSettings GetForNetwork(string network)
     {
         var key = network.ToLowerInvariant();
-        return Defaults.TryGetValue(key, out var settings) ? settings : Defaults["regtest"];
+        if (!Defaults.TryGetValue(key, out var settings))
+            throw new ArgumentException($"Unknown RGB network: {network}. Expected one of: {string.Join(", ", Defaults.Keys)}");
+        return settings;
     }
 
     public static string[] AvailableNetworks => ["regtest", "testnet", "signet", "mainnet"];
@@ -47,6 +49,9 @@ public class RGBConfiguration
 
     [JsonPropertyName("max_allocations_per_utxo")]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
+
+    [JsonPropertyName("allow_private_transport_endpoints")]
+    public bool AllowPrivateTransportEndpoints { get; set; }
 
     public RGBConfiguration() { }
 
@@ -78,12 +83,13 @@ public class RGBConfiguration
         return newPath;
     }
 
-    static string MapNetworkFolder(string network) => network.ToLowerInvariant() switch
+    internal static string MapNetworkFolder(string network) => network.ToLowerInvariant() switch
     {
         "mainnet" or "main" => "Main",
         "testnet" => "TestNet",
         "signet" => "Signet",
-        _ => "RegTest"
+        "regtest" => "RegTest",
+        _ => throw new ArgumentException($"Unknown RGB network: {network}")
     };
 
     public static NetworkSettings GetNetworkSettings(string walletNetwork)
