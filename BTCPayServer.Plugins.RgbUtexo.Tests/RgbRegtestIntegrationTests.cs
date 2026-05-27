@@ -24,18 +24,14 @@ public class RgbRegtestIntegrationTests
     /// cert SAN does not match the original hostname.
     ///
     /// Status: DEFERRED. M6/NEW-2 are NOT closed by this PR. The rgb-lib
-    /// 0.3.0-beta.18 FFI does not expose a single-rpcs-request entrypoint
-    /// that can be driven from C# without going through the full send-asset
-    /// path (which is blocked by TransportEndpointValidator's loopback
-    /// rejection in test environments). Closing M6/NEW-2 requires either
-    /// upstream FFI work in rgb-lib, or a refactor of TransportEndpointValidator
+    /// FFI does not expose a single-rpcs-request entrypoint that can be
+    /// driven from C# without going through the full send-asset path
+    /// (which is blocked by TransportEndpointValidator's loopback rejection
+    /// in test environments). Closing M6/NEW-2 requires either upstream
+    /// FFI work in rgb-lib, or a refactor of TransportEndpointValidator
     /// to accept an IDnsResolver test seam — both out of scope for this PR.
-    ///
-    /// Upstream issue: FILL-IN-REAL-URL (file before merge; replace this
-    /// placeholder with the actual rgb-lib issue URL — the commit will be
-    /// rejected at step 6.4 if this placeholder remains).
     /// </summary>
-    [Fact(Skip = "rgb-lib FFI does not expose a single rpcs request entrypoint; TLS hostname-mismatch defense cannot be verified from C# until upstream issue FILL-IN-REAL-URL is resolved. Defense relies on rgb-lib's internal TLS validation; behavior is currently asserted only via manual fixture per Services/TransportEndpointValidator.cs design note.")]
+    [Fact(Skip = "Deferred: rgb-lib FFI does not expose a single rpcs request entrypoint, so TLS hostname-mismatch defense cannot be exercised from C# without a full send-asset path. Behavior is currently asserted only via manual fixture per Services/TransportEndpointValidator.cs design note.")]
     public void RgbLibRpcsTls_RejectsCertHostnameMismatch_ManualSetup()
     {
         // Manual verification only — see Skip reason.
