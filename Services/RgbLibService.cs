@@ -116,7 +116,17 @@ public class RgbLibService : IRgbLibService
 
         var configJson = JsonSerializer.Serialize(walletConfig);
         var keysJson = JsonSerializer.Serialize(keysConfig);
-        var wallet = new RgbLibWallet(configJson, keysJson);
+        RgbLibWallet wallet;
+        try
+        {
+            wallet = new RgbLibWallet(configJson, keysJson);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "RgbLibWallet ctor failed. walletId={WalletId} dataDir={DataDir} fingerprint={Fingerprint} config={Config} keys={Keys}",
+                walletId, dataDir, masterFingerprint, configJson, keysJson);
+            throw;
+        }
         wallet.GoOnline(networkSettings.ElectrumUrl, true);
 
         _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
@@ -619,25 +629,16 @@ public class RgbLibService : IRgbLibService
 
     public RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network)
     {
-        var nbNetwork = NetworkHelper.GetNetwork(network);
-        var mnemonicObj = new Mnemonic(mnemonic, Wordlist.English);
-        var masterKey = mnemonicObj.DeriveExtKey();
-        var fingerprint = masterKey.GetPublicKey().GetHDFingerPrint().ToString();
-
-        var coinType = nbNetwork == Network.Main ? 0 : 1;
-        var vanillaPath = new KeyPath($"m/84'/{coinType}'/0'");
-        var coloredPath = new KeyPath($"m/86'/{coinType}'/0'");
-
-        var vanillaXpub = masterKey.Derive(vanillaPath).Neuter().ToString(nbNetwork);
-        var coloredXpub = masterKey.Derive(coloredPath).Neuter().ToString(nbNetwork);
+        var keysJson = RgbLibWallet.RestoreKeys(NetworkHelper.MapNetworkToRgbLibFormat(network), mnemonic);
+        var keys = JsonSerializer.Deserialize<GenerateKeysResponse>(keysJson);
 
         return new RgbKeys
         {
             Mnemonic = mnemonic,
-            Xpub = masterKey.Neuter().ToString(nbNetwork),
-            AccountXpubVanilla = vanillaXpub,
-            AccountXpubColored = coloredXpub,
-            MasterFingerprint = fingerprint
+            Xpub = keys?.Xpub ?? "",
+            AccountXpubVanilla = keys?.AccountXpubVanilla ?? "",
+            AccountXpubColored = keys?.AccountXpubColored ?? "",
+            MasterFingerprint = keys?.MasterFingerprint ?? ""
         };
     }
 

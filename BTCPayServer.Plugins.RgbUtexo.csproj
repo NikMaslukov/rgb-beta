@@ -13,6 +13,7 @@
         <GenerateRuntimeConfigDevFile>true</GenerateRuntimeConfigDevFile>
         <MvcRazorCompileOnPublish>false</MvcRazorCompileOnPublish>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+        <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     </PropertyGroup>
 
     <PropertyGroup>

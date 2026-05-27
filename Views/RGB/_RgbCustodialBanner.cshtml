@@ -1,0 +1,17 @@
+<div id="rgb-custodial-banner" class="alert alert-warning alert-dismissible fade show" role="alert" style="display:none">
+    This wallet is custodial. Treat seed access as bank-level credentials.
+    <button type="button" id="rgb-custodial-banner-close" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+</div>
+<script>
+    (function() {
+        var banner = document.getElementById('rgb-custodial-banner');
+        var closeBtn = document.getElementById('rgb-custodial-banner-close');
+        if (!banner || !closeBtn) return;
+        if (!sessionStorage.getItem('rgbCustodialBannerDismissed')) {
+            banner.style.display = '';
+        }
+        closeBtn.addEventListener('click', function() {
+            sessionStorage.setItem('rgbCustodialBannerDismissed', '1');
+        });
+    })();
+</script>

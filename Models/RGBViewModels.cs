@@ -39,6 +39,9 @@ public class RGBSetupViewModel : StoreViewModel
 
     [Display(Name = "Backup Password")]
     public string? BackupPassword { get; set; }
+
+    [Display(Name = "I understand and accept the custodial hot-wallet risk")]
+    public bool AcknowledgesCustodialRisk { get; set; }
 }
 
 public class NetworkSettingsDto

@@ -33,7 +33,7 @@ public class RGBController : Controller
 {
     static readonly Newtonsoft.Json.JsonSerializer _blobSerializer = BlobSerializer.CreateSerializer().Serializer;
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _viewSeedLocks = new();
-    readonly RGBWalletService _wallets;
+    readonly IRGBWalletService _wallets;
     readonly StoreRepository _stores;
     readonly PaymentMethodHandlerDictionary _handlers;
     readonly RGBPluginDbContextFactory _db;
@@ -43,7 +43,7 @@ public class RGBController : Controller
     readonly IMemoryCache _cache;
     readonly BTCPayServerOptions _btcPayOptions;
 
-    public RGBController(RGBWalletService wallets, StoreRepository stores,
+    public RGBController(IRGBWalletService wallets, StoreRepository stores,
         PaymentMethodHandlerDictionary handlers, RGBPluginDbContextFactory db, ILogger<RGBController> log,
         UserManager<ApplicationUser> userManager, EventAggregator events, IMemoryCache cache,
         IOptions<BTCPayServerOptions> btcPayOptions)
@@ -150,6 +150,14 @@ public class RGBController : Controller
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
 
+        if (!model.AcknowledgesCustodialRisk)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "You must acknowledge the custodial hot-wallet risk to create a wallet.";
+            model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+            return View("Setup", model);
+        }
+
         if (!ModelState.IsValid)
         {
             model.AvailableNetworks = NetworkSettings.AvailableNetworks;
@@ -205,6 +213,15 @@ public class RGBController : Controller
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
+
+        if (!model.AcknowledgesCustodialRisk)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "You must acknowledge the custodial hot-wallet risk to create a wallet.";
+            model.IsRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
 
         if (!ValidateMnemonic(model.Mnemonic))
         {
@@ -266,6 +283,15 @@ public class RGBController : Controller
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
+
+        if (!model.AcknowledgesCustodialRisk)
+        {
+            TempData[WellKnownTempData.ErrorMessage] =
+                "You must acknowledge the custodial hot-wallet risk to create a wallet.";
+            model.IsBackupRestore = true;
+            PopulateSetupModel(model);
+            return View("Setup", model);
+        }
 
         if (!ValidateMnemonic(model.Mnemonic))
         {

@@ -9,7 +9,7 @@ using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
-public class RGBWalletService
+public class RGBWalletService : IRGBWalletService
 {
     readonly IRgbLibService _rgbLib;
     readonly RGBPluginDbContextFactory _db;
@@ -679,6 +679,7 @@ public class RGBWalletService
             && _cfg.AllowPrivateTransportEndpoints;
 
         var invoiceData = _rgbLib.DecodeInvoice(rgbInvoice);
+        EnsureInvoiceNetworkMatchesWallet(invoiceData.Network, wallet.Network);
         var assets = await _rgbLib.ListAssetsAsync(walletId, ct);
         var (resolvedAssetId, asset) = ValidateSendAssetRequest(invoiceData, assetId, amount, assets);
 
@@ -760,6 +761,14 @@ public class RGBWalletService
     {
         var bytes = script.ToBytes();
         return bytes.Length == 34 && bytes[0] == 0x51 && bytes[1] == 0x20;
+    }
+
+    internal static void EnsureInvoiceNetworkMatchesWallet(string invoiceNetwork, string walletNetwork)
+    {
+        var expectedRgbNetwork = NetworkHelper.MapNetworkToRgbLibFormat(walletNetwork);
+        if (!string.Equals(invoiceNetwork, expectedRgbNetwork, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"RGB invoice network '{invoiceNetwork}' does not match wallet network '{expectedRgbNetwork}'.");
     }
 
     internal static (string ResolvedAssetId, RgbAsset Asset) ValidateSendAssetRequest(

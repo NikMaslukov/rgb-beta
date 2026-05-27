@@ -233,6 +233,20 @@ This plugin implements a **server-side custodial hot-wallet**. The BTCPay server
 
 > **Important:** This is custodial software. If the server is compromised, wallet funds are at risk. For production deployments, ensure your BTCPay server is properly secured. Back up your DataProtection key ring — losing it means losing access to all encrypted mnemonics.
 
+### RGB Send Signing Trust Boundary
+
+Before signing a PSBT, the plugin applies local BTC-level policy checks:
+
+- rejects BTC outputs to unknown scripts above the configured policy limit;
+- restricts wallet/change outputs to scripts derived from the local wallet;
+- enforces fee and output-count limits;
+- rejects non-zero-value `OP_RETURN` outputs;
+- routes BTC and RGB send signing through the in-process wallet signer.
+
+These checks reduce the blast radius of a malformed PSBT, but RGB transfer construction is still trusted to `rgb-lib`. The signer does not independently verify that the unsigned PSBT encodes the expected RGB asset ID, RGB amount, recipient ID, or state-transition commitment. A compromised or malicious `rgb-lib` could construct a PSBT that passes the BTC-level checks while violating the intended RGB transfer semantics.
+
+This is an explicit trust boundary: the plugin verifies the Bitcoin transaction policy locally and relies on `rgb-lib` for RGB state-transition correctness.
+
 A non-custodial mode with external signer support (offline PSBT signing, hardware wallet integration) is planned for a future release.
 
 ### DataProtection Key Backup
@@ -284,6 +298,15 @@ Verify your Electrum server is reachable. Check `RGB_ELECTRUM_URL` environment v
 | macOS ARM64 (Apple Silicon) | Supported |
 | macOS x64 (Intel) | Not supported (native library not included) |
 | Windows | Not supported (native library not included) |
+
+## Building from source
+
+This repository uses NuGet lockfiles (`packages.lock.json`) for both the plugin and test projects to pin transitive dependencies at known-good versions.
+
+- First-time clone / clean restore: `dotnet restore --use-lock-file`
+- Standard build verification: `dotnet restore --locked-mode` — this fails the build if any resolved version drifts from the committed lockfile.
+- After a BTCPay submodule update (or any change to the plugin's direct/transitive packages): `dotnet restore --force-evaluate` regenerates the lockfile to match the new graph. Commit the regenerated `packages.lock.json`.
+- The lockfile pins *version strings* only. It does NOT verify NuGet author signatures or SLSA provenance — those are deferred release-process controls.
 
 ## License
 
