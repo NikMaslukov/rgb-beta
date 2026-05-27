@@ -13,6 +13,13 @@
         <GenerateRuntimeConfigDevFile>true</GenerateRuntimeConfigDevFile>
         <MvcRazorCompileOnPublish>false</MvcRazorCompileOnPublish>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+
+        <!-- Supply-chain: pin every dependency (incl. the in-tree RgbLib.nupkg) by SHA-512.
+             dotnet restore writes packages.lock.json, and any future restore validates the
+             hashes; mismatched / substituted packages fail the build. See .github/README.md
+             "Supply chain" for verification instructions. -->
+        <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+        <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
     </PropertyGroup>
 
     <PropertyGroup>
