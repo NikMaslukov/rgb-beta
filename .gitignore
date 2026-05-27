@@ -14,3 +14,7 @@ Thumbs.db
 
 
 
+
+# Local-only files (kept out of PRs)
+CLAUDE.md
+promt.txt
