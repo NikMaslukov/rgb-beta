@@ -76,9 +76,9 @@
       },
       "RgbLib": {
         "type": "Direct",
-        "requested": "[0.3.0-beta.18, )",
-        "resolved": "0.3.0-beta.18",
-        "contentHash": "775X/n9sh6yss77AEaKCW9jeL3vYzJyjVLnOllfNZE46LSKkNiDuN4ux2J5qlJEggXgK0M2OtCSDIkpL4BoYKg=="
+        "requested": "[0.3.0-beta.21, )",
+        "resolved": "0.3.0-beta.21",
+        "contentHash": "NGsI2E/7Rayt5Hy0J+R++qyc55Yb5dMGdSmsZIUD4snSYtTCX8lxr4yHPvbxyltH/ZBx/ZMyNpwS+deiTR0+5g=="
       },
       "Humanizer.Core": {
         "type": "Transitive",
