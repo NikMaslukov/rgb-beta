@@ -12,9 +12,13 @@ name: Release
 #
 # The workflow will:
 #   - Validate that the input version matches both manifest files.
+#   - Restore dependencies in locked mode (packages.lock.json must match).
 #   - Build the plugin and pack it into a `.btcpay` artifact.
 #   - Create (or reuse) the tag v<version> on the chosen commit.
 #   - Publish a GitHub Release with the artifact and its sha256.
+#   - Generate a SLSA Level 3 build provenance attestation
+#     (in-toto JSON, keyless-signed via Sigstore, recorded in Rekor)
+#     and attach it to the same Release.
 
 on:
   workflow_dispatch:
@@ -29,9 +33,6 @@ on:
         default: false
         type: boolean
 
-permissions:
-  contents: write
-
 concurrency:
   group: release-${{ inputs.version }}
   cancel-in-progress: false
@@ -39,6 +40,11 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      hashes: ${{ steps.subjects.outputs.hashes }}
+      tag: ${{ steps.subjects.outputs.tag }}
     env:
       ARTIFACT_NAME: BTCPayServer.Plugins.RgbUtexo.btcpay
       PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
@@ -84,8 +90,12 @@ jobs:
           dotnet-version: |
             10.0.x
 
-      - name: Restore
-        run: dotnet restore "$PROJECT_FILE"
+      - name: Restore (locked mode — packages.lock.json must match)
+        run: |
+          set -euo pipefail
+          dotnet restore "$PROJECT_FILE" \
+            --locked-mode \
+            -p:ContinuousIntegrationBuild=true
 
       - name: Publish (Release)
         run: |
@@ -155,6 +165,16 @@ jobs:
             "$ARTIFACT_NAME.sha256" \
             "${ARGS[@]}"
 
+      - name: Export SLSA subjects (base64 of "<sha256>  <name>")
+        id: subjects
+        run: |
+          set -euo pipefail
+          # slsa-github-generator expects a base64-encoded multi-line list of
+          # "<sha256>  <name>" lines (the standard sha256sum format).
+          HASHES=$(sha256sum "$ARTIFACT_NAME" | base64 -w0)
+          echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Summary
         run: |
           {
@@ -164,4 +184,28 @@ jobs:
             echo "- Artifact: \`$ARTIFACT_NAME\`"
             echo "- SHA-256: \`$(cut -d' ' -f1 "$ARTIFACT_NAME.sha256")\`"
             echo "- URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+            echo
+            echo "SLSA provenance attestation is attached by the \`provenance\` job below."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # SLSA Level 3 generic provenance generator.
+  # Runs in an isolated reusable workflow (separate runner, scoped OIDC token),
+  # signs the attestation keyless via Sigstore, records it in the public Rekor
+  # transparency log, and attaches `*.intoto.jsonl` to the Release created above.
+  #
+  # Verify with:
+  #   slsa-verifier verify-artifact BTCPayServer.Plugins.RgbUtexo.btcpay \
+  #     --provenance-path BTCPayServer.Plugins.RgbUtexo.btcpay.intoto.jsonl \
+  #     --source-uri github.com/UTEXO-Protocol/rgb-btcpay-plugin \
+  #     --source-tag vX.Y.Z
+  provenance:
+    needs: release
+    permissions:
+      actions: read       # read workflow metadata for the attestation
+      id-token: write     # mint the OIDC token Sigstore uses to sign
+      contents: write     # attach the *.intoto.jsonl to the Release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.release.outputs.hashes }}"
+      upload-assets: true
+      upload-tag-name: "${{ needs.release.outputs.tag }}"
