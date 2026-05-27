@@ -4,6 +4,7 @@
 }
 
 <div class="sticky-header-setup"></div>
+<partial name="_RgbCustodialBanner" />
 <div class="sticky-header d-flex flex-wrap gap-3 align-items-center justify-content-between">
     <h2 class="mb-0">
         @ViewData["Title"]
@@ -29,7 +30,7 @@
         <span class="fa fa-sync fa-spin"></span> Syncing wallet with the network... Balance will appear shortly.
     </div>
     <script>
-        setTimeout(function() { window.location.href = window.location.pathname + '?storeId=@Model.StoreId'; }, 5000);
+        setTimeout(function() { window.location.href = window.location.pathname + '?storeId=' + @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.StoreId)); }, 5000);
     </script>
 }
 

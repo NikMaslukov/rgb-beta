@@ -46,6 +46,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<RgbWalletSignerProvider>();
         services.AddHostedService(sp => sp.GetRequiredService<RgbWalletSignerProvider>());
         services.AddSingleton<RGBWalletService>();
+        services.AddSingleton<IRGBWalletService>(sp => sp.GetRequiredService<RGBWalletService>());
         services.AddSingleton<RGBPaymentMethodHandler>();
         services.AddSingleton<IPaymentMethodHandler>(sp => sp.GetRequiredService<RGBPaymentMethodHandler>());
 
@@ -54,6 +55,8 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
         services.AddSingleton<RGBInvoiceListener>();
         services.AddHostedService(sp => sp.GetRequiredService<RGBInvoiceListener>());
+        services.AddSingleton<INotificationHandler, RgbSeedViewedNotification.Handler>();
+        services.AddHostedService<RgbSeedViewedEventSubscriber>();
         services.AddUIExtension("checkout-end", "RGB/RGBMethodCheckout");
         services.AddUIExtension("checkout-end", "/Views/RGB/RGBCheckoutStyles.cshtml");
         services.AddUIExtension("store-wallets-nav", "/Views/RGB/RGBWalletNav.cshtml");
@@ -87,7 +90,11 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         }
 
         var rgbBaseDir = ResolveRgbBaseDir(dataDir);
-        return new RGBConfiguration(rgbBaseDir);
+        var cfg = new RGBConfiguration(rgbBaseDir);
+        var env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        if (string.Equals(env, "Development", StringComparison.OrdinalIgnoreCase))
+            cfg.AllowPrivateTransportEndpoints = true;
+        return cfg;
     }
 
     private static string ResolveRgbBaseDir(string btcPayDataDir)

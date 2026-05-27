@@ -9,7 +9,7 @@ using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
-public class RGBWalletService
+public class RGBWalletService : IRGBWalletService
 {
     readonly IRgbLibService _rgbLib;
     readonly RGBPluginDbContextFactory _db;
@@ -19,6 +19,7 @@ public class RGBWalletService
     readonly ILogger<RGBWalletService> _log;
     readonly CurrencyNameTable _currencyNameTable;
     readonly ConcurrentDictionary<string, string> _addressCache = new();
+    readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
 
     public RGBWalletService(
         IRgbLibService rgbLib,
@@ -38,9 +39,9 @@ public class RGBWalletService
         _log = log;
     }
 
-    public async Task<RGBWallet> CreateWalletAsync(string storeId, string? name = null, string? selectedNetwork = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
+    public async Task<RGBWallet> CreateWalletAsync(string storeId, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
     {
-        var walletNetwork = selectedNetwork ?? "regtest";
+        var walletNetwork = selectedNetwork;
         var keys = _rgbLib.GenerateKeys(walletNetwork);
         var network = NetworkHelper.GetNetwork(walletNetwork);
 
@@ -58,9 +59,16 @@ public class RGBWalletService
             MaxAllocationsPerUtxo = maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo
         };
 
-        await using var ctx = _db.CreateContext();
-        ctx.RGBWallets.Add(wallet);
-        await ctx.SaveChangesAsync(ct);
+        await using (var ctx = _db.CreateContext())
+        {
+            ctx.RGBWallets.Add(wallet);
+            try { await ctx.SaveChangesAsync(ct); }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+                || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                throw new InvalidOperationException("A wallet already exists for this store.");
+            }
+        }
 
         _signerProvider.RegisterSigner(wallet.Id, keys.Mnemonic, network);
 
@@ -68,9 +76,9 @@ public class RGBWalletService
         return wallet;
     }
 
-    public async Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string? name = null, string? selectedNetwork = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
+    public async Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
     {
-        var walletNetwork = selectedNetwork ?? "regtest";
+        var walletNetwork = selectedNetwork;
         var keys = _rgbLib.RestoreKeysFromMnemonic(mnemonic, walletNetwork);
         var network = NetworkHelper.GetNetwork(walletNetwork);
 
@@ -88,9 +96,16 @@ public class RGBWalletService
             MaxAllocationsPerUtxo = maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo
         };
 
-        await using var ctx = _db.CreateContext();
-        ctx.RGBWallets.Add(wallet);
-        await ctx.SaveChangesAsync(ct);
+        await using (var ctx = _db.CreateContext())
+        {
+            ctx.RGBWallets.Add(wallet);
+            try { await ctx.SaveChangesAsync(ct); }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+                || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                throw new InvalidOperationException("A wallet already exists for this store.");
+            }
+        }
 
         _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
 
@@ -123,7 +138,11 @@ public class RGBWalletService
     public async Task<string> GetAddressAsync(string walletId, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
-        return _addressCache.GetOrAdd(walletId, _ => _rgbLib.GetAddressAsync(walletId, ct).GetAwaiter().GetResult());
+        if (_addressCache.TryGetValue(walletId, out var cached))
+            return cached;
+        var address = await _rgbLib.GetAddressAsync(walletId, ct);
+        _addressCache.TryAdd(walletId, address);
+        return address;
     }
 
     public async Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false)
@@ -134,6 +153,17 @@ public class RGBWalletService
 
     public async Task<int> CreateColorableUtxosAsync(string walletId, int count = 4, int size = 1000, CancellationToken ct = default)
     {
+        var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
+        try
+        {
+        return await CreateColorableUtxosInternalAsync(walletId, count, size, ct);
+        }
+        finally { sendLock.Release(); }
+    }
+
+    async Task<int> CreateColorableUtxosInternalAsync(string walletId, int count, int size, CancellationToken ct)
+    {
         var wallet = await GetWalletOrThrow(walletId, ct);
         var network = NetworkHelper.GetNetwork(wallet.Network);
 
@@ -142,8 +172,16 @@ public class RGBWalletService
             var result = await _rgbLib.CreateUtxosBeginAsync(walletId, count, size, 2.0f, ct);
             if (string.IsNullOrEmpty(result)) return 0;
 
+            var ownAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
             var psbt = ExtractPsbt(result);
-            var signed = await SignPsbtLocallyAsync(walletId, psbt, network, ct, policy: new SigningPolicy());
+            var signed = await SignPsbtLocallyAsync(walletId, psbt, network,
+                new SigningPolicy
+                {
+                    MaxUnknownOutputSats = 0,
+                    MaxFeeSats = EstimateTaprootFee(count, count + 1, 2.0f) * 3,
+                    AllowedScripts = new HashSet<Script> { ownAddr.ScriptPubKey },
+                    MaxOutputCount = count + 1
+                }, ct);
             await _rgbLib.CreateUtxosEndAsync(walletId, signed, ct);
             return count;
         }
@@ -154,14 +192,21 @@ public class RGBWalletService
         }
     }
 
-    async Task<string> SignPsbtLocallyAsync(string walletId, string psbt, Network network, CancellationToken ct = default, SigningPolicy? policy = null)
+    async Task<string> SignPsbtLocallyAsync(string walletId, string psbt, Network network, SigningPolicy policy, CancellationToken ct = default)
     {
         var signer = await _signerProvider.GetSignerAsync(walletId, ct);
         if (signer == null)
             throw new InvalidOperationException($"No local signer available for wallet {walletId}. Keys may not be loaded.");
 
         _log.LogDebug("Signing PSBT locally for wallet {WalletId}", walletId);
-        return await signer.SignPsbtAsync(psbt, network, policy, ct);
+        try
+        {
+            return await signer.SignPsbtAsync(psbt, network, policy, ct);
+        }
+        catch (ObjectDisposedException)
+        {
+            throw new InvalidOperationException($"Signer for wallet {walletId} was disposed (wallet may have been deleted). Retry the operation.");
+        }
     }
 
     public async Task<List<RgbAsset>> ListAssetsAsync(string walletId, CancellationToken ct = default)
@@ -196,7 +241,6 @@ public class RGBWalletService
                     Name = a.Name,
                     Precision = a.Precision,
                     IssuedSupply = a.IssuedSupply,
-                    AcceptForPayment = false,
                     CreatedAt = DateTimeOffset.UtcNow
                 });
             }
@@ -238,7 +282,6 @@ public class RGBWalletService
                 Name = asset.Name,
                 Precision = asset.Precision,
                 IssuedSupply = asset.IssuedSupply,
-                AcceptForPayment = true,
                 CreatedAt = DateTimeOffset.UtcNow
             });
             await ctx.SaveChangesAsync(ct);
@@ -308,7 +351,11 @@ public class RGBWalletService
         cmd.Parameters.AddWithValue("@now", now);
         var count = await cmd.ExecuteNonQueryAsync(ct);
         if (count > 0)
+        {
             _log.LogInformation("Cleaned up {Count} expired blind receive transfers for wallet {WalletId}", count, walletId);
+            try { await _rgbLib.RefreshAsync(walletId, ct); }
+            catch (Exception ex) { _log.LogDebug(ex, "Post-cleanup refresh failed for wallet {WalletId}", walletId); }
+        }
         return count;
     }
 
@@ -318,9 +365,11 @@ public class RGBWalletService
         return await _rgbLib.BackupWalletAsync(walletId, password, ct);
     }
 
-    public async Task<RGBWallet> RestoreFromBackupAsync(string storeId, string mnemonic, string backupPath, string password, string? name = null, string? selectedNetwork = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
+    internal const string RestoreStagingPrefix = ".restore-staging-";
+
+    public async Task<RGBWallet> RestoreFromBackupAsync(string storeId, string mnemonic, string backupPath, string password, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default)
     {
-        var walletNetwork = selectedNetwork ?? "regtest";
+        var walletNetwork = selectedNetwork;
         var keys = _rgbLib.RestoreKeysFromMnemonic(mnemonic, walletNetwork);
         var network = NetworkHelper.GetNetwork(walletNetwork);
 
@@ -339,18 +388,70 @@ public class RGBWalletService
         };
 
         var walletDataDir = _rgbLib.GetWalletDataDir(wallet.Id, walletNetwork);
-        var parentDir = Path.GetDirectoryName(walletDataDir);
-        if (parentDir != null) Directory.CreateDirectory(parentDir);
+        var parentDir = Path.GetDirectoryName(walletDataDir)!;
+        Directory.CreateDirectory(parentDir);
+
+        var stagingDir = Path.Combine(parentDir, $"{RestoreStagingPrefix}{wallet.Id}-{Guid.NewGuid():N}");
+
+        // SECURITY: Backup file is validated before reaching native code:
+        // - 5MB upload limit (controller [RequestSizeLimit])
+        // - ZIP structure + entry validation (controller ValidateBackupFileHeader)
+        // - Post-extraction 50MB size cap (below)
+        // - Staging directory isolation: native restore writes to a staging dir,
+        //   only moved to final location on success. On timeout, the staging dir
+        //   is left for deferred cleanup at next startup — never deleted while
+        //   native code may still be writing.
+        // Remaining risk: malformed ZIP contents could exploit rgb-lib parser bugs.
+        // This requires admin authentication and is accepted risk — fuzzing the
+        // native decoder is upstream work (rgb-lib-c-sharp).
+        var restoreTask = Task.Run(() => _rgbLib.RestoreBackup(backupPath, password, stagingDir));
+        var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30), ct);
+        var completed = await Task.WhenAny(restoreTask, timeoutTask);
+        if (completed == timeoutTask)
+        {
+            _log.LogWarning("Backup restore timed out after 30 seconds — staging dir {Dir} left for deferred cleanup", stagingDir);
+            throw new InvalidOperationException("Backup restore timed out after 30 seconds");
+        }
+        await restoreTask;
+
+        var dirSize = new DirectoryInfo(stagingDir)
+            .EnumerateFiles("*", SearchOption.AllDirectories)
+            .Sum(f => f.Length);
+        if (dirSize > 50 * 1024 * 1024)
+        {
+            try { Directory.Delete(stagingDir, true); }
+            catch (Exception ex) { _log.LogDebug(ex, "Failed to clean up oversized staging dir {Dir}", stagingDir); }
+            throw new InvalidOperationException(
+                $"Restored wallet data exceeds size limit ({dirSize / 1024 / 1024}MB > 50MB)");
+        }
+
+        var expectedFingerprint = wallet.MasterFingerprint?.ToLowerInvariant();
+        var stagingFingerprintDirs = Directory.GetDirectories(stagingDir)
+            .Select(d => Path.GetFileName(d).ToLowerInvariant())
+            .Where(name => name.Length == 8 && name.All(c => "0123456789abcdef".Contains(c)))
+            .ToList();
+
+        if (stagingFingerprintDirs.Count > 0 && !string.IsNullOrEmpty(expectedFingerprint)
+            && !stagingFingerprintDirs.Contains(expectedFingerprint))
+        {
+            _log.LogError("Mnemonic/backup mismatch: user mnemonic derives fingerprint {Expected} but backup contains {Found}",
+                expectedFingerprint, string.Join(",", stagingFingerprintDirs));
+            try { Directory.Delete(stagingDir, true); }
+            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after fingerprint mismatch"); }
+            throw new InvalidOperationException(
+                "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
+        }
 
         try
         {
-            _rgbLib.RestoreBackup(backupPath, password, walletDataDir);
+            Directory.Move(stagingDir, walletDataDir);
         }
-        catch
+        catch (Exception ex)
         {
-            try { Directory.Delete(walletDataDir, true); }
-            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after restore failure", walletDataDir); }
-            throw;
+            _log.LogError(ex, "Failed to move staging dir {Staging} to {Final}", stagingDir, walletDataDir);
+            try { Directory.Delete(stagingDir, true); }
+            catch { }
+            throw new InvalidOperationException("Failed to finalize restored wallet data");
         }
 
         try
@@ -359,11 +460,40 @@ public class RGBWalletService
             ctx.RGBWallets.Add(wallet);
             await ctx.SaveChangesAsync(ct);
         }
+        catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+            || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            try { Directory.Delete(walletDataDir, true); }
+            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
+            throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
+        }
         catch
         {
             try { Directory.Delete(walletDataDir, true); }
             catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
             throw;
+        }
+
+        try
+        {
+            await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
+            await _rgbLib.GetAddressAsync(wallet.Id, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
+            try
+            {
+                await using var ctx = _db.CreateContext();
+                ctx.RGBWallets.Remove(wallet);
+                await ctx.SaveChangesAsync(ct);
+            }
+            catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
+            try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+            try { Directory.Delete(walletDataDir, true); }
+            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
+            throw new InvalidOperationException(
+                "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
         }
 
         _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
@@ -388,6 +518,8 @@ public class RGBWalletService
 
         _rgbLib.UnloadWallet(walletId);
         _signerProvider.UnloadSigner(walletId);
+        _addressCache.TryRemove(walletId, out _);
+        _sendLocks.TryRemove(walletId, out _);
 
         await using var ctx = _db.CreateContext();
         ctx.RGBWallets.Remove(wallet);
@@ -399,6 +531,17 @@ public class RGBWalletService
 
     public async Task<(string Txid, long AmountSent, long Fee)> SendBtcAsync(string walletId, string destinationAddress, long amountSats, float feeRate, CancellationToken ct = default)
     {
+        var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
+        try
+        {
+        return await SendBtcInternalAsync(walletId, destinationAddress, amountSats, feeRate, ct);
+        }
+        finally { sendLock.Release(); }
+    }
+
+    async Task<(string Txid, long AmountSent, long Fee)> SendBtcInternalAsync(string walletId, string destinationAddress, long amountSats, float feeRate, CancellationToken ct)
+    {
         var wallet = await GetWalletOrThrow(walletId, ct);
         var network = NetworkHelper.GetNetwork(wallet.Network);
 
@@ -406,7 +549,7 @@ public class RGBWalletService
 
         var unspents = await _rgbLib.ListUnspentsAsync(walletId, ct);
         var spendableUtxos = unspents
-            .Where(u => u.Utxo.BtcAmount > 0 && u.RgbAllocations.Count == 0)
+            .Where(u => u.Utxo.BtcAmount > 0 && u.RgbAllocations.Count == 0 && !u.Utxo.Colorable)
             .OrderByDescending(u => u.Utxo.BtcAmount)
             .ToList();
 
@@ -447,8 +590,13 @@ public class RGBWalletService
         {
             if (!rawTxCache.ContainsKey(utxo.Utxo.Outpoint.Txid))
             {
-                var rawHex = await electrum.GetRawTransactionAsync(utxo.Utxo.Outpoint.Txid, ct);
-                rawTxCache[utxo.Utxo.Outpoint.Txid] = Transaction.Parse(rawHex, network);
+                var expectedTxid = utxo.Utxo.Outpoint.Txid;
+                var rawHex = await electrum.GetRawTransactionAsync(expectedTxid, ct);
+                var rawTx = Transaction.Parse(rawHex, network);
+                if (rawTx.GetHash().ToString() != expectedTxid)
+                    throw new InvalidOperationException(
+                        $"Electrum returned transaction with wrong txid: expected {expectedTxid}, got {rawTx.GetHash()}");
+                rawTxCache[expectedTxid] = rawTx;
             }
         }
 
@@ -488,7 +636,11 @@ public class RGBWalletService
         var policy = new SigningPolicy
         {
             ExpectedDestination = destinationAddress,
-            ExpectedAmountSats = amountSats
+            ExpectedAmountSats = amountSats,
+            MaxFeeSats = fee,
+            AllowedScripts = new HashSet<Script> { changeAddress.ScriptPubKey },
+            MaxOutputCount = hasChange ? 2 : 1,
+            StrictAllowedScriptsOnly = true
         };
 
         var signedBase64 = await signer.SignPsbtAsync(psbt.ToBase64(), network, policy, ct);
@@ -509,36 +661,29 @@ public class RGBWalletService
     public async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? BroadcastWarning)> SendAssetAsync(
         string walletId, string rgbInvoice, string assetId, long amount, float feeRate, CancellationToken ct = default)
     {
+        var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
+        try
+        {
+        return await SendAssetInternalAsync(walletId, rgbInvoice, assetId, amount, feeRate, ct);
+        }
+        finally { sendLock.Release(); }
+    }
+
+    async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? BroadcastWarning)> SendAssetInternalAsync(
+        string walletId, string rgbInvoice, string assetId, long amount, float feeRate, CancellationToken ct)
+    {
         var wallet = await GetWalletOrThrow(walletId, ct);
         var network = NetworkHelper.GetNetwork(wallet.Network);
+        var allowPrivateEndpoints = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase)
+            && _cfg.AllowPrivateTransportEndpoints;
 
         var invoiceData = _rgbLib.DecodeInvoice(rgbInvoice);
-
-        if (invoiceData.ExpirationTimestamp > 0
-            && DateTimeOffset.FromUnixTimeSeconds(invoiceData.ExpirationTimestamp) < DateTimeOffset.UtcNow)
-            throw new InvalidOperationException("This RGB invoice has expired");
-
-        var resolvedAssetId = invoiceData.AssetId ?? assetId;
-        if (string.IsNullOrEmpty(resolvedAssetId))
-            throw new InvalidOperationException("Asset ID must be provided — the invoice does not specify one");
-
-        if (invoiceData.AssetId != null && !string.IsNullOrEmpty(assetId)
-            && invoiceData.AssetId != assetId)
-            throw new InvalidOperationException(
-                $"Invoice requires a different asset than the one you selected");
-
-        if (invoiceData.Amount.HasValue && invoiceData.Amount.Value != amount)
-            throw new InvalidOperationException(
-                $"Invoice requires exactly {invoiceData.Amount.Value:N0} — you entered {amount:N0}");
-
+        EnsureInvoiceNetworkMatchesWallet(invoiceData.Network, wallet.Network);
         var assets = await _rgbLib.ListAssetsAsync(walletId, ct);
-        var asset = assets.FirstOrDefault(a => a.AssetId == resolvedAssetId);
-        if (asset == null)
-            throw new InvalidOperationException($"Asset {resolvedAssetId[..Math.Min(20, resolvedAssetId.Length)]}... not found in wallet");
+        var (resolvedAssetId, asset) = ValidateSendAssetRequest(invoiceData, assetId, amount, assets);
 
-        if (asset.SpendableBalance < amount)
-            throw new InvalidOperationException(
-                $"Insufficient {asset.Ticker} spendable balance: have {asset.SpendableBalance:N0}, need {amount:N0}");
+        var pinnedEndpoints = await TransportEndpointValidator.ValidateAsync(invoiceData.TransportEndpoints, allowPrivateEndpoints, ct);
 
         var recipientMap = JsonSerializer.Serialize(new Dictionary<string, object[]>
         {
@@ -547,7 +692,7 @@ public class RGBWalletService
                 recipient_id = invoiceData.RecipientId,
                 witness_data = (object?)null,
                 assignment = new { Fungible = amount },
-                transport_endpoints = invoiceData.TransportEndpoints
+                transport_endpoints = pinnedEndpoints
             }]
         });
 
@@ -556,10 +701,31 @@ public class RGBWalletService
 
         var sendBeginResult = await _rgbLib.SendBeginAsync(walletId, recipientMap, feeRate, 1, ct);
 
-        var unsignedPsbt = ExtractPsbt(sendBeginResult);
-
-        var signedPsbt = await SignPsbtLocallyAsync(walletId, unsignedPsbt, network, ct,
-            policy: new SigningPolicy { MaxUnknownOutputSats = 5000 });
+        string signedPsbt;
+        try
+        {
+            var unsignedPsbt = ExtractPsbt(sendBeginResult);
+            var changeAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
+            signedPsbt = await SignPsbtLocallyAsync(walletId, unsignedPsbt, network,
+                new SigningPolicy
+                {
+                    MaxUnknownOutputSats = 0,
+                    MaxFeeSats = EstimateTaprootFee(3, 3, feeRate) * 3,
+                    AllowedScripts = new HashSet<Script> { changeAddr.ScriptPubKey },
+                    MaxOutputCount = 10
+                }, ct);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "SendAsset: signing failed after SendBegin for wallet {WalletId} — reloading wallet to reset rgb-lib state", walletId);
+            try
+            {
+                _rgbLib.UnloadWallet(walletId);
+                await _rgbLib.GetOrCreateWalletAsync(walletId, ct);
+            }
+            catch (Exception reloadEx) { _log.LogWarning(reloadEx, "Failed to reload wallet {WalletId} after signing failure", walletId); }
+            throw;
+        }
 
         var txid = await _rgbLib.SendEndAsync(walletId, signedPsbt, ct);
 
@@ -571,9 +737,9 @@ public class RGBWalletService
             var rawTx = psbtObj.ExtractTransaction();
 
             var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-            var isRegtest = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase);
+            var isRegtestElectrum = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase);
             using var electrum = new ElectrumClient();
-            await electrum.ConnectAsync(networkSettings.ElectrumUrl, ct, allowInsecure: isRegtest);
+            await electrum.ConnectAsync(networkSettings.ElectrumUrl, ct, allowInsecure: isRegtestElectrum);
             await electrum.BroadcastTransactionAsync(rawTx.ToHex(), ct);
         }
         catch (Exception ex)
@@ -597,7 +763,46 @@ public class RGBWalletService
         return bytes.Length == 34 && bytes[0] == 0x51 && bytes[1] == 0x20;
     }
 
-    static long EstimateTaprootFee(int numInputs, int numOutputs, float feeRate)
+    internal static void EnsureInvoiceNetworkMatchesWallet(string invoiceNetwork, string walletNetwork)
+    {
+        var expectedRgbNetwork = NetworkHelper.MapNetworkToRgbLibFormat(walletNetwork);
+        if (!string.Equals(invoiceNetwork, expectedRgbNetwork, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"RGB invoice network '{invoiceNetwork}' does not match wallet network '{expectedRgbNetwork}'.");
+    }
+
+    internal static (string ResolvedAssetId, RgbAsset Asset) ValidateSendAssetRequest(
+        RgbInvoiceData invoiceData, string assetId, long amount, List<RgbAsset> walletAssets)
+    {
+        if (invoiceData.ExpirationTimestamp > 0
+            && DateTimeOffset.FromUnixTimeSeconds(invoiceData.ExpirationTimestamp) < DateTimeOffset.UtcNow)
+            throw new InvalidOperationException("This RGB invoice has expired");
+
+        var resolvedAssetId = invoiceData.AssetId ?? assetId;
+        if (string.IsNullOrEmpty(resolvedAssetId))
+            throw new InvalidOperationException("Asset ID must be provided — the invoice does not specify one");
+
+        if (invoiceData.AssetId != null && !string.IsNullOrEmpty(assetId)
+            && invoiceData.AssetId != assetId)
+            throw new InvalidOperationException(
+                $"Invoice requires a different asset than the one you selected");
+
+        if (invoiceData.Amount.HasValue && invoiceData.Amount.Value != amount)
+            throw new InvalidOperationException(
+                $"Invoice requires exactly {invoiceData.Amount.Value:N0} — you entered {amount:N0}");
+
+        var asset = walletAssets.FirstOrDefault(a => a.AssetId == resolvedAssetId);
+        if (asset == null)
+            throw new InvalidOperationException($"Asset {resolvedAssetId[..Math.Min(20, resolvedAssetId.Length)]}... not found in wallet");
+
+        if (asset.SpendableBalance < amount)
+            throw new InvalidOperationException(
+                $"Insufficient {asset.Ticker} spendable balance: have {asset.SpendableBalance:N0}, need {amount:N0}");
+
+        return (resolvedAssetId, asset);
+    }
+
+    internal static long EstimateTaprootFee(int numInputs, int numOutputs, float feeRate)
     {
         var vsize = 10.5 + numInputs * 57.5 + numOutputs * 43.0;
         return (long)Math.Ceiling(vsize * feeRate);

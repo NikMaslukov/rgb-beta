@@ -11,34 +11,45 @@ public class ElectrumClient : IDisposable
     Stream? _stream;
     int _requestId;
     static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
+    const int MaxResponseBytes = 10 * 1024 * 1024;
 
     public async Task ConnectAsync(string electrumUrl, CancellationToken ct = default, bool allowInsecure = false)
     {
-        var useSsl = electrumUrl.StartsWith("ssl://", StringComparison.OrdinalIgnoreCase);
-        var useTcp = electrumUrl.StartsWith("tcp://", StringComparison.OrdinalIgnoreCase);
-
-        if (useTcp && !allowInsecure)
+        Uri uri;
+        try { uri = new Uri(electrumUrl); }
+        catch (UriFormatException)
+        {
             throw new InvalidOperationException(
-                "Unencrypted Electrum connections are not allowed outside regtest. Use ssl:// endpoint.");
+                $"Malformed Electrum URL '{electrumUrl}'. Expected ssl://host:port or tcp://host:port.");
+        }
 
-        var normalized = electrumUrl
-            .Replace("tcp://", "", StringComparison.OrdinalIgnoreCase)
-            .Replace("ssl://", "", StringComparison.OrdinalIgnoreCase);
+        bool useSsl;
+        if (uri.Scheme.Equals("ssl", StringComparison.OrdinalIgnoreCase))
+            useSsl = true;
+        else if (uri.Scheme.Equals("tcp", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!allowInsecure)
+                throw new InvalidOperationException(
+                    "Unencrypted Electrum connections are not allowed outside regtest. Use ssl:// endpoint.");
+            useSsl = false;
+        }
+        else
+            throw new InvalidOperationException(
+                $"Electrum URL scheme '{uri.Scheme}' is not allowed. Use ssl:// or (regtest only) tcp://.");
 
-        var parts = normalized.Split(':');
-        var host = parts[0];
-        var port = int.Parse(parts[1]);
+        if (uri.Port < 1 || uri.Port > 65535)
+            throw new InvalidOperationException(
+                $"Electrum URL '{electrumUrl}' is missing a valid port.");
+
+        var host = uri.Host.Trim('[', ']');
+        var port = uri.Port;
 
         _tcp = new TcpClient();
         await _tcp.ConnectAsync(host, port, ct);
 
         if (useSsl)
         {
-            SslStream ssl;
-            if (allowInsecure)
-                ssl = new SslStream(_tcp.GetStream(), false, (_, _, _, _) => true);
-            else
-                ssl = new SslStream(_tcp.GetStream(), false);
+            var ssl = new SslStream(_tcp.GetStream(), false);
             await ssl.AuthenticateAsClientAsync(host);
             _stream = ssl;
         }
@@ -68,6 +79,8 @@ public class ElectrumClient : IDisposable
             var read = await _stream.ReadAsync(readBuf, timeoutCts.Token);
             if (read == 0) throw new InvalidOperationException("Electrum: connection closed");
             buffer.Append(Encoding.UTF8.GetString(readBuf, 0, read));
+            if (buffer.Length > MaxResponseBytes)
+                throw new InvalidOperationException("Electrum response exceeds maximum allowed size");
             var str = buffer.ToString();
             var nlIdx = str.IndexOf('\n');
             if (nlIdx >= 0)

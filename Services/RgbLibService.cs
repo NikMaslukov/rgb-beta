@@ -116,7 +116,17 @@ public class RgbLibService : IRgbLibService
 
         var configJson = JsonSerializer.Serialize(walletConfig);
         var keysJson = JsonSerializer.Serialize(keysConfig);
-        var wallet = new RgbLibWallet(configJson, keysJson);
+        RgbLibWallet wallet;
+        try
+        {
+            wallet = new RgbLibWallet(configJson, keysJson);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "RgbLibWallet ctor failed. walletId={WalletId} dataDir={DataDir} fingerprint={Fingerprint} config={Config} keys={Keys}",
+                walletId, dataDir, masterFingerprint, configJson, keysJson);
+            throw;
+        }
         wallet.GoOnline(networkSettings.ElectrumUrl, true);
 
         _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
@@ -591,7 +601,8 @@ public class RgbLibService : IRgbLibService
             if (json == null)
                 throw new RgbLibException("Failed to decode invoice data");
 
-            _log.LogDebug("Decoded invoice: {Json}", json);
+            _log.LogDebug("Decoded invoice for recipient {RecipientId}",
+                json.Length > 200 ? "(large payload)" : "(ok)");
             return JsonSerializer.Deserialize<RgbInvoiceData>(json)
                    ?? throw new RgbLibException("Failed to parse invoice data JSON");
         }
@@ -618,26 +629,16 @@ public class RgbLibService : IRgbLibService
 
     public RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network)
     {
-        var nbNetwork = NetworkHelper.GetNetwork(network);
-        var mnemonicObj = new Mnemonic(mnemonic, Wordlist.English);
-        var masterKey = mnemonicObj.DeriveExtKey();
-        var fingerprint = masterKey.GetPublicKey().GetHDFingerPrint().ToString();
-
-        var vanillaCoinType = nbNetwork == Network.Main ? 0 : 1;
-        var coloredCoinType = nbNetwork == Network.Main ? 827166 : 827167;
-        var vanillaPath = new KeyPath($"m/86'/{vanillaCoinType}'/0'");
-        var coloredPath = new KeyPath($"m/86'/{coloredCoinType}'/0'");
-
-        var vanillaXpub = masterKey.Derive(vanillaPath).Neuter().ToString(nbNetwork);
-        var coloredXpub = masterKey.Derive(coloredPath).Neuter().ToString(nbNetwork);
+        var keysJson = RgbLibWallet.RestoreKeys(NetworkHelper.MapNetworkToRgbLibFormat(network), mnemonic);
+        var keys = JsonSerializer.Deserialize<GenerateKeysResponse>(keysJson);
 
         return new RgbKeys
         {
             Mnemonic = mnemonic,
-            Xpub = masterKey.Neuter().ToString(nbNetwork),
-            AccountXpubVanilla = vanillaXpub,
-            AccountXpubColored = coloredXpub,
-            MasterFingerprint = fingerprint
+            Xpub = keys?.Xpub ?? "",
+            AccountXpubVanilla = keys?.AccountXpubVanilla ?? "",
+            AccountXpubColored = keys?.AccountXpubColored ?? "",
+            MasterFingerprint = keys?.MasterFingerprint ?? ""
         };
     }
 

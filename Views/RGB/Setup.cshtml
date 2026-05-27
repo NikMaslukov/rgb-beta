@@ -39,6 +39,15 @@
                 <div class="tab-content">
                     <div class="tab-pane fade @(Model.IsRestore || Model.IsBackupRestore ? "" : "show active")" id="create-pane" role="tabpanel">
                         <form asp-action="SetupWallet" asp-route-storeId="@Model.StoreId" method="post">
+                            <div class="alert alert-warning">
+                                <strong>Custodial hot wallet.</strong> Your seed phrase and signing key live on this BTCPay Server instance. Anyone with server / database access can spend RGB assets and BTC held by this wallet. No external / hardware signer is supported in this release.
+                            </div>
+                            <div class="form-check mb-3">
+                                <input type="checkbox" class="form-check-input" id="AcknowledgesCustodialRisk_create" name="AcknowledgesCustodialRisk" value="true" required />
+                                <label class="form-check-label" for="AcknowledgesCustodialRisk_create">
+                                    I understand and accept the custodial risk for this wallet.
+                                </label>
+                            </div>
                             <div asp-validation-summary="ModelOnly"></div>
 
                             <div class="mb-3">
@@ -85,6 +94,15 @@
 
                     <div class="tab-pane fade @(Model.IsRestore ? "show active" : "")" id="restore-pane" role="tabpanel">
                         <form asp-action="RestoreWallet" asp-route-storeId="@Model.StoreId" method="post">
+                            <div class="alert alert-warning">
+                                <strong>Custodial hot wallet.</strong> Your seed phrase and signing key live on this BTCPay Server instance. Anyone with server / database access can spend RGB assets and BTC held by this wallet. No external / hardware signer is supported in this release.
+                            </div>
+                            <div class="form-check mb-3">
+                                <input type="checkbox" class="form-check-input" id="AcknowledgesCustodialRisk_restore" name="AcknowledgesCustodialRisk" value="true" required />
+                                <label class="form-check-label" for="AcknowledgesCustodialRisk_restore">
+                                    I understand and accept the custodial risk for this wallet.
+                                </label>
+                            </div>
                             <div asp-validation-summary="ModelOnly"></div>
                             <input type="hidden" name="IsRestore" value="true" />
 
@@ -144,6 +162,15 @@
 
                     <div class="tab-pane fade @(Model.IsBackupRestore ? "show active" : "")" id="backup-restore-pane" role="tabpanel">
                         <form asp-action="RestoreFromBackup" asp-route-storeId="@Model.StoreId" method="post" enctype="multipart/form-data">
+                            <div class="alert alert-warning">
+                                <strong>Custodial hot wallet.</strong> Your seed phrase and signing key live on this BTCPay Server instance. Anyone with server / database access can spend RGB assets and BTC held by this wallet. No external / hardware signer is supported in this release.
+                            </div>
+                            <div class="form-check mb-3">
+                                <input type="checkbox" class="form-check-input" id="AcknowledgesCustodialRisk_backup" name="AcknowledgesCustodialRisk" value="true" required />
+                                <label class="form-check-label" for="AcknowledgesCustodialRisk_backup">
+                                    I understand and accept the custodial risk for this wallet.
+                                </label>
+                            </div>
                             <div asp-validation-summary="ModelOnly"></div>
                             <input type="hidden" name="IsBackupRestore" value="true" />
 
@@ -223,7 +250,7 @@
 
 @section PageFootContent {
 <script>
-    const networkSettings = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.AllNetworkSettings));
+    const networkSettings = JSON.parse(@Html.Raw(System.Text.Json.JsonSerializer.Serialize(System.Text.Json.JsonSerializer.Serialize(Model.AllNetworkSettings))));
 
     document.querySelectorAll('.networkSelect').forEach(function(sel) {
         sel.addEventListener('change', function() {

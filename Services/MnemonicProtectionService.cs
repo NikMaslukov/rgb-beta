@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Logging;
-using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
@@ -35,35 +34,7 @@ public class MnemonicProtectionService
         }
         catch (Exception ex)
         {
-            if (IsValidBip39Mnemonic(protectedMnemonic))
-            {
-                _log.LogWarning("Found unencrypted mnemonic in database - this wallet was created before encryption was enabled. Re-save wallet to encrypt.");
-                return protectedMnemonic;
-            }
-            
-            _log.LogError(ex, "Failed to decrypt mnemonic - data may be corrupted or DataProtection keys may have changed");
-            throw new InvalidOperationException("Failed to decrypt mnemonic. The DataProtection keys may have changed or the data is corrupted.", ex);
-        }
-    }
-
-    static bool IsValidBip39Mnemonic(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-            
-        var words = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        
-        if (words.Length is not (12 or 15 or 18 or 21 or 24))
-            return false;
-
-        try
-        {
-            _ = new Mnemonic(value, Wordlist.English);
-            return true;
-        }
-        catch
-        {
-            return false;
+            throw new InvalidOperationException("Failed to decrypt mnemonic — possible key mismatch or data corruption", ex);
         }
     }
 }

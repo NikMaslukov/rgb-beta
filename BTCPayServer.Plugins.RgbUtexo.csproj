@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
         <Product>RGB Payments</Product>
         <Description>Accept RGB (client-side validated assets) payments in BTCPay Server. Issue and receive RGB20 tokens on Bitcoin.</Description>
-        <Version>1.0.6</Version>
+        <Version>1.0.7</Version>
         <Authors>Utexo</Authors>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -14,7 +14,7 @@
         <MvcRazorCompileOnPublish>false</MvcRazorCompileOnPublish>
         <PackageReadmeFile>README.md</PackageReadmeFile>
 
-        <!-- Supply-chain: pin every dependency (incl. the in-tree RgbLib.nupkg) by SHA-512.
+        <!-- Supply-chain: pin every dependency by SHA-512.
              dotnet restore writes packages.lock.json, and any future restore validates the
              hashes; mismatched / substituted packages fail the build. See .github/README.md
              "Supply chain" for verification instructions. -->
@@ -30,12 +30,15 @@
         <EnableDefaultRazorComponentItems>false</EnableDefaultRazorComponentItems>
     </PropertyGroup>
 
-    <!-- Exclude submodules from compilation - they're referenced as a project, not compiled directly -->
     <ItemGroup>
         <Compile Remove="submodules\**" />
         <Content Remove="submodules\**" />
         <EmbeddedResource Remove="submodules\**" />
         <None Remove="submodules\**" />
+        <Compile Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
+        <Content Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
+        <EmbeddedResource Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
+        <None Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
     </ItemGroup>
 
     <ItemDefinitionGroup>
@@ -62,9 +65,15 @@
         <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.4" />
         <PackageReference Include="NBitcoin" Version="9.0.5" />
+        <PackageReference Include="Microsoft.Bcl.Memory" Version="9.0.16" />
+        <PackageReference Include="MailKit" Version="4.16.0" />
         
         <EmbeddedResource Include="rgb-icon.svg" />
         <None Include="README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="BTCPayServer.Plugins.RgbUtexo.Tests" />
     </ItemGroup>
 
 </Project>

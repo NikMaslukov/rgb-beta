@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    Force patched versions for transitive packages with known CVEs.
+    Injected into every project in the repo (including the BTCPay submodule)
+    so vulnerable transitive references get bumped without modifying the
+    submodule's csproj.
+    - Microsoft.Bcl.Memory: GHSA-73j8-2gch-69rq (high) — fixed in 9.0.14+
+    - MailKit:              GHSA-9j88-vvj5-vhgr (moderate) — fixed in 4.16.0+
+  -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'BTCPayServer.Plugins.RgbUtexo' And '$(MSBuildProjectName)' != 'BTCPayServer.Plugins.RgbUtexo.Tests'">
+    <PackageReference Include="Microsoft.Bcl.Memory" Version="9.0.16" />
+  </ItemGroup>
+</Project>
