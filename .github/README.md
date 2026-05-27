@@ -150,20 +150,19 @@ the release pipeline applies the following controls.
 | Field | Value |
 | --- | --- |
 | Package | [`RgbLib`](https://www.nuget.org/packages/RgbLib) |
-| Version | `0.3.0-beta.21` |
+| Version | `0.3.0-beta.21.1` |
 | Source | nuget.org (no longer vendored in `nuget_packages/`) |
 | Size | ~46 MB (linux-x64 `.so` + osx-arm64 `.dylib` + win-x64 `.dll` + managed glue) |
-| Built from | [UTEXO-Protocol/rgb-lib-c-sharp `v0.3.0-beta.21`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21) |
-| GitHub Release SHA-256 | `356e414d8dc1c8185f00e0e758516de9cc5c5c743947bf36c006be8fc9ebf856` |
-| NuGet `contentHash` (SHA-512, base64) | `NGsI2E/7Rayt5Hy0J+R++qyc55Yb5dMGdSmsZIUD4snSYtTCX8lxr4yHPvbxyltH/ZBx/ZMyNpwS+deiTR0+5g==` |
-| SLSA attestation | [`RgbLib.0.3.0-beta.21.nupkg.intoto.jsonl`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/download/v0.3.0-beta.21/RgbLib.0.3.0-beta.21.nupkg.intoto.jsonl) |
+| Built from | [UTEXO-Protocol/rgb-lib-c-sharp `v0.3.0-beta.21.1`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21.1) (managed bindings tracking native rgb-lib `v0.3.0-beta.21`) |
+| NuGet `contentHash` (SHA-512, base64) | `kbTmP4OUB4heYfqAnezwlBcXpvJgexPzKg2Vl1EYcRUNbROs3Rp5hxn0YslwoSpaRcLuYUsaHFZ55mUIXS0kMQ==` |
+| SLSA attestation | attached to the [`v0.3.0-beta.21.1` GitHub Release](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21.1) (`RgbLib.0.3.0-beta.21.1.nupkg.intoto.jsonl`) |
 
 The `.nupkg` is **no longer vendored** inside this repository. `dotnet restore`
 pulls it from nuget.org, and `packages.lock.json` (§5.2) records its
 SHA-512 — any substitution upstream breaks the build.
 
-The same `.nupkg` is also attached to the [`v0.3.0-beta.21` GitHub
-Release](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21)
+The same `.nupkg` is also attached to the [`v0.3.0-beta.21.1` GitHub
+Release](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21.1)
 together with a SLSA Level 3 build attestation, which lets you verify
 that the package was built by the expected workflow from the expected
 commit:
@@ -172,7 +171,7 @@ commit:
 # install once
 go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
 
-TAG=v0.3.0-beta.21
+TAG=v0.3.0-beta.21.1
 gh release download "$TAG" \
   --repo UTEXO-Protocol/rgb-lib-c-sharp \
   --pattern 'RgbLib.*.nupkg' \
@@ -183,6 +182,12 @@ slsa-verifier verify-artifact RgbLib.*.nupkg \
   --source-uri github.com/UTEXO-Protocol/rgb-lib-c-sharp \
   --source-tag "$TAG"
 ```
+
+> The bump from `0.3.0-beta.21` to `0.3.0-beta.21.1` resyncs the C#
+> managed bindings with the native ABI of rgb-lib `v0.3.0-beta.21` —
+> the first publication of `0.3.0-beta.21` shipped with bindings still
+> targeting `v0.3.0-beta.18` and is broken at runtime. `0.3.0-beta.21`
+> is unlisted on nuget.org; `0.3.0-beta.21.1` is the canonical build.
 
 ### 5.2. Lockfile pinning
 
