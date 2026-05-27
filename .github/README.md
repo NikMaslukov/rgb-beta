@@ -149,18 +149,39 @@ the release pipeline applies the following controls.
 
 | Field | Value |
 | --- | --- |
-| Package | `RgbLib` |
-| Version | `0.3.0-beta.18` |
-| Source (in-tree, vendored) | [`nuget_packages/RgbLib.0.3.0-beta.18.nupkg`](../nuget_packages/RgbLib.0.3.0-beta.18.nupkg) |
-| Size | ~45 MB (linux-x64 `.so` + osx-arm64 `.dylib` + win-x64 `.dll` + managed glue) |
-| Built from | [UTEXO-Protocol/rgb-lib-c-sharp @ `33cc494e21accf9fddec56f725c2780dfd4053ad`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/commit/33cc494e21accf9fddec56f725c2780dfd4053ad) |
-| SHA-256 | `ffb05605b4ce90e1cbcc6a130a589537325d81837d4bfcc7b249a905a5eaeaf9` |
-| NuGet `contentHash` (SHA-512, base64) | `775X/n9sh6yss77AEaKCW9jeL3vYzJyjVLnOllfNZE46LSKkNiDuN4ux2J5qlJEggXgK0M2OtCSDIkpL4BoYKg==` |
+| Package | [`RgbLib`](https://www.nuget.org/packages/RgbLib) |
+| Version | `0.3.0-beta.21` |
+| Source | nuget.org (no longer vendored in `nuget_packages/`) |
+| Size | ~46 MB (linux-x64 `.so` + osx-arm64 `.dylib` + win-x64 `.dll` + managed glue) |
+| Built from | [UTEXO-Protocol/rgb-lib-c-sharp `v0.3.0-beta.21`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21) |
+| GitHub Release SHA-256 | `356e414d8dc1c8185f00e0e758516de9cc5c5c743947bf36c006be8fc9ebf856` |
+| NuGet `contentHash` (SHA-512, base64) | `NGsI2E/7Rayt5Hy0J+R++qyc55Yb5dMGdSmsZIUD4snSYtTCX8lxr4yHPvbxyltH/ZBx/ZMyNpwS+deiTR0+5g==` |
+| SLSA attestation | [`RgbLib.0.3.0-beta.21.nupkg.intoto.jsonl`](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/download/v0.3.0-beta.21/RgbLib.0.3.0-beta.21.nupkg.intoto.jsonl) |
 
-Verify the in-tree package matches the SHA-256 above:
+The `.nupkg` is **no longer vendored** inside this repository. `dotnet restore`
+pulls it from nuget.org, and `packages.lock.json` (§5.2) records its
+SHA-512 — any substitution upstream breaks the build.
+
+The same `.nupkg` is also attached to the [`v0.3.0-beta.21` GitHub
+Release](https://github.com/UTEXO-Protocol/rgb-lib-c-sharp/releases/tag/v0.3.0-beta.21)
+together with a SLSA Level 3 build attestation, which lets you verify
+that the package was built by the expected workflow from the expected
+commit:
 
 ```bash
-sha256sum nuget_packages/RgbLib.0.3.0-beta.18.nupkg
+# install once
+go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
+
+TAG=v0.3.0-beta.21
+gh release download "$TAG" \
+  --repo UTEXO-Protocol/rgb-lib-c-sharp \
+  --pattern 'RgbLib.*.nupkg' \
+  --pattern '*.intoto.jsonl'
+
+slsa-verifier verify-artifact RgbLib.*.nupkg \
+  --provenance-path RgbLib.*.nupkg.intoto.jsonl \
+  --source-uri github.com/UTEXO-Protocol/rgb-lib-c-sharp \
+  --source-tag "$TAG"
 ```
 
 ### 5.2. Lockfile pinning
@@ -178,9 +199,8 @@ What this gives:
 
 - Every CI run uses `dotnet restore --locked-mode -p:ContinuousIntegrationBuild=true`.
   Any package whose computed `contentHash` does not match the one in
-  `packages.lock.json` fails the restore. Silent substitution of
-  `nuget_packages/RgbLib.0.3.0-beta.18.nupkg`, or of any package on
-  nuget.org, breaks the build instead of shipping to users.
+  `packages.lock.json` fails the restore. Silent substitution of any
+  dependency on nuget.org breaks the build instead of shipping to users.
 - Local developer restores stay flexible (`RestoreLockedMode` is gated on
   `ContinuousIntegrationBuild`), but any dependency change requires
   regenerating and committing the lockfile.
@@ -242,18 +262,23 @@ modified artifact) makes the verifier exit non-zero.
 
 | Audit requirement | Control |
 | --- | --- |
+| `publish the rgb-lib package to nuget.org` | §5.1 — `RgbLib` is on [nuget.org](https://www.nuget.org/packages/RgbLib); `nuget_packages/` is gone |
+| `…with author signing` | §5.1 + §5.3 — keyless Sigstore signing via SLSA L3 attestations on both `RgbLib.nupkg` and `BTCPayServer.Plugins.RgbUtexo.btcpay`; classic code-signing certificate is **not** issued (see §5.5) |
 | `checked-in lockfile pinning the package hash` | §5.2 — `packages.lock.json` + `RestoreLockedMode` |
-| `SLSA provenance for the native libraries` | §5.3 — `.intoto.jsonl` covers the final `.btcpay`; native libs are pinned indirectly through the lockfile + their parent `.nupkg` SHA |
-| `reproducible-build instructions` | §5.1 (pin to `rgb-lib-c-sharp@33cc494e`) + §5.2 (lockfile reproducibility) |
-| `publish the rgb-lib package to nuget.org with author signing` | **not yet** — see §5.5 |
+| `SLSA provenance for the native libraries` | §5.1 — `RgbLib.nupkg.intoto.jsonl` is published by `UTEXO-Protocol/rgb-lib-c-sharp` for every release; §5.3 — `BTCPayServer.Plugins.RgbUtexo.btcpay.intoto.jsonl` covers the final plugin artifact |
+| `reproducible-build instructions` | §5.1 (pin to `rgb-lib-c-sharp` release tag + verifier command) + §5.2 (lockfile reproducibility) |
 
 ### 5.5. Known follow-ups
 
-- Move `RgbLib.0.3.0-beta.18.nupkg` out of the git tree and publish it
-  from `UTEXO-Protocol/rgb-lib-c-sharp` to a public registry
-  (GitHub Packages preferred; nuget.org with a code-signing certificate
-  if classic author-signing is required by an external audit). The
-  lockfile will continue to pin the same `contentHash` after the move.
-- Add the same SLSA Level 3 attestation flow to
-  `UTEXO-Protocol/rgb-lib-c-sharp` so that the `.nupkg` itself carries
-  provenance, not only the downstream `.btcpay`.
+- **Classic author-signing certificate.** A DigiCert / Sectigo
+  code-signing certificate would replace keyless Sigstore signing with
+  the certificate-based signing that NuGet historically validates. Not
+  issued yet — Sigstore + SLSA L3 + lockfile is the equivalent control
+  used here. Only needed if an external audit refuses the equivalence.
+- **End-to-end reproducible native libs.** The Rust-built `.so` /
+  `.dylib` / `.dll` are downloaded from
+  [`UTEXO-Protocol/rgb-lib`](https://github.com/UTEXO-Protocol/rgb-lib)
+  release assets by the `rgb-lib-c-sharp` build pipeline. Full
+  bit-for-bit reproducibility there depends on pinning the Rust
+  toolchain and `SOURCE_DATE_EPOCH` upstream — tracked separately, not
+  in this repository.
