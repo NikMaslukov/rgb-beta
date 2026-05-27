@@ -13,7 +13,13 @@
         <GenerateRuntimeConfigDevFile>true</GenerateRuntimeConfigDevFile>
         <MvcRazorCompileOnPublish>false</MvcRazorCompileOnPublish>
         <PackageReadmeFile>README.md</PackageReadmeFile>
+
+        <!-- Supply-chain: pin every dependency by SHA-512.
+             dotnet restore writes packages.lock.json, and any future restore validates the
+             hashes; mismatched / substituted packages fail the build. See .github/README.md
+             "Supply chain" for verification instructions. -->
         <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+        <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
     </PropertyGroup>
 
     <PropertyGroup>
@@ -50,7 +56,7 @@
         <ProjectReference Include="submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         <ProjectReference Include="../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="!Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj') And Exists('../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         
-        <PackageReference Include="RgbLib" Version="0.3.0-beta.18" />
+        <PackageReference Include="RgbLib" Version="0.3.0-beta.21" />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

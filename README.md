@@ -255,7 +255,7 @@ The mnemonic encryption keys are stored in your BTCPay data directory (e.g., `~/
 
 ## Dependencies
 
-- **RgbLib** v0.3.0-beta.18 - Native rgb-lib bindings
+- **RgbLib** v0.3.0-beta.21 - Native rgb-lib bindings
 - **NBitcoin** - Bitcoin primitives and PSBT signing
 - **Npgsql.EntityFrameworkCore.PostgreSQL** - Database persistence
 

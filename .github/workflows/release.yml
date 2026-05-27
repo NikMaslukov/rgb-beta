@@ -1,0 +1,211 @@
+name: Release
+
+# Manually triggered release pipeline.
+#
+# How to run:
+#   1. Bump <Version> in BTCPayServer.Plugins.RgbUtexo.csproj and "version"
+#      in btcpay.plugin.json on the branch you want to release from.
+#   2. Push that branch.
+#   3. GitHub -> Actions -> "Release" -> Run workflow.
+#      - "Use workflow from" picks the branch / commit to tag.
+#      - "version" must match the version inside the manifest files.
+#
+# The workflow will:
+#   - Validate that the input version matches both manifest files.
+#   - Restore dependencies in locked mode (packages.lock.json must match).
+#   - Build the plugin and pack it into a `.btcpay` artifact.
+#   - Create (or reuse) the tag v<version> on the chosen commit.
+#   - Publish a GitHub Release with the artifact and its sha256.
+#   - Generate a SLSA Level 3 build provenance attestation
+#     (in-toto JSON, keyless-signed via Sigstore, recorded in Rekor)
+#     and attach it to the same Release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Plugin version to release (e.g., 1.0.6 — without the leading v)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark this release as a pre-release"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      hashes: ${{ steps.subjects.outputs.hashes }}
+      tag: ${{ steps.subjects.outputs.tag }}
+    env:
+      ARTIFACT_NAME: BTCPayServer.Plugins.RgbUtexo.btcpay
+      PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
+      MANIFEST_FILE: btcpay.plugin.json
+      TAG: v${{ inputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Validate version matches manifest files
+        run: |
+          set -euo pipefail
+          INPUT_VERSION="${{ inputs.version }}"
+
+          if [[ ! "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version '$INPUT_VERSION' does not look like SemVer (e.g. 1.0.6 or 1.0.6-rc1)"
+            exit 1
+          fi
+
+          MANIFEST_VERSION=$(jq -r .version "$MANIFEST_FILE")
+          CSPROJ_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' "$PROJECT_FILE")
+
+          echo "input    : $INPUT_VERSION"
+          echo "manifest : $MANIFEST_VERSION"
+          echo "csproj   : $CSPROJ_VERSION"
+
+          if [[ "$INPUT_VERSION" != "$MANIFEST_VERSION" ]]; then
+            echo "::error::Input version ($INPUT_VERSION) != $MANIFEST_FILE version ($MANIFEST_VERSION). Bump the manifest first."
+            exit 1
+          fi
+          if [[ "$INPUT_VERSION" != "$CSPROJ_VERSION" ]]; then
+            echo "::error::Input version ($INPUT_VERSION) != $PROJECT_FILE <Version> ($CSPROJ_VERSION). Bump the csproj first."
+            exit 1
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+
+      - name: Restore (locked mode — packages.lock.json must match)
+        run: |
+          set -euo pipefail
+          dotnet restore "$PROJECT_FILE" \
+            --locked-mode \
+            -p:ContinuousIntegrationBuild=true
+
+      - name: Publish (Release)
+        run: |
+          set -euo pipefail
+          dotnet publish "$PROJECT_FILE" \
+            -c Release \
+            --no-restore \
+            -p:ContinuousIntegrationBuild=true \
+            -p:Deterministic=true \
+            -o publish-out
+
+      - name: Sanity-check published files
+        run: |
+          set -euo pipefail
+          test -f "publish-out/$MANIFEST_FILE" || { echo "::error::manifest missing in publish output"; exit 1; }
+          test -f "publish-out/BTCPayServer.Plugins.RgbUtexo.dll" || { echo "::error::plugin dll missing"; exit 1; }
+          if [[ -f "publish-out/BTCPayServer.dll" ]]; then
+            echo "::error::publish output contains BTCPayServer.dll — host assemblies must not ship in the plugin"
+            exit 1
+          fi
+
+      - name: Pack .btcpay
+        run: |
+          set -euo pipefail
+          (cd publish-out && zip -r "../$ARTIFACT_NAME" .)
+          sha256sum "$ARTIFACT_NAME" | tee "$ARTIFACT_NAME.sha256"
+          ls -lh "$ARTIFACT_NAME" "$ARTIFACT_NAME.sha256"
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create or verify tag ${{ env.TAG }}
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            EXISTING=$(git rev-list -n 1 "refs/tags/$TAG")
+            if [[ "$EXISTING" != "$SHA" ]]; then
+              echo "::error::Tag $TAG already exists at $EXISTING but workflow runs on $SHA. Refusing to move it."
+              echo "::error::Either run the workflow from the correct ref, or delete the tag first."
+              exit 1
+            fi
+            echo "Tag $TAG already exists at $SHA, reusing."
+          else
+            git tag -a "$TAG" -m "RGB Utexo plugin $TAG" "$SHA"
+            git push origin "$TAG"
+          fi
+
+      - name: Create / replace GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — replacing it so the artifact stays in sync."
+            gh release delete "$TAG" --yes --cleanup-tag=false
+          fi
+          ARGS=(--title "$TAG" --generate-notes)
+          if [[ "$PRERELEASE" == "true" ]]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            "$ARTIFACT_NAME" \
+            "$ARTIFACT_NAME.sha256" \
+            "${ARGS[@]}"
+
+      - name: Export SLSA subjects (base64 of "<sha256>  <name>")
+        id: subjects
+        run: |
+          set -euo pipefail
+          # slsa-github-generator expects a base64-encoded multi-line list of
+          # "<sha256>  <name>" lines (the standard sha256sum format).
+          HASHES=$(sha256sum "$ARTIFACT_NAME" | base64 -w0)
+          echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Released $TAG"
+            echo
+            echo "- Commit: \`$(git rev-parse HEAD)\`"
+            echo "- Artifact: \`$ARTIFACT_NAME\`"
+            echo "- SHA-256: \`$(cut -d' ' -f1 "$ARTIFACT_NAME.sha256")\`"
+            echo "- URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+            echo
+            echo "SLSA provenance attestation is attached by the \`provenance\` job below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # SLSA Level 3 generic provenance generator.
+  # Runs in an isolated reusable workflow (separate runner, scoped OIDC token),
+  # signs the attestation keyless via Sigstore, records it in the public Rekor
+  # transparency log, and attaches `*.intoto.jsonl` to the Release created above.
+  #
+  # Verify with:
+  #   slsa-verifier verify-artifact BTCPayServer.Plugins.RgbUtexo.btcpay \
+  #     --provenance-path BTCPayServer.Plugins.RgbUtexo.btcpay.intoto.jsonl \
+  #     --source-uri github.com/UTEXO-Protocol/rgb-btcpay-plugin \
+  #     --source-tag vX.Y.Z
+  provenance:
+    needs: release
+    permissions:
+      actions: read       # read workflow metadata for the attestation
+      id-token: write     # mint the OIDC token Sigstore uses to sign
+      contents: write     # attach the *.intoto.jsonl to the Release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.release.outputs.hashes }}"
+      upload-assets: true
+      upload-tag-name: "${{ needs.release.outputs.tag }}"
