@@ -997,6 +997,7 @@ public class RGBController : Controller
 
     static string BtcTxType(int t) => t switch {
         0 => "User", 1 => "Create UTXOs", 2 => "RGB Send", 3 => "Drain",
+        4 => "Incoming", 5 => "Send BTC",
         _ => $"Unknown ({t})"
     };
 
