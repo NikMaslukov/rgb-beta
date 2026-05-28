@@ -21,7 +21,7 @@ public class RgbLibService : IRgbLibService
     readonly Type _nativeMethodsType;
     readonly Type _cResultStringType;
     readonly FieldInfo _walletField;
-    readonly FieldInfo _onlineField;
+    readonly FieldInfo _onlineJsonField;
     readonly FieldInfo _resultField;
     readonly FieldInfo _innerField;
     
@@ -51,7 +51,7 @@ public class RgbLibService : IRgbLibService
         _cResultStringType = assembly.GetType("RgbLib.CResultString")!;
         
         _walletField = typeof(RgbLibWallet).GetField("_wallet", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        _onlineField = typeof(RgbLibWallet).GetField("_online", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        _onlineJsonField = typeof(RgbLibWallet).GetField("_onlineJson", BindingFlags.NonPublic | BindingFlags.Instance)!;
         _resultField = _cResultStringType.GetField("result")!;
         _innerField = _cResultStringType.GetField("inner")!;
         
@@ -251,9 +251,9 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
-            
-            var args = new object?[] { walletStruct, onlineStruct, false, false };
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
+
+            var args = new object?[] { walletStruct, onlineJson, false, false };
             var result = _listUnspentsMethod.Invoke(null, args);
             
             var unspentsJson = GetNativeResult(result);
@@ -288,9 +288,9 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
-            var args = new object?[] { walletStruct, onlineStruct, false };
+            var args = new object?[] { walletStruct, onlineJson, false };
             var result = _listTransactionsMethod.Invoke(null, args);
 
             var json = GetNativeResult(result);
@@ -311,14 +311,13 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
-            
-            var args = new object?[] { walletStruct, onlineStruct, true, count.ToString(), size.ToString(), ((int)feeRate).ToString(), false };
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
+
+            var args = new object?[] { walletStruct, onlineJson, true, count.ToString(), size.ToString(), ((int)feeRate).ToString(), false, false };
             var result = _createUtxosBeginMethod.Invoke(null, args);
-            
+
             _walletField.SetValue(wallet, args[0]);
-            _onlineField.SetValue(wallet, args[1]);
-            
+
             var psbt = GetNativeResult(result);
             if (psbt == null)
             {
@@ -342,14 +341,13 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
-            
-            var args = new object?[] { walletStruct, onlineStruct, signedPsbt.Trim('"'), false };
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
+
+            var args = new object?[] { walletStruct, onlineJson, signedPsbt.Trim('"') };
             var result = _createUtxosEndMethod.Invoke(null, args);
-            
+
             _walletField.SetValue(wallet, args[0]);
-            _onlineField.SetValue(wallet, args[1]);
-            
+
             var resultJson = GetNativeResult(result);
             if (resultJson == null)
             {
@@ -444,13 +442,12 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
-            var args = new object?[] { walletStruct, onlineStruct, null, "[]", false };
+            var args = new object?[] { walletStruct, onlineJson, null, "[]", false };
             _refreshMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);
-            _onlineField.SetValue(wallet, args[1]);
         }, ct);
     }
     
@@ -484,13 +481,12 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
-            var args = new object?[] { walletStruct, onlineStruct, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString(), null, false };
+            var args = new object?[] { walletStruct, onlineJson, recipientMapJson, false, ((int)Math.Round(feeRate)).ToString(), minConfirmations.ToString(), null, false };
             var result = _sendBeginMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);
-            _onlineField.SetValue(wallet, args[1]);
 
             var psbt = GetNativeResult(result);
             if (psbt == null)
@@ -508,13 +504,12 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var walletStruct = _walletField.GetValue(wallet)!;
-            var onlineStruct = _onlineField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
-            var args = new object?[] { walletStruct, onlineStruct, signedPsbt.Trim('"'), false };
+            var args = new object?[] { walletStruct, onlineJson, signedPsbt.Trim('"') };
             var result = _sendEndMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);
-            _onlineField.SetValue(wallet, args[1]);
 
             var json = GetNativeResult(result);
             if (json == null)

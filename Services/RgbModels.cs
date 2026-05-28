@@ -85,6 +85,8 @@ public class BtcTransaction
         "createutxos" or "create_utxos" => 1,
         "rgbsend" or "rgb_send" => 2,
         "drain" => 3,
+        "incoming" => 4,
+        "sendbtc" or "send_btc" => 5,
         _ => int.TryParse(s, out var n) ? n : -1
     };
 }
