@@ -213,6 +213,12 @@ What this gives:
 To regenerate the lockfile locally after a deliberate dependency change:
 
 ```bash
+# the lockfile must include the conditional BTCPay ProjectReference,
+# so the submodule has to be initialized first — otherwise restore
+# silently records a smaller set of dependencies and the next CI run
+# fails with "A new project reference to btcpayserver was found".
+git submodule update --init --recursive
+
 dotnet restore BTCPayServer.Plugins.RgbUtexo.csproj --force-evaluate
 git add packages.lock.json
 ```
