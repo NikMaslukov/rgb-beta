@@ -581,9 +581,9 @@ public class RGBWalletService : IRGBWalletService
         }
 
         var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-        var isRegtest = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase);
-        using var electrum = new ElectrumClient();
-        await electrum.ConnectAsync(networkSettings.ElectrumUrl, ct, allowInsecure: isRegtest);
+        var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
+        using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
+        await electrum.ConnectAsync(ct);
 
         var rawTxCache = new Dictionary<string, Transaction>();
         foreach (var utxo in selected)
@@ -647,7 +647,12 @@ public class RGBWalletService : IRGBWalletService
         psbt = PSBT.Parse(signedBase64, network);
 
         var signedTx = psbt.ExtractTransaction();
-        var txid = await electrum.BroadcastTransactionAsync(signedTx.ToHex(), ct);
+        var localTxid = signedTx.GetHash().ToString();
+        var broadcastTxid = await electrum.BroadcastTransactionAsync(signedTx.ToHex(), ct);
+        if (!string.Equals(broadcastTxid, localTxid, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Broadcast returned mismatched txid: expected {localTxid}, got {broadcastTxid}");
+        var txid = localTxid;
 
         _log.LogInformation("Sent {Amount} sats to {Address}, txid={Txid}, fee={Fee}",
             amountSats, destinationAddress, txid, fee);
@@ -737,9 +742,9 @@ public class RGBWalletService : IRGBWalletService
             var rawTx = psbtObj.ExtractTransaction();
 
             var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-            var isRegtestElectrum = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase);
-            using var electrum = new ElectrumClient();
-            await electrum.ConnectAsync(networkSettings.ElectrumUrl, ct, allowInsecure: isRegtestElectrum);
+            var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
+            using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
+            await electrum.ConnectAsync(ct);
             await electrum.BroadcastTransactionAsync(rawTx.ToHex(), ct);
         }
         catch (Exception ex)

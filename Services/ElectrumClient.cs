@@ -5,13 +5,25 @@ using System.Text.Json;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
-public class ElectrumClient : IDisposable
+public class ElectrumClient : IBitcoinChainClient
 {
     TcpClient? _tcp;
     Stream? _stream;
     int _requestId;
     static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(30);
     const int MaxResponseBytes = 10 * 1024 * 1024;
+    readonly string _electrumUrl;
+    readonly bool _allowInsecure;
+
+    public ElectrumClient(string electrumUrl, bool allowInsecure = false)
+    {
+        _electrumUrl = electrumUrl;
+        _allowInsecure = allowInsecure;
+    }
+
+    public ElectrumClient() : this("", false) { }
+
+    public Task ConnectAsync(CancellationToken ct = default) => ConnectAsync(_electrumUrl, ct, _allowInsecure);
 
     public async Task ConnectAsync(string electrumUrl, CancellationToken ct = default, bool allowInsecure = false)
     {
