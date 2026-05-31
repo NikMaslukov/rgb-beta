@@ -97,6 +97,22 @@ public class RGBController : Controller
             vm.WalletAddress = address;
             vm.IsConnected = true;
             vm.PendingSync = sync && vm.BtcBalance == 0;
+
+            await using var ctx = _db.CreateContext();
+            var pendingBlind = await ctx.RGBInvoices
+                .Where(i => i.WalletId == wallet.Id && i.AssetId == null && i.BtcPayInvoiceId == null
+                            && (i.Status == RGBInvoiceStatus.Pending || i.Status == RGBInvoiceStatus.WaitingConfirmations))
+                .OrderByDescending(i => i.CreatedAt)
+                .Take(20)
+                .ToListAsync();
+            vm.PendingBlindReceives = pendingBlind.Select(p => new RGBPendingBlindReceiveRow
+            {
+                InvoiceId = p.Id,
+                CreatedAt = p.CreatedAt,
+                ExpiresAt = p.ExpirationTimestamp.HasValue
+                    ? DateTimeOffset.FromUnixTimeSeconds(p.ExpirationTimestamp.Value) : null,
+                Status = p.Status.ToString()
+            }).ToList();
         }
         catch (Exception ex)
         {
@@ -666,6 +682,54 @@ public class RGBController : Controller
             SelectedAssetId = assetId,
             Assets = assets.Select(a => a.ToViewModel()).ToList(),
             Transfers = allTransfers.OrderByDescending(t => t.Idx).ToList()
+        });
+    }
+
+    [HttpPost("receive-any-asset")]
+    public async Task<IActionResult> CreateReceiveAnyAsset(string storeId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        try
+        {
+            var inv = await _wallets.CreateInvoiceAsync(
+                wallet.Id, assetId: null, amount: null,
+                expiration: TimeSpan.FromHours(2), btcPayInvoiceId: null);
+            return RedirectToAction(nameof(ReceiveAnyAsset), new { storeId, invoiceId = inv.Id });
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to create blind-receive invoice for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = ex.Message;
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+    }
+
+    [HttpGet("receive-any-asset/{invoiceId}")]
+    public async Task<IActionResult> ReceiveAnyAsset(string storeId, string invoiceId)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        await using var ctx = _db.CreateContext();
+        var inv = await ctx.RGBInvoices
+            .FirstOrDefaultAsync(i => i.Id == invoiceId && i.WalletId == wallet.Id);
+        if (inv == null || inv.AssetId != null || inv.BtcPayInvoiceId != null) return NotFound();
+
+        return View("BlindReceive", new RGBBlindReceiveViewModel
+        {
+            StoreId = storeId,
+            WalletId = wallet.Id,
+            InvoiceId = inv.Id,
+            RgbInvoiceString = inv.Invoice,
+            RecipientId = inv.RecipientId,
+            ExpiresAt = inv.ExpirationTimestamp.HasValue
+                ? DateTimeOffset.FromUnixTimeSeconds(inv.ExpirationTimestamp.Value)
+                : null,
+            Status = inv.Status.ToString(),
+            ReceivedAssetId = inv.ReceivedAssetId,
+            ReceivedAmount = inv.ReceivedAmount
         });
     }
 

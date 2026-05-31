@@ -129,6 +129,7 @@ public class RGBInvoiceListener : IHostedService
                 await CleanupExpiredTransfers(w, ct);
                 _log.LogInformation("Wallet {WalletId} refreshed, processing transfers...", w.Id);
                 await ProcessTransfers(w.Id, ct);
+                await ProcessAssetDiscoveryInvoices(w.Id, ct);
             }
             catch (Exception ex)
             {
@@ -279,6 +280,108 @@ public class RGBInvoiceListener : IHostedService
             }
         }
         await ctx.SaveChangesAsync(ct);
+    }
+
+    async Task ProcessAssetDiscoveryInvoices(string walletId, CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var pending = await ctx.RGBInvoices
+            .Where(i => i.WalletId == walletId
+                        && i.AssetId == null
+                        && i.BtcPayInvoiceId == null
+                        && (i.Status == RGBInvoiceStatus.Pending
+                            || i.Status == RGBInvoiceStatus.WaitingConfirmations))
+            .ToListAsync(ct);
+        if (pending.Count == 0) return;
+
+        var anyChanged = false;
+        var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // Expiry sweep FIRST — runs independent of any rgb-lib calls. If asset listing
+        // fails below, expired invoices still get marked Expired on this iteration.
+        var stillPending = new List<RGBInvoice>(pending.Count);
+        foreach (var inv in pending)
+        {
+            if (inv.ExpirationTimestamp.HasValue && nowUnix > inv.ExpirationTimestamp.Value)
+            {
+                inv.Status = RGBInvoiceStatus.Expired;
+                anyChanged = true;
+                continue;
+            }
+            stillPending.Add(inv);
+        }
+
+        if (stillPending.Count == 0)
+        {
+            if (anyChanged) await ctx.SaveChangesAsync(ct);
+            return;
+        }
+
+        List<RgbAsset> assets;
+        try { assets = await _wallets.ListAssetsRawAsync(walletId, ct); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "ListAssetsRawAsync failed during asset-discovery scan for wallet {WalletId}", walletId);
+            if (anyChanged) await ctx.SaveChangesAsync(ct);
+            return;
+        }
+        if (assets.Count == 0)
+        {
+            if (anyChanged) await ctx.SaveChangesAsync(ct);
+            return;
+        }
+
+        foreach (var inv in stillPending)
+        {
+            foreach (var asset in assets)
+            {
+                List<RgbTransfer> transfers;
+                try { transfers = await _wallets.GetTransfersAsync(walletId, asset.AssetId, ct); }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "GetTransfersAsync failed for asset {AssetId} during discovery", asset.AssetId);
+                    continue;
+                }
+
+                var match = EvaluateAssetDiscoveryMatch(inv, asset.AssetId, transfers);
+                if (match == null) continue;
+
+                if (match.IsZeroAmount)
+                {
+                    _log.LogCritical("Asset-discovery invoice {Id} matched zero-amount transfer — refusing to register asset {AssetId}", inv.Id, asset.AssetId);
+                    _events.Publish(new RgbAmountVerificationFailedEvent(inv.Id, walletId, match.Transfer.Idx));
+                    break;
+                }
+
+                if (match.NewStatus == RGBInvoiceStatus.Failed)
+                {
+                    inv.Status = RGBInvoiceStatus.Failed;
+                    inv.Txid = match.Transfer.Txid;
+                    anyChanged = true;
+                    break;
+                }
+
+                // Safe to register: positive amount AND not Failed. Let any DB exception
+                // propagate to the outer try in RefreshAllWallets so we retry next poll
+                // WITHOUT having advanced the invoice state.
+                await _wallets.RegisterSingleAssetIfNewAsync(walletId, asset, ct);
+
+                inv.ReceivedAssetId = asset.AssetId;
+                inv.ReceivedAmount = match.ReceivedAmount;
+                inv.Txid = match.Transfer.Txid;
+                inv.Status = match.NewStatus;
+                if (match.NewStatus == RGBInvoiceStatus.Settled)
+                    inv.SettledAt = DateTimeOffset.UtcNow;
+
+                _log.LogInformation("Asset-discovery invoice {Id} -> {Status} (asset={AssetId}, amount={Amount})",
+                    inv.Id, match.NewStatus, asset.AssetId, match.ReceivedAmount);
+
+                anyChanged = true;
+                break;
+            }
+        }
+
+        if (anyChanged) await ctx.SaveChangesAsync(ct);
     }
 
     async Task RecordOrUpdatePayment(RGBInvoice rgbInv, RgbTransfer tx, BTCPayServer.Data.PaymentStatus targetStatus, CancellationToken ct)
@@ -462,6 +565,63 @@ public class RGBInvoiceListener : IHostedService
         var left = inv.ExpirationTime - DateTimeOffset.UtcNow;
         return DateTimeOffset.UtcNow + (left > TimeSpan.FromMinutes(5) ? left : TimeSpan.FromMinutes(5));
     }
+
+    internal record AssetDiscoveryMatch(
+        string AssetId,
+        RgbTransfer Transfer,
+        RGBInvoiceStatus NewStatus,
+        long ReceivedAmount,
+        string? Txid,
+        bool ShouldRecordPayment,
+        bool IsZeroAmount);
+
+    internal static AssetDiscoveryMatch? EvaluateAssetDiscoveryMatch(
+        RGBInvoice invoice, string candidateAssetId, IReadOnlyList<RgbTransfer> transfersForAsset)
+    {
+        // Discriminator (defense-in-depth — also enforced in the LINQ filter at the
+        // ProcessAssetDiscoveryInvoices call site). Asset-discovery invoices have BOTH
+        // AssetId IS NULL AND BtcPayInvoiceId IS NULL. Refuse to match anything else,
+        // even if a future bug lets a payment-method row through with AssetId=null —
+        // otherwise we regress audit finding C3 (settling without amount verification).
+        if (!string.IsNullOrEmpty(invoice.AssetId)) return null;
+        if (!string.IsNullOrEmpty(invoice.BtcPayInvoiceId)) return null;
+        if (string.IsNullOrEmpty(invoice.RecipientId)) return null;
+
+        var matching = transfersForAsset
+            .Where(t => t.RecipientId == invoice.RecipientId && t.Kind is 1 or 2 && t.Status is 1 or 2 or 3 or 4)
+            .OrderBy(t => t.Idx)
+            .ToList();
+        if (matching.Count == 0) return null;
+
+        var first = matching[0];
+
+        if (first.Status == 4)
+        {
+            return new AssetDiscoveryMatch(candidateAssetId, first,
+                RGBInvoiceStatus.Failed, 0, first.Txid,
+                ShouldRecordPayment: false, IsZeroAmount: false);
+        }
+
+        // Amount <= 0 BEFORE distinguishing status — zero-amount transfers at ANY status
+        // must not advance state and must not trigger asset registration.
+        if (first.Amount <= 0)
+        {
+            return new AssetDiscoveryMatch(candidateAssetId, first,
+                invoice.Status, 0, first.Txid,
+                ShouldRecordPayment: false, IsZeroAmount: true);
+        }
+
+        if (first.Status is 1 or 2)
+        {
+            return new AssetDiscoveryMatch(candidateAssetId, first,
+                RGBInvoiceStatus.WaitingConfirmations, first.Amount, first.Txid,
+                ShouldRecordPayment: false, IsZeroAmount: false);
+        }
+
+        return new AssetDiscoveryMatch(candidateAssetId, first,
+            RGBInvoiceStatus.Settled, first.Amount, first.Txid,
+            ShouldRecordPayment: false, IsZeroAmount: false);
+    }
 }
 
 internal enum SettlementDecision
@@ -485,5 +645,22 @@ public class RgbAmountVerificationFailedEvent
         InvoiceId = invoiceId;
         WalletId = walletId;
         TransferIdx = transferIdx;
+    }
+}
+
+public class RgbAssetDiscoveredEvent
+{
+    public string WalletId { get; }
+    public string AssetId { get; }
+    public string Ticker { get; }
+    public string Name { get; }
+    public DateTimeOffset Timestamp { get; } = DateTimeOffset.UtcNow;
+
+    public RgbAssetDiscoveredEvent(string walletId, string assetId, string ticker, string name)
+    {
+        WalletId = walletId;
+        AssetId = assetId;
+        Ticker = ticker;
+        Name = name;
     }
 }

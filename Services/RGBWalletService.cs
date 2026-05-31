@@ -18,6 +18,7 @@ public class RGBWalletService : IRGBWalletService
     readonly RgbWalletSignerProvider _signerProvider;
     readonly ILogger<RGBWalletService> _log;
     readonly CurrencyNameTable _currencyNameTable;
+    readonly EventAggregator _events;
     readonly ConcurrentDictionary<string, string> _addressCache = new();
     readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
 
@@ -28,6 +29,7 @@ public class RGBWalletService : IRGBWalletService
         MnemonicProtectionService mnemonicProtection,
         RgbWalletSignerProvider signerProvider,
         CurrencyNameTable currencyNameTable,
+        EventAggregator events,
         ILogger<RGBWalletService> log)
     {
         _rgbLib = rgbLib;
@@ -36,6 +38,7 @@ public class RGBWalletService : IRGBWalletService
         _mnemonicProtection = mnemonicProtection;
         _signerProvider = signerProvider;
         _currencyNameTable = currencyNameTable;
+        _events = events;
         _log = log;
     }
 
@@ -217,6 +220,12 @@ public class RGBWalletService : IRGBWalletService
         return assets;
     }
 
+    public async Task<List<RgbAsset>> ListAssetsRawAsync(string walletId, CancellationToken ct = default)
+    {
+        await GetWalletOrThrow(walletId, ct);
+        return await _rgbLib.ListAssetsAsync(walletId, ct);
+    }
+
     async Task SyncAssetsToDbAsync(string walletId, List<RgbAsset> assets, CancellationToken ct)
     {
         if (assets.Count == 0) return;
@@ -233,12 +242,13 @@ public class RGBWalletService : IRGBWalletService
 
             foreach (var a in newAssets)
             {
+                var (t, n) = NormalizeAssetMetadata(a.Ticker, a.Name);
                 ctx.RGBAssets.Add(new RGBAsset
                 {
                     AssetId = a.AssetId,
                     WalletId = walletId,
-                    Ticker = a.Ticker,
-                    Name = a.Name,
+                    Ticker = t,
+                    Name = n,
                     Precision = a.Precision,
                     IssuedSupply = a.IssuedSupply,
                     CreatedAt = DateTimeOffset.UtcNow
@@ -251,6 +261,50 @@ public class RGBWalletService : IRGBWalletService
         {
             _log.LogWarning(ex, "Failed to sync assets to DB for wallet {WalletId}", walletId);
         }
+    }
+
+    public async Task<bool> RegisterSingleAssetIfNewAsync(string walletId, RgbAsset asset, CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(asset.AssetId)) return false;
+        var (t, n) = NormalizeAssetMetadata(asset.Ticker, asset.Name);
+
+        await using var ctx = _db.CreateContext();
+        var existing = await ctx.RGBAssets.FindAsync([walletId, asset.AssetId], ct);
+        if (existing != null) return false;
+
+        ctx.RGBAssets.Add(new RGBAsset
+        {
+            AssetId = asset.AssetId,
+            WalletId = walletId,
+            Ticker = t,
+            Name = n,
+            Precision = asset.Precision,
+            IssuedSupply = asset.IssuedSupply,
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        try
+        {
+            await ctx.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (IsDuplicateKey(ex))
+        {
+            return false;
+        }
+
+        try { await _currencyNameTable.ReloadCurrencyData(ct); }
+        catch (Exception ex) { _log.LogWarning(ex, "ReloadCurrencyData failed after registering asset {AssetId}", asset.AssetId); }
+
+        _events.Publish(new RgbAssetDiscoveredEvent(walletId, asset.AssetId, t, n));
+        _log.LogInformation("Auto-registered new asset {AssetId} ({Ticker}) on wallet {WalletId} via blind-receive", asset.AssetId, t, walletId);
+        return true;
+    }
+
+    static bool IsDuplicateKey(DbUpdateException ex)
+    {
+        var msg = ex.InnerException?.Message ?? ex.Message;
+        return msg.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("23505", StringComparison.Ordinal)
+            || msg.Contains("UNIQUE constraint", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<List<UnspentOutput>> ListUnspentsAsync(string walletId, CancellationToken ct = default)
@@ -274,12 +328,13 @@ public class RGBWalletService : IRGBWalletService
         var existing = await ctx.RGBAssets.FindAsync([walletId, asset.AssetId], ct);
         if (existing == null)
         {
+            var (t, n) = NormalizeAssetMetadata(asset.Ticker, asset.Name);
             ctx.RGBAssets.Add(new RGBAsset
             {
                 AssetId = asset.AssetId,
                 WalletId = walletId,
-                Ticker = asset.Ticker,
-                Name = asset.Name,
+                Ticker = t,
+                Name = n,
                 Precision = asset.Precision,
                 IssuedSupply = asset.IssuedSupply,
                 CreatedAt = DateTimeOffset.UtcNow
@@ -828,6 +883,30 @@ public class RGBWalletService : IRGBWalletService
         throw new RgbLibException("Unexpected response format from rgb-lib");
     }
 
+    internal static (string Ticker, string Name) NormalizeAssetMetadata(string? ticker, string? name)
+    {
+        return (Truncate(StripControlChars(ticker ?? ""), 32),
+                Truncate(StripControlChars(name ?? ""), 64));
+    }
+
+    static string StripControlChars(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var buf = new System.Text.StringBuilder(s.Length);
+        foreach (var ch in s)
+        {
+            if (ch >= 0x20 && ch != 0x7F) buf.Append(ch);
+        }
+        return buf.ToString();
+    }
+
+    static string Truncate(string s, int maxChars)
+    {
+        if (s.Length <= maxChars) return s;
+        var cut = maxChars;
+        if (char.IsHighSurrogate(s[cut - 1])) cut--;
+        return s.Substring(0, cut);
+    }
 }
 
 

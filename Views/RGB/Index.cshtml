@@ -155,6 +155,27 @@ else
     </div>
 }
 
+@if (Model.PendingBlindReceives is not null && Model.PendingBlindReceives.Any())
+{
+    <h4 class="mt-4">Pending receive-any-asset invoices</h4>
+    <div class="table-responsive">
+        <table class="table table-sm">
+            <thead><tr><th>Created</th><th>Expires</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var b in Model.PendingBlindReceives)
+                {
+                    <tr>
+                        <td>@b.CreatedAt.ToString("u")</td>
+                        <td>@(b.ExpiresAt?.ToString("u") ?? "—")</td>
+                        <td>@b.Status</td>
+                        <td><a asp-action="ReceiveAnyAsset" asp-route-storeId="@Model.StoreId" asp-route-invoiceId="@b.InvoiceId">Open</a></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
 <div class="mt-4">
     <h4>Quick Actions</h4>
     <div class="d-flex gap-2 flex-wrap">
@@ -176,6 +197,11 @@ else
         <a asp-action="BtcTransactions" asp-route-storeId="@Model.StoreId" class="btn btn-outline-secondary">
             <span class="fab fa-bitcoin"></span> BTC Transactions
         </a>
+        <form asp-action="CreateReceiveAnyAsset" asp-route-storeId="@Model.StoreId" method="post" class="d-inline">
+            <button type="submit" class="btn btn-outline-primary">
+                <span class="fa fa-download"></span> Receive any asset
+            </button>
+        </form>
     </div>
 </div>
 

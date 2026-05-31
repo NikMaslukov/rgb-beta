@@ -211,7 +211,7 @@ public class RgbLibService : IRgbLibService
 
         var assignment = amount.HasValue
             ? JsonSerializer.Serialize(new { Fungible = amount.Value })
-            : "{\"NonFungible\":null}";
+            : "{\"Any\":null}";
 
         var expirationTs = expiration.HasValue
             ? expiration.Value.ToString()
