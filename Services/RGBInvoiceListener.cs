@@ -331,17 +331,27 @@ public class RGBInvoiceListener : IHostedService
             return;
         }
 
+        // Prefetch transfers per asset ONCE per scan: with N pending invoices and M assets,
+        // the prior structure made N×M rgb-lib calls every poll. Build the per-asset
+        // transfer list up front and let the per-invoice loop evaluate against the cache.
+        var transfersByAsset = new Dictionary<string, List<RgbTransfer>>(assets.Count);
+        foreach (var asset in assets)
+        {
+            try
+            {
+                transfersByAsset[asset.AssetId] = await _wallets.GetTransfersAsync(walletId, asset.AssetId, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "GetTransfersAsync failed for asset {AssetId} during discovery", asset.AssetId);
+            }
+        }
+
         foreach (var inv in stillPending)
         {
             foreach (var asset in assets)
             {
-                List<RgbTransfer> transfers;
-                try { transfers = await _wallets.GetTransfersAsync(walletId, asset.AssetId, ct); }
-                catch (Exception ex)
-                {
-                    _log.LogWarning(ex, "GetTransfersAsync failed for asset {AssetId} during discovery", asset.AssetId);
-                    continue;
-                }
+                if (!transfersByAsset.TryGetValue(asset.AssetId, out var transfers)) continue;
 
                 var match = EvaluateAssetDiscoveryMatch(inv, asset.AssetId, transfers);
                 if (match == null) continue;
