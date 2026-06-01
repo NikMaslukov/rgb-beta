@@ -19,6 +19,7 @@ public class RGBInvoice
     public string RecipientId { get; set; } = "";
     
     public string? AssetId { get; set; }
+    public string? ReceivedAssetId { get; set; }
     public long? Amount { get; set; }
     public long? ReceivedAmount { get; set; }
     public long? ExpirationTimestamp { get; set; }

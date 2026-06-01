@@ -16,7 +16,7 @@ public class RGBSetupViewModel : StoreViewModel
     [Display(Name = "Network")]
     public string SelectedNetwork { get; set; } = "";
 
-    public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "signet", "mainnet"];
+    public string[] AvailableNetworks { get; set; } = ["regtest", "testnet", "signet", "utexo", "mainnet"];
 
     public string ElectrumUrl { get; set; } = "";
     public string ProxyEndpoint { get; set; } = "";
@@ -62,6 +62,7 @@ public class RGBIndexViewModel : StoreViewModel
     public bool IsConnected { get; set; }
     public string? ConnectionError { get; set; }
     public bool PendingSync { get; set; }
+    public List<RGBPendingBlindReceiveRow>? PendingBlindReceives { get; set; }
 }
 
 public class RGBAssetsViewModel : StoreViewModel
@@ -237,4 +238,24 @@ public class RGBSettingsViewModel : StoreViewModel
     public int MinConfirmations { get; set; } = 1;
 
     public bool AllowOneToOneRateFallback { get; set; }
+}
+
+public class RGBBlindReceiveViewModel : StoreViewModel
+{
+    public string WalletId { get; set; } = "";
+    public string InvoiceId { get; set; } = "";
+    public string RgbInvoiceString { get; set; } = "";
+    public string RecipientId { get; set; } = "";
+    public DateTimeOffset? ExpiresAt { get; set; }
+    public string Status { get; set; } = "Waiting";
+    public string? ReceivedAssetId { get; set; }
+    public long? ReceivedAmount { get; set; }
+}
+
+public class RGBPendingBlindReceiveRow
+{
+    public string InvoiceId { get; set; } = "";
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? ExpiresAt { get; set; }
+    public string Status { get; set; } = "";
 }

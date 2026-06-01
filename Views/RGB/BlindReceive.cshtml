@@ -1,0 +1,64 @@
+@model BTCPayServer.Plugins.RgbUtexo.Models.RGBBlindReceiveViewModel
+@{
+    ViewData["Title"] = "Receive Any Asset";
+}
+
+<div class="sticky-header-setup"></div>
+<partial name="_RgbCustodialBanner" />
+<div class="sticky-header d-flex align-items-center justify-content-between">
+    <h2>@ViewData["Title"]</h2>
+    <a asp-action="Index" asp-route-storeId="@Model.StoreId" class="btn btn-secondary">
+        <span class="fa fa-arrow-left"></span> Back
+    </a>
+</div>
+
+<partial name="_StatusMessage" />
+
+<div class="card mb-4">
+    <div class="card-body">
+        <h5 class="card-title">RGB Invoice</h5>
+        <p class="text-muted small mb-2">
+            Share this invoice with the sender. Any RGB asset they send to it will be registered in this wallet.
+        </p>
+        <div class="input-group">
+            <input type="text" class="form-control font-monospace" id="rgbInvoice"
+                   value="@Model.RgbInvoiceString" readonly />
+            <button type="button" class="btn btn-outline-secondary"
+                    onclick="navigator.clipboard.writeText(document.getElementById('rgbInvoice').value); this.innerHTML='✓ Copied'; setTimeout(() => this.innerHTML='📋 Copy', 2000);">
+                📋 Copy
+            </button>
+        </div>
+        <p class="text-muted small mt-3 mb-0">
+            <strong>Recipient ID:</strong> <code>@Model.RecipientId</code>
+        </p>
+        @if (Model.ExpiresAt.HasValue)
+        {
+            <p class="text-muted small mb-0">
+                <strong>Expires:</strong> @Model.ExpiresAt.Value.ToString("u")
+            </p>
+        }
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-body">
+        <h5 class="card-title">Status: @Model.Status</h5>
+        @if (!string.IsNullOrEmpty(Model.ReceivedAssetId))
+        {
+            <p class="mb-1">
+                <strong>Received asset:</strong> <code>@Model.ReceivedAssetId</code>
+            </p>
+            <p class="mb-0"><strong>Amount:</strong> @Model.ReceivedAmount</p>
+        }
+        else
+        {
+            <p class="mb-0 text-muted">Waiting for incoming transfer…</p>
+        }
+    </div>
+</div>
+
+<form asp-action="CreateReceiveAnyAsset" asp-route-storeId="@Model.StoreId" method="post">
+    <button type="submit" class="btn btn-outline-primary">
+        <span class="fa fa-redo"></span> Generate New Invoice
+    </button>
+</form>
