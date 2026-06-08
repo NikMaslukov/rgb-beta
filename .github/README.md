@@ -268,28 +268,3 @@ A `PASSED: SLSA verification passed` output means the artifact was built
 by the expected workflow on the expected source commit and has not been
 modified since. Any mismatch (different builder, different commit,
 modified artifact) makes the verifier exit non-zero.
-
-### 5.4. What this stack closes from the security audit (C7)
-
-| Audit requirement | Control |
-| --- | --- |
-| `publish the rgb-lib package to nuget.org` | §5.1 — `RgbLib` is on [nuget.org](https://www.nuget.org/packages/RgbLib); `nuget_packages/` is gone |
-| `…with author signing` | §5.1 + §5.3 — keyless Sigstore signing via SLSA L3 attestations on both `RgbLib.nupkg` and `BTCPayServer.Plugins.RgbUtexo.btcpay`; classic code-signing certificate is **not** issued (see §5.5) |
-| `checked-in lockfile pinning the package hash` | §5.2 — `packages.lock.json` + `RestoreLockedMode` |
-| `SLSA provenance for the native libraries` | §5.1 — `RgbLib.nupkg.intoto.jsonl` is published by `UTEXO-Protocol/rgb-lib-c-sharp` for every release; §5.3 — `BTCPayServer.Plugins.RgbUtexo.btcpay.intoto.jsonl` covers the final plugin artifact |
-| `reproducible-build instructions` | §5.1 (pin to `rgb-lib-c-sharp` release tag + verifier command) + §5.2 (lockfile reproducibility) |
-
-### 5.5. Known follow-ups
-
-- **Classic author-signing certificate.** A DigiCert / Sectigo
-  code-signing certificate would replace keyless Sigstore signing with
-  the certificate-based signing that NuGet historically validates. Not
-  issued yet — Sigstore + SLSA L3 + lockfile is the equivalent control
-  used here. Only needed if an external audit refuses the equivalence.
-- **End-to-end reproducible native libs.** The Rust-built `.so` /
-  `.dylib` / `.dll` are downloaded from
-  [`UTEXO-Protocol/rgb-lib`](https://github.com/UTEXO-Protocol/rgb-lib)
-  release assets by the `rgb-lib-c-sharp` build pipeline. Full
-  bit-for-bit reproducibility there depends on pinning the Rust
-  toolchain and `SOURCE_DATE_EPOCH` upstream — tracked separately, not
-  in this repository.
