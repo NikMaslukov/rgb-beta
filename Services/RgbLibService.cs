@@ -82,7 +82,7 @@ public class RgbLibService : IRgbLibService
                 dbWallet.XpubColored, 
                 dbWallet.MasterFingerprint,
                 dbWallet.Network,
-                dbWallet.MaxAllocationsPerUtxo)));
+                RGBWalletService.ResolveAllocationsPerUtxo(dbWallet.MaxAllocationsPerUtxo))));
 
         return lazyWallet.Value;
     }
@@ -130,18 +130,76 @@ public class RgbLibService : IRgbLibService
         wallet.GoOnline(networkSettings.ElectrumUrl, true);
 
         _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
-        return new RgbLibWalletHandle(wallet, walletId);
+        return new RgbLibWalletHandle(wallet, walletId, _log);
     }
 
-    public void UnloadWallet(string walletId)
+    public void UnloadWallet(string walletId) => UnloadFromCache(_wallets, walletId, _log);
+
+    internal static void UnloadFromCache(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, ILogger? log)
     {
-        if (_wallets.TryRemove(walletId, out var lazy))
+        if (!wallets.TryGetValue(walletId, out var lazy))
+            return;
+
+        if (lazy.IsValueCreated)
         {
-            if (lazy.IsValueCreated)
-            {
-                lazy.Value.Dispose();
-                _log.LogInformation("Wallet {WalletId} unloaded", walletId);
-            }
+            DisposeAndEvict(wallets, walletId, lazy, log);
+            return;
+        }
+
+        Task.Run(() => DisposeAndEvict(wallets, walletId, lazy, log));
+    }
+
+    static void DisposeAndEvict(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, Lazy<RgbLibWalletHandle> lazy, ILogger? log)
+    {
+        RgbLibWalletHandle handle;
+        try
+        {
+            handle = lazy.Value;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException and not AccessViolationException and not AppDomainUnloadedException and not BadImageFormatException)
+        {
+            log?.LogDebug(ex, "Wallet {WalletId} construction had failed; removing cache entry", walletId);
+            wallets.TryRemove(new KeyValuePair<string, Lazy<RgbLibWalletHandle>>(walletId, lazy));
+            return;
+        }
+
+        handle.Dispose();
+
+        if (handle.NativeWalletFreed)
+        {
+            wallets.TryRemove(new KeyValuePair<string, Lazy<RgbLibWalletHandle>>(walletId, lazy));
+            log?.LogInformation("Wallet {WalletId} unloaded", walletId);
+        }
+        else
+        {
+            log?.LogWarning(
+                "Wallet {WalletId} unload timed out with an operation still running; native wallet will be freed after the operation completes",
+                walletId);
+            Task.Run(() => CompleteTimedOutDisposeAndEvict(wallets, walletId, lazy, handle, log));
+        }
+    }
+
+    static void CompleteTimedOutDisposeAndEvict(
+        ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets,
+        string walletId,
+        Lazy<RgbLibWalletHandle> lazy,
+        RgbLibWalletHandle handle,
+        ILogger? log)
+    {
+        try
+        {
+            handle.CompleteTimedOutDispose();
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException and not AccessViolationException and not AppDomainUnloadedException and not BadImageFormatException)
+        {
+            log?.LogWarning(ex, "Wallet {WalletId} deferred unload failed; restart required to reclaim it", walletId);
+            return;
+        }
+
+        if (handle.NativeWalletFreed)
+        {
+            wallets.TryRemove(new KeyValuePair<string, Lazy<RgbLibWalletHandle>>(walletId, lazy));
+            log?.LogInformation("Wallet {WalletId} deferred unload completed", walletId);
         }
     }
 

@@ -40,6 +40,12 @@ public class RGBPluginMigrationRunner : IStartupTask
             """, cancellationToken);
 
         await ctx.Database.ExecuteSqlRawAsync("""
+            UPDATE "RGB_Wallets"
+            SET "MaxAllocationsPerUtxo" = LEAST(GREATEST("MaxAllocationsPerUtxo", 1), 50)
+            WHERE "MaxAllocationsPerUtxo" < 1 OR "MaxAllocationsPerUtxo" > 50
+            """, cancellationToken);
+
+        await ctx.Database.ExecuteSqlRawAsync("""
             ALTER TABLE "RGB_Assets" DROP CONSTRAINT IF EXISTS "PK_RGB_Assets";
             ALTER TABLE "RGB_Assets" ADD CONSTRAINT "PK_RGB_Assets" PRIMARY KEY ("WalletId", "AssetId");
             """, cancellationToken);
@@ -112,6 +118,10 @@ public class RGBPluginMigrationRunner : IStartupTask
                 if (config == null || string.IsNullOrEmpty(config.WalletId))
                     continue;
 
+                var wallet = await ctx.RGBWallets.FindAsync([config.WalletId], ct);
+                if (!RGBPaymentMethodHandler.WalletBelongsToStore(wallet?.StoreId, store.Id))
+                    continue;
+
                 var assets = await ctx.RGBAssets.Where(a => a.WalletId == config.WalletId).ToListAsync(ct);
                 var count = 0;
                 foreach (var a in assets)
@@ -152,6 +162,10 @@ public class RGBPluginMigrationRunner : IStartupTask
                 if (config == null || string.IsNullOrEmpty(config.WalletId))
                     continue;
                 if (!string.IsNullOrEmpty(config.DefaultAssetId))
+                    continue;
+
+                var wallet = await ctx.RGBWallets.FindAsync([config.WalletId], ct);
+                if (!RGBPaymentMethodHandler.WalletBelongsToStore(wallet?.StoreId, store.Id))
                     continue;
 
                 var approvedCount = await ctx.RGBAssets
