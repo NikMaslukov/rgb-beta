@@ -91,9 +91,9 @@
       },
       "RgbLib": {
         "type": "Direct",
-        "requested": "[0.3.0-beta.21.1, )",
-        "resolved": "0.3.0-beta.21.1",
-        "contentHash": "kbTmP4OUB4heYfqAnezwlBcXpvJgexPzKg2Vl1EYcRUNbROs3Rp5hxn0YslwoSpaRcLuYUsaHFZ55mUIXS0kMQ=="
+        "requested": "[0.3.0-beta.25, )",
+        "resolved": "0.3.0-beta.25",
+        "contentHash": "be1G6rqnhvmFfB31e+I7h++mkPqtWxxddRuDC88u5JOsylADGGY2H89SDHvx8ACqPRs8Oni4Zq0+cRFABLwP4g=="
       },
       "AngleSharp": {
         "type": "Transitive",
