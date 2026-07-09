@@ -635,6 +635,65 @@ public class RgbLibService : IRgbLibService
     [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
     static extern void free_invoice(COpaqueStruct invoice);
 
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern CResultString rgblib_create_consignments(
+        ref COpaqueStruct wallet,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string psbt);
+
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern CResultString rgblib_fail_transfers(
+        ref COpaqueStruct wallet,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string online,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? batchTransferIdxOpt,
+        [MarshalAs(UnmanagedType.I1)] bool noAssetOnly,
+        [MarshalAs(UnmanagedType.I1)] bool skipSync);
+
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern void rgblib_string_free(IntPtr ptr);
+
+    string ReadRgbLibString(CResultString result, string call)
+    {
+        try
+        {
+            var payload = result.inner != IntPtr.Zero ? Marshal.PtrToStringUTF8(result.inner) : null;
+            if (result.result != CResultValue.Ok)
+                throw new RgbLibException($"{call} failed: {payload ?? "no detail"}");
+            return payload ?? throw new RgbLibException($"{call} returned a null payload");
+        }
+        finally
+        {
+            if (result.inner != IntPtr.Zero)
+                rgblib_string_free(result.inner);
+        }
+    }
+
+    public async Task<string> CreateConsignmentsAsync(string walletId, string psbt, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        return await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var walletStruct = (COpaqueStruct)_walletField.GetValue(wallet)!;
+            var result = rgblib_create_consignments(ref walletStruct, psbt.Trim('"'));
+            return ReadRgbLibString(result, "create_consignments");
+        }, ct);
+    }
+
+    public async Task FailTransfersAsync(string walletId, int batchTransferIdx, bool noAssetOnly, bool skipSync, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        await handle.ExecuteAsync(wallet =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var walletStruct = (COpaqueStruct)_walletField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
+            var result = rgblib_fail_transfers(ref walletStruct, onlineJson, batchTransferIdx.ToString(), noAssetOnly, skipSync);
+            ReadRgbLibString(result, "fail_transfers");
+        }, ct);
+    }
+
     public RgbInvoiceData DecodeInvoice(string invoiceString)
     {
         var newResult = rgblib_invoice_new(invoiceString);

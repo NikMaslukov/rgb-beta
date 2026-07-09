@@ -70,6 +70,13 @@
         
         <EmbeddedResource Include="rgb-icon.svg" />
         <None Include="README.md" Pack="true" PackagePath="\" />
+
+        <None Include="native/rgb-verify/runtimes/**">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <Pack>true</Pack>
+            <PackagePath>runtimes/%(RecursiveDir)</PackagePath>
+            <Link>runtimes/%(RecursiveDir)%(Filename)%(Extension)</Link>
+        </None>
     </ItemGroup>
 
     <ItemGroup>

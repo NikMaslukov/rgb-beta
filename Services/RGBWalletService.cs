@@ -770,6 +770,21 @@ public class RGBWalletService : IRGBWalletService
 
         var sendBeginResult = await _rgbLib.SendBeginAsync(walletId, recipientMap, feeRate, 1, ct);
 
+        var batchTransferIdx = ParseBatchTransferIdx(sendBeginResult);
+
+        try
+        {
+            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, sendBeginResult, amount, ct);
+        }
+        catch (Exception gateEx)
+        {
+            _log.LogError(gateEx, "SendAsset: intent gate rejected transfer {Idx} for wallet {WalletId}", batchTransferIdx, walletId);
+            try { await _rgbLib.FailTransfersAsync(walletId, batchTransferIdx, false, true, CancellationToken.None); }
+            catch (Exception failEx) { _log.LogError(failEx, "SendAsset: FailTransfers failed after gate rejection for wallet {WalletId}", walletId); }
+            if (gateEx is RgbIntentVerificationException) throw;
+            throw new RgbIntentVerificationException($"RGB send intent verification failed: {gateEx.Message}", gateEx);
+        }
+
         string signedPsbt;
         try
         {
@@ -843,10 +858,6 @@ public class RGBWalletService : IRGBWalletService
     internal static (string ResolvedAssetId, RgbAsset Asset) ValidateSendAssetRequest(
         RgbInvoiceData invoiceData, string assetId, long amount, List<RgbAsset> walletAssets)
     {
-        if (invoiceData.ExpirationTimestamp > 0
-            && DateTimeOffset.FromUnixTimeSeconds(invoiceData.ExpirationTimestamp) < DateTimeOffset.UtcNow)
-            throw new InvalidOperationException("This RGB invoice has expired");
-
         var resolvedAssetId = invoiceData.AssetId ?? assetId;
         if (string.IsNullOrEmpty(resolvedAssetId))
             throw new InvalidOperationException("Asset ID must be provided — the invoice does not specify one");
@@ -879,6 +890,58 @@ public class RGBWalletService : IRGBWalletService
 
     async Task<RGBWallet> GetWalletOrThrow(string id, CancellationToken ct = default) =>
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");
+
+    static int ParseBatchTransferIdx(string sendBeginResult)
+    {
+        using var doc = JsonDocument.Parse(sendBeginResult);
+        if (doc.RootElement.TryGetProperty("batch_transfer_idx", out var idx)
+            && idx.ValueKind == JsonValueKind.Number && idx.TryGetInt32(out var value))
+            return value;
+        throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
+    }
+
+    async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
+        string sendBeginResult, long amount, CancellationToken ct)
+    {
+        var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
+            ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
+
+        var details = parsedSendBegin.Details
+            ?? throw new RgbIntentVerificationException("send_begin returned no details");
+
+        if (details.IsDonation)
+            throw new RgbIntentVerificationException("send_begin reports a donation transfer, which is not supported");
+
+        var unsignedPsbt = PSBT.Parse(parsedSendBegin.Psbt.Trim('"'), network);
+        var unsignedTxid = unsignedPsbt.GetGlobalTransaction().GetHash().ToString();
+
+        var opret = RgbPsbtInspector.ReadOpretCommitment(unsignedPsbt);
+        var opretHex = Convert.ToHexString(opret).ToLowerInvariant();
+
+        RgbSighashGuard.EnsureAllInputsAllowed(unsignedPsbt);
+
+        var decode = RgbVerifyNative.DecodeInvoice(rgbInvoice);
+
+        var consignmentPath = await _rgbLib.CreateConsignmentsAsync(walletId, parsedSendBegin.Psbt, ct);
+
+        var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
+        var validate = RgbVerifyNative.Validate(
+            consignmentPath, unsignedTxid, networkSettings.ElectrumUrl, RgbChainNetMapper.PrefixForNetwork(network));
+
+        var commitment = RgbVerifyNative.CommitmentCheck(details.FasciaPath, unsignedTxid, opretHex, details.Entropy);
+
+        var stagedEndpoints = RgbTransferDataReader.ReadTransportEndpoints(details.FasciaPath);
+
+        var signer = await _signerProvider.GetSignerAsync(walletId, ct) as MemoryWalletSigner
+            ?? throw new RgbIntentVerificationException("no local signer available for intent verification");
+
+        var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
+        using var chainClient = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
+        await chainClient.ConnectAsync(ct);
+
+        await RgbIntentVerifier.VerifyAsync(decode, validate, commitment, unsignedPsbt, unsignedTxid,
+            signer, network, amount, stagedEndpoints, chainClient, ct);
+    }
 
     static string ExtractPsbt(string nativeResult)
     {
