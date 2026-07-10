@@ -774,7 +774,7 @@ public class RGBWalletService : IRGBWalletService
 
         try
         {
-            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, sendBeginResult, amount, ct);
+            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, sendBeginResult, amount, resolvedAssetId, ct);
         }
         catch (Exception gateEx)
         {
@@ -901,7 +901,7 @@ public class RGBWalletService : IRGBWalletService
     }
 
     async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
-        string sendBeginResult, long amount, CancellationToken ct)
+        string sendBeginResult, long amount, string operatorAssetId, CancellationToken ct)
     {
         var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
             ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
@@ -940,7 +940,7 @@ public class RGBWalletService : IRGBWalletService
         await chainClient.ConnectAsync(ct);
 
         await RgbIntentVerifier.VerifyAsync(decode, validate, commitment, unsignedPsbt, unsignedTxid,
-            signer, network, amount, stagedEndpoints, chainClient, ct);
+            signer, network, amount, operatorAssetId, stagedEndpoints, chainClient, ct);
     }
 
     static string ExtractPsbt(string nativeResult)

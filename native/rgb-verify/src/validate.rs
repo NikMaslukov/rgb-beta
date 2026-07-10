@@ -326,4 +326,15 @@ mod tests {
         assert!(build_resolver("https://").is_err());
         assert!(build_resolver("https:///no-host").is_err());
     }
+
+    #[test]
+    #[ignore = "network: queries the live utexo esplora indexer"]
+    fn utexo_esplora_indexer_is_reachable() {
+        let url = "https://esplora-api.utexo.com";
+        assert!(build_resolver(url).is_ok());
+        let client = rgbstd::indexers::esplora_blocking::esplora_client::Builder::new(url)
+            .build_blocking();
+        let height = client.get_height().expect("live utexo esplora query failed");
+        assert!(height > 0);
+    }
 }

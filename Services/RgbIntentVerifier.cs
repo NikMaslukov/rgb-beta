@@ -18,11 +18,13 @@ public static class RgbIntentVerifier
         MemoryWalletSigner signer,
         Network walletNetwork,
         long operatorAmount,
+        string operatorAssetId,
         IReadOnlyList<string> stagedTransportEndpoints,
         IBitcoinChainClient chainClient,
         CancellationToken ct = default)
     {
         VerifyExpiry(decode);
+        VerifyOperatorApproval(decode, operatorAssetId, operatorAmount);
         VerifyAsset(decode, validate);
         EnsureNetwork(validate.ChainNet, walletNetwork, "consignment network");
         EnsureNetwork(decode.RecipientChainNet, walletNetwork, "recipient network");
@@ -57,6 +59,28 @@ public static class RgbIntentVerifier
             throw new RgbIntentVerificationException(
                 "asset mismatch: invoice contract does not match the consignment contract");
     }
+
+    static void VerifyOperatorApproval(RgbDecodeInvoiceResult decode, string operatorAssetId, long operatorAmount)
+    {
+        if (string.IsNullOrEmpty(operatorAssetId))
+            throw new RgbIntentVerificationException("operator did not approve an asset to send");
+        if (!string.Equals(StripRgbPrefix(decode.ContractId), StripRgbPrefix(operatorAssetId), StringComparison.Ordinal))
+            throw new RgbIntentVerificationException(
+                "asset mismatch: invoice contract does not match the operator-approved asset");
+        if (operatorAmount < 0)
+            throw new RgbIntentVerificationException("operator amount is negative");
+        if (decode.AmountKind == "amount")
+        {
+            if (!decode.Amount.HasValue)
+                throw new RgbIntentVerificationException("invoice declares an amount but none was decoded");
+            if ((ulong)operatorAmount != decode.Amount.Value)
+                throw new RgbIntentVerificationException(
+                    "amount mismatch: operator-approved amount does not match the invoice amount");
+        }
+    }
+
+    static string StripRgbPrefix(string s) =>
+        s.StartsWith("rgb:", StringComparison.OrdinalIgnoreCase) ? s.Substring(4) : s;
 
     static void VerifyWitnessIdentity(RgbValidateResult validate, PSBT unsignedPsbt, string unsignedTxid)
     {
@@ -246,5 +270,13 @@ public static class RgbIntentVerifier
                 "transport endpoint mismatch: staged endpoints differ from the invoice endpoints");
     }
 
-    static string Normalize(string endpoint) => endpoint.Trim().TrimEnd('/');
+    static string Normalize(string endpoint)
+    {
+        var e = endpoint.Trim().TrimEnd('/');
+        if (e.StartsWith("rpcs://", StringComparison.OrdinalIgnoreCase))
+            return "https://" + e.Substring("rpcs://".Length);
+        if (e.StartsWith("rpc://", StringComparison.OrdinalIgnoreCase))
+            return "http://" + e.Substring("rpc://".Length);
+        return e;
+    }
 }

@@ -34,10 +34,11 @@ public class RgbIntentVerifierTests
         public required RgbCommitmentCheckResult Commitment;
         public required List<string> Staged;
         public long OperatorAmount = 100;
+        public string OperatorAssetId = ContractId;
         public FakeChainClient Chain = new();
 
         public Task Run() => RgbIntentVerifier.VerifyAsync(
-            Decode, Validate, Commitment, Psbt, UnsignedTxid, Signer, Net, OperatorAmount, Staged, Chain);
+            Decode, Validate, Commitment, Psbt, UnsignedTxid, Signer, Net, OperatorAmount, OperatorAssetId, Staged, Chain);
     }
 
     static Ctx Valid()
@@ -105,6 +106,38 @@ public class RgbIntentVerifierTests
     {
         var c = Valid();
         c.Validate.ContractId = "rgb:different-contract-id";
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task OperatorApprovedDifferentAsset_Rejected()
+    {
+        var c = Valid();
+        c.OperatorAssetId = "rgb:some-other-asset-the-operator-picked";
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task OperatorApprovedEmptyAsset_Rejected()
+    {
+        var c = Valid();
+        c.OperatorAssetId = "";
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task OperatorAssetId_RgbPrefixTolerant_Passes()
+    {
+        var c = Valid();
+        c.OperatorAssetId = ContractId.Substring(4);
+        await c.Run();
+    }
+
+    [Fact]
+    public async Task OperatorApprovedDifferentAmount_EmbeddedInvoice_Rejected()
+    {
+        var c = Valid();
+        c.OperatorAmount = 50;
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
@@ -217,6 +250,33 @@ public class RgbIntentVerifierTests
     {
         var c = Valid();
         c.Staged = ["rpc://attacker.example/0.2/json-rpc"];
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task EndpointSchemeTranslated_RpcToHttp_Passes()
+    {
+        var c = Valid();
+        c.Decode.Transports = ["rpc://proxy.example/0.2/json-rpc"];
+        c.Staged = ["http://proxy.example/0.2/json-rpc"];
+        await c.Run();
+    }
+
+    [Fact]
+    public async Task EndpointSchemeTranslated_RpcsToHttps_Passes()
+    {
+        var c = Valid();
+        c.Decode.Transports = ["rpcs://proxy.iriswallet.com/0.2/json-rpc"];
+        c.Staged = ["https://proxy.iriswallet.com/0.2/json-rpc"];
+        await c.Run();
+    }
+
+    [Fact]
+    public async Task EndpointSchemeTranslated_DifferentHost_Rejected()
+    {
+        var c = Valid();
+        c.Decode.Transports = ["rpc://proxy.example/0.2/json-rpc"];
+        c.Staged = ["http://attacker.example/0.2/json-rpc"];
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
