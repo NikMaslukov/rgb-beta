@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use amplify::confinement::Confined;
 use amplify::{ByteArray, Wrapper};
 use serde::Serialize;
 
@@ -56,7 +57,7 @@ pub(crate) fn validate(
     let txid = Txid::from_str(&unsigned_txid).map_err(|_| "invalid unsigned txid".to_string())?;
 
     let mut resolver = build_resolver(&indexer_url)?;
-    resolver.add_consignment_txes(&consignment);
+    resolver.add_consignment_txes(&terminal_only_consignment(&consignment, txid)?);
     let config = ValidationConfig {
         chain_net,
         trusted_typesystem: NonInflatableAsset::types(),
@@ -99,6 +100,14 @@ fn build_resolver(indexer_url: &str) -> Result<AnyResolver, String> {
     }
     AnyResolver::electrum_blocking(indexer_url, None)
         .map_err(|e| format!("failed to build electrum resolver: {e}"))
+}
+
+fn terminal_only_consignment(consignment: &Transfer, txid: Txid) -> Result<Transfer, String> {
+    let terminal = select_anchored_bundle(consignment, txid)?.clone();
+    let mut trimmed = consignment.clone();
+    trimmed.bundles = Confined::try_from_iter([terminal])
+        .map_err(|_| "failed to build terminal witness set".to_string())?;
+    Ok(trimmed)
 }
 
 fn check_schema(consignment: &Transfer) -> Result<(), String> {
@@ -251,6 +260,16 @@ mod tests {
         let txid = terminal_txid(&consignment);
         let bundle = select_anchored_bundle(&consignment, txid).unwrap();
         assert_eq!(bundle.pub_witness.txid(), txid);
+    }
+
+    #[test]
+    fn terminal_only_keeps_single_terminal_bundle() {
+        let consignment = fixture();
+        assert!(consignment.bundles.len() > 1);
+        let txid = terminal_txid(&consignment);
+        let trimmed = terminal_only_consignment(&consignment, txid).unwrap();
+        assert_eq!(trimmed.bundles.len(), 1);
+        assert_eq!(trimmed.bundles.iter().next().unwrap().pub_witness.txid(), txid);
     }
 
     #[test]
