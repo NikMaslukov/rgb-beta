@@ -72,7 +72,7 @@ public class EsploraHttpClient : IBitcoinChainClient
 
     public async Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(Script script, CancellationToken ct = default)
     {
-        var scriptHash = ElectrumClient.ScriptHash(script);
+        var scriptHash = EsploraScriptHash(script);
         using var resp = await _http.GetAsync($"{_baseUrl}/scripthash/{scriptHash}/utxo",
             HttpCompletionOption.ResponseHeadersRead, ct);
         EnsureContentLengthWithinLimit(resp);
@@ -91,6 +91,9 @@ public class EsploraHttpClient : IBitcoinChainClient
                 item.GetProperty("vout").GetInt32()));
         return outpoints;
     }
+
+    internal static string EsploraScriptHash(Script script) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(script.ToBytes())).ToLowerInvariant();
 
     static void EnsureContentLengthWithinLimit(HttpResponseMessage resp)
     {
