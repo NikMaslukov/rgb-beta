@@ -90,6 +90,18 @@ jobs:
           dotnet-version: |
             10.0.x
 
+      - name: Build rgbverifycffi native (linux-x64 = prod RID)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq cmake clang
+          rustc --version && cargo --version
+          bash native/rgb-verify/build-native.sh
+          NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
+          test -f "$NATIVE" || { echo "::error::rgbverifycffi native not produced at $NATIVE"; exit 1; }
+          nm -D --defined-only "$NATIVE" | grep -q rgbverify_validate \
+            || { echo "::error::rgbverifycffi native missing expected exports"; exit 1; }
+          echo "built $NATIVE ($(stat -c %s "$NATIVE") bytes)"
+
       - name: Restore (locked mode — packages.lock.json must match)
         run: |
           set -euo pipefail
@@ -116,6 +128,12 @@ jobs:
             echo "::error::publish output contains BTCPayServer.dll — host assemblies must not ship in the plugin"
             exit 1
           fi
+          VERIFY=publish-out/runtimes/linux-x64/native/librgbverifycffi.so
+          RGBLIB=publish-out/runtimes/linux-x64/native/librgblibcffi.so
+          test -f "$VERIFY" || { echo "::error::rgbverifycffi native missing from publish output — the C8 gate would fail closed on every RGB send"; exit 1; }
+          test -f "$RGBLIB" || { echo "::error::rgblibcffi (C8-enabled) native missing from publish output"; exit 1; }
+          nm -D --defined-only "$RGBLIB" | grep -q rgblib_create_consignments || { echo "::error::packaged rgblibcffi lacks the C8 exports (wrong RgbLib version?)"; exit 1; }
+          echo "native trust libs present: $(stat -c %s "$VERIFY") + $(stat -c %s "$RGBLIB") bytes"
 
       - name: Pack .btcpay
         run: |
