@@ -717,8 +717,8 @@
       },
       "RgbLib": {
         "type": "Transitive",
-        "resolved": "0.3.0-beta.25",
-        "contentHash": "be1G6rqnhvmFfB31e+I7h++mkPqtWxxddRuDC88u5JOsylADGGY2H89SDHvx8ACqPRs8Oni4Zq0+cRFABLwP4g=="
+        "resolved": "0.3.0-beta.30",
+        "contentHash": "tSdiDoag8VWynkAoKmDxbP7+SM+u3ibubpbJM9Lu9cFN8VWxRq1mKxcwgOyE7NpUWGjjUCNh8TAC7zgJ/Ot1Hw=="
       },
       "Serilog": {
         "type": "Transitive",
@@ -1128,7 +1128,7 @@
           "Microsoft.Data.Sqlite": "[10.0.4, )",
           "NBitcoin": "[9.0.5, )",
           "Npgsql.EntityFrameworkCore.PostgreSQL": "[10.0.0, )",
-          "RgbLib": "[0.3.0-beta.25, )"
+          "RgbLib": "[0.3.0-beta.30, )"
         }
       },
       "btcpayserver.rating": {
