@@ -770,11 +770,14 @@ public class RGBWalletService : IRGBWalletService
 
         var sendBeginResult = await _rgbLib.SendBeginAsync(walletId, recipientMap, feeRate, 1, ct);
 
-        var batchTransferIdx = ParseBatchTransferIdx(sendBeginResult);
+        var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
+            ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
+        var batchTransferIdx = parsedSendBegin.BatchTransferIdx
+            ?? throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
 
         try
         {
-            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, sendBeginResult, amount, resolvedAssetId, ct);
+            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, parsedSendBegin, amount, resolvedAssetId, ct);
         }
         catch (Exception gateEx)
         {
@@ -891,21 +894,9 @@ public class RGBWalletService : IRGBWalletService
     async Task<RGBWallet> GetWalletOrThrow(string id, CancellationToken ct = default) =>
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");
 
-    static int ParseBatchTransferIdx(string sendBeginResult)
-    {
-        using var doc = JsonDocument.Parse(sendBeginResult);
-        if (doc.RootElement.TryGetProperty("batch_transfer_idx", out var idx)
-            && idx.ValueKind == JsonValueKind.Number && idx.TryGetInt32(out var value))
-            return value;
-        throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
-    }
-
     async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
-        string sendBeginResult, long amount, string operatorAssetId, CancellationToken ct)
+        SendBeginResult parsedSendBegin, long amount, string operatorAssetId, CancellationToken ct)
     {
-        var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
-            ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
-
         var details = parsedSendBegin.Details
             ?? throw new RgbIntentVerificationException("send_begin returned no details");
 

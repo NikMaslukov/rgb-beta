@@ -160,6 +160,12 @@ mod tests {
         contract_id: String,
     }
 
+    impl Drop for FasciaFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
     fn write_fascia_fixture(name: &str) -> FasciaFixture {
         let consignment_path =
             concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/consignment_out");
@@ -217,7 +223,7 @@ mod tests {
         assert_eq!(value["matches"], true);
         assert_eq!(value["witnessIdMatches"], true);
         let committed = value["committedContractIds"].as_array().unwrap();
-        assert_eq!(committed, &[serde_json::Value::from(fixture.contract_id)]);
+        assert_eq!(committed, &[serde_json::Value::from(fixture.contract_id.clone())]);
     }
 
     #[test]
@@ -243,8 +249,8 @@ mod tests {
     fn rejects_non_hex_opret() {
         let fixture = write_fascia_fixture("badhex");
         assert!(commitment_check(
-            fixture.path,
-            fixture.witness_txid,
+            fixture.path.clone(),
+            fixture.witness_txid.clone(),
             "zz".to_string(),
             FASCIA_ENTROPY
         )
@@ -255,8 +261,8 @@ mod tests {
     fn rejects_wrong_length_opret() {
         let fixture = write_fascia_fixture("badlen");
         assert!(commitment_check(
-            fixture.path,
-            fixture.witness_txid,
+            fixture.path.clone(),
+            fixture.witness_txid.clone(),
             "aabb".to_string(),
             FASCIA_ENTROPY
         )
