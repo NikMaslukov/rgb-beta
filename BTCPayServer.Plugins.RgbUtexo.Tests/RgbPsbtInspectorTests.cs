@@ -9,7 +9,11 @@ public class RgbPsbtInspectorTests
 
     static Script Opret(byte[] data) => new Script(OpcodeType.OP_RETURN, Op.GetPushOp(data));
 
-    static Script TaprootScript() => new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+    static Script TaprootScript()
+    {
+        using var key = new Key();
+        return key.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+    }
 
     static PSBT PsbtWithOutputs(params TxOut[] outs)
     {
@@ -59,7 +63,8 @@ public class RgbPsbtInspectorTests
     public void IsTaproot_DetectsP2tr()
     {
         Assert.True(RgbPsbtInspector.IsTaproot(TaprootScript()));
-        var segwit = new Key().PubKey.GetAddress(ScriptPubKeyType.Segwit, Net).ScriptPubKey;
+        using var segwitKey = new Key();
+        var segwit = segwitKey.PubKey.GetAddress(ScriptPubKeyType.Segwit, Net).ScriptPubKey;
         Assert.False(RgbPsbtInspector.IsTaproot(segwit));
         Assert.False(RgbPsbtInspector.IsTaproot(Opret(new byte[32])));
     }

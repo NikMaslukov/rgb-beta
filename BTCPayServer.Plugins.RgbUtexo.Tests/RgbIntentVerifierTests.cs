@@ -185,7 +185,8 @@ public class RgbIntentVerifierTests
     public async Task NonOwnChangeLeg_Rejected()
     {
         var c = Valid();
-        var foreign = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+        using var foreignKey = new Key();
+        var foreign = foreignKey.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
         var tx = c.Psbt.GetGlobalTransaction();
         tx.Outputs[1].ScriptPubKey = foreign;
         c.Psbt = tx.CreatePSBT(Net);
@@ -236,7 +237,8 @@ public class RgbIntentVerifierTests
     public async Task NonPlainTaprootOutput_Rejected()
     {
         var c = Valid();
-        var foreign = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+        using var foreignKey = new Key();
+        var foreign = foreignKey.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
         var tx = c.Psbt.GetGlobalTransaction();
         tx.Outputs.Add(new TxOut(Money.Coins(1), foreign));
         c.Psbt = tx.CreatePSBT(Net);
@@ -373,7 +375,8 @@ public class RgbIntentVerifierTests
     public async Task ConcreteOutpointNonOwnScript_Rejected()
     {
         var c = Valid();
-        var foreign = new Key().PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+        using var foreignKey = new Key();
+        var foreign = foreignKey.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
         var fundingTx = Net.CreateTransaction();
         fundingTx.Inputs.Add(new OutPoint(uint256.One, 0));
         fundingTx.Outputs.Add(new TxOut(Money.Coins(1), foreign));

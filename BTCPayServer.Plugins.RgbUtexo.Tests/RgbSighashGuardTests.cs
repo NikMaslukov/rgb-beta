@@ -9,7 +9,7 @@ public class RgbSighashGuardTests
 
     static PSBT SingleInputPsbt()
     {
-        var key = new Key();
+        using var key = new Key();
         var script = key.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
         var tx = Net.CreateTransaction();
         tx.Inputs.Add(new OutPoint(uint256.One, 0));

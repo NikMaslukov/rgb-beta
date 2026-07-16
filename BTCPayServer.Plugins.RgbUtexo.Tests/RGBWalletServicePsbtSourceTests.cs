@@ -10,7 +10,7 @@ public class RGBWalletServicePsbtSourceTests
 
     static string BuildPsbtBase64(uint prevN)
     {
-        var key = new Key();
+        using var key = new Key();
         var script = key.PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
         var tx = Net.CreateTransaction();
         tx.Inputs.Add(new OutPoint(uint256.One, prevN));
