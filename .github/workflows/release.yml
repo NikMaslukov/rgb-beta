@@ -101,8 +101,10 @@ jobs:
           bash native/rgb-verify/build-native.sh
           NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
           test -f "$NATIVE" || { echo "::error::rgbverifycffi native not produced at $NATIVE"; exit 1; }
-          nm -D --defined-only "$NATIVE" | grep -q rgbverify_validate \
-            || { echo "::error::rgbverifycffi native missing expected exports"; exit 1; }
+          for sym in rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_string_free; do
+            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
+              || { echo "::error::rgbverifycffi native missing expected export $sym"; exit 1; }
+          done
           echo "built $NATIVE ($(stat -c %s "$NATIVE") bytes)"
 
       - name: Restore (locked mode — packages.lock.json must match)
