@@ -77,6 +77,7 @@ mod tests {
     use amplify::confinement::NonEmptyOrdMap;
     use amplify::ByteArray;
     use rgbcore::commit_verify::mpc::MerkleBlock;
+    use rgbcore::ContractId;
     use rgbstd::containers::{ConsignmentExt, FileContent, SealWitness, Transfer};
 
     fn real_ids() -> (ProtocolId, Message) {
@@ -214,6 +215,56 @@ mod tests {
         )
         .unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    fn write_two_contract_fascia_fixture(name: &str) -> FasciaFixture {
+        let consignment_path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/consignment_out");
+        let consignment = Transfer::load_file(consignment_path).unwrap();
+        let contract_id = consignment.contract_id();
+        let witness_bundle = consignment.bundles.iter().next_back().unwrap();
+        let bundle = witness_bundle.bundle.clone();
+        let foreign_id = ContractId::from([0x11u8; 32]);
+
+        let mut single = BTreeMap::new();
+        single.insert(ProtocolId::from(contract_id), Message::from(bundle.bundle_id()));
+        let single_commitment = recompute_commitment(&single, FASCIA_ENTROPY).unwrap();
+
+        let mut source = MultiSource::with_static_entropy(FASCIA_ENTROPY);
+        source.messages = MediumOrdMap::from_checked(single);
+        let tree = MerkleTree::try_commit(&source).unwrap();
+
+        let seal_witness = SealWitness::new(
+            witness_bundle.pub_witness.clone(),
+            MerkleBlock::from(&tree),
+            witness_bundle.anchor.dbc_proof.clone(),
+        );
+        let mut bundles = NonEmptyOrdMap::with_key_value(contract_id, bundle.clone());
+        bundles.insert(foreign_id, bundle).unwrap();
+        let fascia = Fascia::new(seal_witness, bundles);
+        let witness_txid = fascia.witness_id().to_string();
+
+        let path = std::env::temp_dir()
+            .join(format!("rgbverify_fascia_{}_{name}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        fs::write(&path, serde_json::to_string(&fascia).unwrap()).unwrap();
+
+        FasciaFixture {
+            path,
+            witness_txid,
+            opret_hex: hex::encode(single_commitment.to_byte_array()),
+            contract_id: contract_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn detects_two_committed_contracts() {
+        let fixture = write_two_contract_fascia_fixture("cospend");
+        let value = run_check(&fixture.path, &fixture.witness_txid, &fixture.opret_hex);
+        let committed = value["committedContractIds"].as_array().unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(value["matches"], false);
     }
 
     #[test]

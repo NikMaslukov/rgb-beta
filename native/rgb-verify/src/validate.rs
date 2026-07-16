@@ -234,6 +234,12 @@ fn extract_legs(transition: &Transition) -> Result<Vec<Leg>, String> {
 mod tests {
     use super::*;
 
+    use rgbcore::bitcoin::key::UntweakedPublicKey;
+    use rgbcore::dbc::tapret::{TapretPathProof, TapretProof};
+    use rgbcore::validation::DbcProof;
+    use rgbcore::{AssignmentType, OpId, Opout, TransitionType};
+    use schemata::UniqueDigitalAsset;
+
     fn fixture() -> Transfer {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/consignment_out");
         Transfer::load_file(path).unwrap()
@@ -247,6 +253,92 @@ mod tests {
             .unwrap()
             .pub_witness
             .txid()
+    }
+
+    fn terminal_bundle(consignment: &Transfer) -> WitnessBundle {
+        let txid = terminal_txid(consignment);
+        select_anchored_bundle(consignment, txid).unwrap().clone()
+    }
+
+    #[test]
+    fn rejects_non_nia_schema() {
+        let mut consignment = fixture();
+        consignment.schema = UniqueDigitalAsset::schema();
+        let err = check_schema(&consignment).unwrap_err();
+        assert!(err.contains("is not the NIA schema"), "{err}");
+    }
+
+    #[test]
+    fn rejects_multiple_bundles_same_txid() {
+        let consignment = fixture();
+        let txid = terminal_txid(&consignment);
+        let terminal = select_anchored_bundle(&consignment, txid).unwrap().clone();
+        let mut tampered = consignment.clone();
+        tampered.bundles = Confined::try_from_iter([terminal.clone(), terminal]).unwrap();
+        let err = select_anchored_bundle(&tampered, txid).unwrap_err();
+        assert!(err.contains("multiple bundles commit"), "{err}");
+    }
+
+    #[test]
+    fn rejects_input_map_referencing_unknown_transition() {
+        let consignment = fixture();
+        let mut bundle = terminal_bundle(&consignment);
+        let bogus_opid = OpId::from([0x77u8; 32]);
+        let bogus_opout = Opout::new(bogus_opid, AssignmentType::with(4000), 0);
+        bundle.bundle.input_map.insert(bogus_opout, bogus_opid).unwrap();
+        let err = enforce_transition_rules(&bundle).unwrap_err();
+        assert!(err.contains("input map references transitions absent"), "{err}");
+    }
+
+    #[test]
+    fn rejects_multiple_known_transitions() {
+        let consignment = fixture();
+        let mut bundle = terminal_bundle(&consignment);
+        let extra = bundle.bundle.known_transitions.iter().next().unwrap().clone();
+        let mut transitions = bundle.bundle.known_transitions.to_unconfined();
+        transitions.push(extra);
+        bundle.bundle.known_transitions = Confined::from_checked(transitions);
+        let err = enforce_transition_rules(&bundle).unwrap_err();
+        assert!(err.contains("expected exactly one transition"), "{err}");
+    }
+
+    #[test]
+    fn rejects_non_transfer_transition_type() {
+        let consignment = fixture();
+        let mut bundle = terminal_bundle(&consignment);
+        let mut known = bundle.bundle.known_transitions.iter().next().unwrap().clone();
+        known.transition.transition_type = TransitionType::with(9999);
+        bundle.bundle.known_transitions = Confined::from_checked(vec![known]);
+        let err = enforce_transition_rules(&bundle).unwrap_err();
+        assert!(err.contains("is not a transfer"), "{err}");
+    }
+
+    #[test]
+    fn rejects_non_opret_anchor() {
+        let consignment = fixture();
+        let mut bundle = terminal_bundle(&consignment);
+        let witness_tx = bundle.pub_witness.tx().unwrap().clone();
+        let internal_pk = UntweakedPublicKey::from_str(
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+        )
+        .unwrap();
+        bundle.anchor.dbc_proof = DbcProof::Tapret(TapretProof {
+            path_proof: TapretPathProof::root(0),
+            internal_pk,
+        });
+        let err = verify_anchor(&bundle, consignment.contract_id(), &witness_tx).unwrap_err();
+        assert!(err.contains("does not use an opret commitment"), "{err}");
+    }
+
+    #[test]
+    fn rejects_anchor_with_wrong_contract_id() {
+        let consignment = fixture();
+        let txid = terminal_txid(&consignment);
+        let bundle = select_anchored_bundle(&consignment, txid).unwrap();
+        let witness_tx = bundle.pub_witness.tx().unwrap();
+        let wrong = ContractId::from([0x99u8; 32]);
+        let err = verify_anchor(bundle, wrong, witness_tx).unwrap_err();
+        assert!(err.contains("anchor verification failed"), "{err}");
     }
 
     #[test]
