@@ -90,6 +90,9 @@ jobs:
           dotnet-version: |
             10.0.x
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Build rgbverifycffi native (linux-x64 = prod RID)
         run: |
           set -euo pipefail

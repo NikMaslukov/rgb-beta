@@ -791,7 +791,7 @@ public class RGBWalletService : IRGBWalletService
         string signedPsbt;
         try
         {
-            var unsignedPsbt = ExtractPsbt(sendBeginResult);
+            var unsignedPsbt = parsedSendBegin.Psbt.Trim('"');
             var changeAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
             signedPsbt = await SignPsbtLocallyAsync(walletId, unsignedPsbt, network,
                 new SigningPolicy
@@ -934,7 +934,7 @@ public class RGBWalletService : IRGBWalletService
             signer, network, amount, operatorAssetId, stagedEndpoints, chainClient, ct);
     }
 
-    static string ExtractPsbt(string nativeResult)
+    internal static string ExtractPsbt(string nativeResult)
     {
         if (!nativeResult.TrimStart().StartsWith('{'))
             return nativeResult;

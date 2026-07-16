@@ -2,6 +2,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
@@ -109,6 +110,7 @@ public class ElectrumClient : IBitcoinChainClient
 
     public async Task<string> GetRawTransactionAsync(string txid, CancellationToken ct = default)
     {
+        EnsureValidTxid(txid);
         var result = await RequestAsync("blockchain.transaction.get", [txid], ct);
         return result.GetString()!;
     }
@@ -129,6 +131,14 @@ public class ElectrumClient : IBitcoinChainClient
                 item.GetProperty("tx_hash").GetString()!,
                 item.GetProperty("tx_pos").GetInt32()));
         return outpoints;
+    }
+
+    static readonly Regex TxidShape = new("^[0-9a-fA-F]{64}$", RegexOptions.Compiled);
+
+    internal static void EnsureValidTxid(string txid)
+    {
+        if (!TxidShape.IsMatch(txid))
+            throw new InvalidOperationException($"Invalid txid '{txid}': expected 64-char hex");
     }
 
     internal static string ScriptHash(Script script)
