@@ -121,7 +121,7 @@ public class ReceiveAnyAssetControllerTests
 
         var redirect = Assert.IsType<RedirectToActionResult>(result);
         Assert.Equal(nameof(RGBController.ReceiveAnyAsset), redirect.ActionName);
-        Assert.Equal("inv-42", redirect.RouteValues!["invoiceId"]);
+        Assert.Equal("inv-42", redirect.RouteValues!["rgbInvoiceId"]);
     }
 
     [Fact]

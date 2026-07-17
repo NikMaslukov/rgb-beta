@@ -168,7 +168,7 @@ else
                         <td>@b.CreatedAt.ToString("u")</td>
                         <td>@(b.ExpiresAt?.ToString("u") ?? "—")</td>
                         <td>@b.Status</td>
-                        <td><a asp-action="ReceiveAnyAsset" asp-route-storeId="@Model.StoreId" asp-route-invoiceId="@b.InvoiceId">Open</a></td>
+                        <td><a asp-action="ReceiveAnyAsset" asp-route-storeId="@Model.StoreId" asp-route-rgbInvoiceId="@b.InvoiceId">Open</a></td>
                     </tr>
                 }
             </tbody>
