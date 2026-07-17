@@ -25,7 +25,7 @@ public class RgbLibWalletHandleTests
     [Fact]
     public async Task Dispose_DrainsInFlightOp_ThenFrees()
     {
-        var handle = NewHandle();
+        var handle = new TestHandle(TimeSpan.FromSeconds(30));
         var opStarted = new TaskCompletionSource();
         using var gate = new ManualResetEventSlim(false);
         int opCompleted = 0;
