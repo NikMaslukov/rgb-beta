@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
         <Product>RGB Payments</Product>
         <Description>Accept RGB (client-side validated assets) payments in BTCPay Server. Issue and receive RGB20 tokens on Bitcoin.</Description>
-        <Version>1.0.9</Version>
+        <Version>1.0.10</Version>
         <Authors>Utexo</Authors>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -53,6 +53,7 @@
     <ItemGroup>
         <!-- BTCPay Server reference - Plugin Builder uses submodule, local dev uses NArk structure -->
         <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.4" />
+        <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.4" />
         <ProjectReference Include="submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         <ProjectReference Include="../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="!Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj') And Exists('../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         
