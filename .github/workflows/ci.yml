@@ -35,12 +35,18 @@ jobs:
           dotnet-version: |
             10.0.x
 
+      # StaticWebAssetsEnabled=false is passed as a global property (not just on
+      # the BTCPay ProjectReference) so the submodule graph resolves to a single
+      # project instance. Without it the reference's differing SWA property spawns
+      # a second concurrent build into the same obj/, racing on staticwebassets /
+      # FileListAbsolute files (intermittent MSB3030 / MSB3491).
       - name: Restore (locked mode — packages.lock.json must match)
         run: |
           set -euo pipefail
           dotnet restore "$TESTS_PROJECT" \
             --locked-mode \
-            -p:ContinuousIntegrationBuild=true
+            -p:ContinuousIntegrationBuild=true \
+            -p:StaticWebAssetsEnabled=false
 
       - name: Test
         run: |
@@ -49,6 +55,7 @@ jobs:
             -c Debug \
             --no-restore \
             -p:ContinuousIntegrationBuild=true \
+            -p:StaticWebAssetsEnabled=false \
             --logger "console;verbosity=normal"
 
   rust-test:
