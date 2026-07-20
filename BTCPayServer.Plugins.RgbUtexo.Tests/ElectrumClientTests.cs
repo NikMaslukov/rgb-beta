@@ -86,4 +86,23 @@ public class ElectrumClientTests
         try { await client.ConnectAsync("SSL://192.0.2.1:50002", allowInsecure: false); }
         catch (Exception ex) when (ex is not InvalidOperationException || !ex.Message.Contains("scheme")) { }
     }
+
+    [Fact]
+    public void EnsureValidTxid_Accepts64Hex_LowerAndUpper()
+    {
+        ElectrumClient.EnsureValidTxid(new string('a', 64));
+        ElectrumClient.EnsureValidTxid(new string('A', 64));
+        ElectrumClient.EnsureValidTxid("7b902a2d1578e8e50f5db1519ddf7170d4ba07c61e6e5ff704b6f284f8a2d289");
+    }
+
+    [Fact]
+    public void EnsureValidTxid_Rejects_MalformedShapes()
+    {
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(""));
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(new string('a', 63)));
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(new string('a', 65)));
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(new string('a', 63) + "g"));
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(new string('a', 63) + " "));
+        Assert.Throws<InvalidOperationException>(() => ElectrumClient.EnsureValidTxid(" " + new string('a', 63)));
+    }
 }

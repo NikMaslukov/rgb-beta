@@ -220,7 +220,11 @@ BTCPayServer.Plugins.RgbUtexo/
 │   ├── RgbWalletSignerProvider.cs # Signer management
 │   ├── MnemonicProtectionService.cs # Mnemonic encryption
 │   └── RGBInvoiceListener.cs  # Payment detection & settlement
-└── Views/                # Razor views
+├── Views/                # Razor views
+└── native/rgb-verify/    # Rust native trust core (rgbverifycffi):
+                          #   independent invoice decode + consignment
+                          #   commitment verification for the pre-sign gate
+                          #   (does NOT link rgb-lib — separate trust domain)
 ```
 
 ## Security Model
@@ -233,21 +237,20 @@ This plugin implements a **server-side custodial hot-wallet**. The BTCPay server
 
 > **Important:** This is custodial software. If the server is compromised, wallet funds are at risk. For production deployments, ensure your BTCPay server is properly secured. Back up your DataProtection key ring — losing it means losing access to all encrypted mnemonics.
 
-### Known Notice: RGB Send Intent Verification
+### RGB Send Intent Verification (pre-sign gate)
 
-Before signing a PSBT, the plugin applies local BTC-level policy checks:
+Before signing any RGB **send**, the plugin independently verifies — outside the in-process `rgb-lib`, in a separate native trust core (`rgbverifycffi`, which does not link `rgb-lib`) — that the transaction it is about to sign commits to *exactly* the intended transfer:
 
-- rejects BTC outputs to unknown scripts above the configured policy limit;
-- restricts wallet/change outputs to scripts derived from the local wallet;
-- enforces fee and output-count limits;
-- rejects non-zero-value `OP_RETURN` outputs;
-- routes BTC and RGB send signing through the in-process wallet signer.
+- the RGB invoice decodes to the expected contract/asset ID, recipient blinded seal, amount, and network (decoded independently, never via `rgb-lib`);
+- the operator-approved asset and amount match the invoice;
+- the consignment commits to that single contract and transfer — no decoy, hidden, or co-located commitment;
+- change returns to a wallet-owned script.
 
-These checks reduce the blast radius of a malformed PSBT, but RGB transfer construction is still trusted to `rgb-lib`. The signer does not independently verify that the unsigned PSBT encodes the expected RGB asset ID, RGB amount, recipient ID, or state-transition commitment. A compromised or malicious `rgb-lib` could construct a PSBT that passes the BTC-level checks while violating the intended RGB transfer semantics.
+In addition, the plugin applies local BTC-level policy checks: it rejects BTC outputs to unknown scripts above the configured policy limit, restricts wallet/change outputs to locally-derived scripts, enforces fee and output-count limits, rejects non-zero-value `OP_RETURN` outputs, and routes all signing through the in-process wallet signer.
 
-This is an explicit trust boundary: the plugin verifies the Bitcoin transaction policy locally and relies on `rgb-lib` for RGB state-transition correctness.
+The gate is **fail-closed**: any verification failure aborts the transfer (`rgb-lib` `FailTransfers`) and nothing is signed. Because the verification baseline is the independent native decoder — never `rgb-lib`'s own decode — a compromised or malicious `rgb-lib` cannot construct a PSBT that passes the checks while diverting the transfer. By design a verifier bug can only cause a false *reject* (a legitimate send is blocked), never a false *accept* (funds diverted).
 
-Closing this boundary requires a pre-signing RGB intent verifier. The verifier should inspect the `rgb-lib` transfer staging metadata created by `send_begin` and confirm that the staged transfer matches the operator action before the signer signs: expected asset ID, amount, recipient ID, validated transport endpoints, and no unexpected extra RGB recipients. Until that exists, the plugin should be treated as protected against unauthorized BTC outputs, but still dependent on `rgb-lib` for RGB send correctness.
+This closes the earlier trust boundary where RGB transfer construction was trusted entirely to `rgb-lib`.
 
 A non-custodial mode with external signer support (offline PSBT signing, hardware wallet integration) is planned for a future release.
 
@@ -257,7 +260,8 @@ The mnemonic encryption keys are stored in your BTCPay data directory (e.g., `~/
 
 ## Dependencies
 
-- **RgbLib** v0.3.0-beta.21 - Native rgb-lib bindings
+- **RgbLib** v0.3.0-beta.30 - Native rgb-lib bindings
+- **rgbverifycffi** - In-repo native trust core for pre-sign RGB intent verification (`native/rgb-verify`, does not link rgb-lib)
 - **NBitcoin** - Bitcoin primitives and PSBT signing
 - **Npgsql.EntityFrameworkCore.PostgreSQL** - Database persistence
 

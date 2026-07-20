@@ -90,7 +90,7 @@
             @foreach (var utxo in Model.Utxos.OrderByDescending(u => u.Colorable).ThenByDescending(u => maxAlloc - u.Allocations.Count))
             {
                 var slotsLeft = utxo.Colorable ? Math.Max(0, maxAlloc - utxo.Allocations.Count) : 0;
-                <tr class="@(utxo.Colorable && slotsLeft > 0 ? "table-success" : "")">
+                <tr style="@(utxo.Colorable && slotsLeft > 0 ? "--bs-table-bg: rgba(25,135,84,.12);" : "")">
                     <td><code class="small">@utxo.Outpoint</code></td>
                     <td>@utxo.Amount.ToString("N0")</td>
                     <td>

@@ -24,6 +24,8 @@ public interface IRgbLibService : IDisposable
 
     Task<string> SendBeginAsync(string walletId, string recipientMapJson, float feeRate, int minConfirmations = 1, CancellationToken ct = default);
     Task<string> SendEndAsync(string walletId, string signedPsbt, CancellationToken ct = default);
+    Task<string> CreateConsignmentsAsync(string walletId, string psbt, CancellationToken ct = default);
+    Task FailTransfersAsync(string walletId, int batchTransferIdx, bool noAssetOnly, bool skipSync, CancellationToken ct = default);
     RgbInvoiceData DecodeInvoice(string invoiceString);
 
     Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default);

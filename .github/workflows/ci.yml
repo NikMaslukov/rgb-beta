@@ -1,0 +1,73 @@
+name: CI
+
+# Pull-request / main gating: builds and runs both test suites (C# plugin +
+# Rust trust core) so regressions are caught before merge. This does NOT build
+# the release artifact or the multi-RID natives — that stays in release.yml.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet-test:
+    runs-on: ubuntu-latest
+    env:
+      TESTS_PROJECT: BTCPayServer.Plugins.RgbUtexo.Tests/BTCPayServer.Plugins.RgbUtexo.Tests.csproj
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+
+      - name: Restore (locked mode — packages.lock.json must match)
+        run: |
+          set -euo pipefail
+          dotnet restore "$TESTS_PROJECT" \
+            --locked-mode \
+            -p:ContinuousIntegrationBuild=true
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          dotnet test "$TESTS_PROJECT" \
+            -c Debug \
+            --no-restore \
+            -p:ContinuousIntegrationBuild=true \
+            --logger "console;verbosity=normal"
+
+  rust-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/rgb-verify
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake clang
+
+      - name: Test (release, locked)
+        run: |
+          set -euo pipefail
+          rustc --version && cargo --version
+          cargo test --release --locked

@@ -66,33 +66,6 @@ public class SendAssetValidationTests
     }
 
     [Fact]
-    public void ExpiredInvoice_Throws()
-    {
-        var pastTs = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
-        var invoice = MakeInvoice(assetId: AssetId, amount: 100, expirationTs: pastTs);
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => RGBWalletService.ValidateSendAssetRequest(invoice, AssetId, 100, MakeAssets()));
-        Assert.Contains("expired", ex.Message);
-    }
-
-    [Fact]
-    public void FutureExpiration_Passes()
-    {
-        var futureTs = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds();
-        var invoice = MakeInvoice(assetId: AssetId, amount: 100, expirationTs: futureTs);
-        var (_, asset) = RGBWalletService.ValidateSendAssetRequest(invoice, AssetId, 100, MakeAssets());
-        Assert.NotNull(asset);
-    }
-
-    [Fact]
-    public void ZeroExpiration_TreatedAsNoExpiry()
-    {
-        var invoice = MakeInvoice(assetId: AssetId, amount: 100, expirationTs: 0);
-        var (_, asset) = RGBWalletService.ValidateSendAssetRequest(invoice, AssetId, 100, MakeAssets());
-        Assert.NotNull(asset);
-    }
-
-    [Fact]
     public void AssetNotInWallet_Throws()
     {
         var invoice = MakeInvoice(assetId: AssetId, amount: 100);

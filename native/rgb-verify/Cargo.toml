@@ -1,0 +1,22 @@
+[package]
+name = "rgb-verify"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "rgbverifycffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rgb-ops = { version = "=0.11.1-rc.10", default-features = false, features = ["serde", "fs", "electrum_blocking", "esplora_blocking"] }
+rgb-consensus = { version = "=0.11.1-rc.10" }
+rgb-schemas = { version = "=0.11.1-rc.10" }
+rgb-invoicing = { version = "=0.11.1-rc.10" }
+amplify = { version = "=4.8.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[build-dependencies]
+cbindgen = "0.29.0"

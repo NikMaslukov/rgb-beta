@@ -71,6 +71,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
         CalibrateIndexCeiling(psbt);
         PopulateInputKeyPaths(psbt, network);
         ValidateOutputs(psbt, network, policy);
+        RgbSighashGuard.EnsureAllInputsAllowed(psbt);
 
         foreach (var input in psbt.Inputs)
         {
@@ -116,7 +117,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
         InterlockedMax(ref _highestVerifiedIndex, lastIndex);
     }
 
-    bool IsOwnOutput(PSBTOutput output, Script outputScript, Network network)
+    internal bool IsOwnOutput(PSBTOutput output, Script outputScript, Network network)
     {
         if (_masterKey == null) return false;
 
@@ -152,7 +153,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
     const int MaxVerifiedScripts = 10_000;
 
-    bool IsOwnScript(Script script, Network network)
+    internal bool IsOwnScript(Script script, Network network)
     {
         if (_verifiedScripts.ContainsKey(script)) return true;
 

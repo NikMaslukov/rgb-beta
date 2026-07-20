@@ -1,6 +1,8 @@
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
@@ -67,6 +69,31 @@ public class EsploraHttpClient : IBitcoinChainClient
             throw new InvalidOperationException($"Esplora broadcast returned malformed txid '{txid}'");
         return txid;
     }
+
+    public async Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(Script script, CancellationToken ct = default)
+    {
+        var scriptHash = EsploraScriptHash(script);
+        using var resp = await _http.GetAsync($"{_baseUrl}/scripthash/{scriptHash}/utxo",
+            HttpCompletionOption.ResponseHeadersRead, ct);
+        EnsureContentLengthWithinLimit(resp);
+        if (!resp.IsSuccessStatusCode)
+        {
+            var detail = await ReadCappedAsync(resp, ct);
+            throw new InvalidOperationException($"Esplora utxo fetch failed ({(int)resp.StatusCode}): {detail}");
+        }
+
+        var body = await ReadCappedAsync(resp, ct);
+        using var doc = JsonDocument.Parse(body);
+        var outpoints = new List<Outpoint>();
+        foreach (var item in doc.RootElement.EnumerateArray())
+            outpoints.Add(new Outpoint(
+                item.GetProperty("txid").GetString()!,
+                item.GetProperty("vout").GetInt32()));
+        return outpoints;
+    }
+
+    internal static string EsploraScriptHash(Script script) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(script.ToBytes())).ToLowerInvariant();
 
     static void EnsureContentLengthWithinLimit(HttpResponseMessage resp)
     {

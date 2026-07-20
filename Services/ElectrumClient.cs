@@ -2,6 +2,8 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
@@ -108,6 +110,7 @@ public class ElectrumClient : IBitcoinChainClient
 
     public async Task<string> GetRawTransactionAsync(string txid, CancellationToken ct = default)
     {
+        EnsureValidTxid(txid);
         var result = await RequestAsync("blockchain.transaction.get", [txid], ct);
         return result.GetString()!;
     }
@@ -116,6 +119,33 @@ public class ElectrumClient : IBitcoinChainClient
     {
         var result = await RequestAsync("blockchain.transaction.broadcast", [rawTxHex], ct);
         return result.GetString()!;
+    }
+
+    public async Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(Script script, CancellationToken ct = default)
+    {
+        var scriptHash = ScriptHash(script);
+        var result = await RequestAsync("blockchain.scripthash.listunspent", [scriptHash], ct);
+        var outpoints = new List<Outpoint>();
+        foreach (var item in result.EnumerateArray())
+            outpoints.Add(new Outpoint(
+                item.GetProperty("tx_hash").GetString()!,
+                item.GetProperty("tx_pos").GetInt32()));
+        return outpoints;
+    }
+
+    static readonly Regex TxidShape = new("^[0-9a-fA-F]{64}$", RegexOptions.Compiled);
+
+    internal static void EnsureValidTxid(string txid)
+    {
+        if (!TxidShape.IsMatch(txid))
+            throw new InvalidOperationException($"Invalid txid '{txid}': expected 64-char hex");
+    }
+
+    internal static string ScriptHash(Script script)
+    {
+        var hash = NBitcoin.Crypto.Hashes.SHA256(script.ToBytes());
+        Array.Reverse(hash);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     public void Dispose()
