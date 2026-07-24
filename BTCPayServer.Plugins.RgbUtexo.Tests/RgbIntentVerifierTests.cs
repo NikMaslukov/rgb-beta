@@ -442,4 +442,46 @@ public class RgbIntentVerifierTests
         };
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
+
+    // Finding B / H2 regression: a concrete-outpoint change leg whose outpoint is itself one of
+    // the tx inputs (co-spent) must be rejected — otherwise the "retained" change is being burned.
+    [Fact]
+    public async Task H2_ConcreteChangeOutpointIsCoSpentInput_Rejected()
+    {
+        var c = Valid();
+        var inputPrevout = $"{c.Psbt.GetGlobalTransaction().Inputs[0].PrevOut.Hash}:{c.Psbt.GetGlobalTransaction().Inputs[0].PrevOut.N}";
+        c.Validate.Legs[1] = new RgbLeg
+        {
+            AssignmentType = 4000,
+            SealKind = "revealedConcreteOutpoint",
+            Outpoint = inputPrevout,
+            Amount = 900
+        };
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    // Finding B / H2 regression: the concrete-outpoint funding tx must actually hash to the
+    // claimed txid — a substituted funding tx must not pass the retained-UTXO check.
+    [Fact]
+    public async Task H2_ConcreteChangeFundingTxidMismatch_Rejected()
+    {
+        var c = Valid();
+        var realFunding = Net.CreateTransaction();
+        realFunding.Inputs.Add(new OutPoint(uint256.One, 0));
+        realFunding.Outputs.Add(new TxOut(Money.Coins(1), c.ChangeScript));
+        var otherFunding = Net.CreateTransaction();
+        otherFunding.Inputs.Add(new OutPoint(uint256.Parse("2222222222222222222222222222222222222222222222222222222222222222"), 0));
+        otherFunding.Outputs.Add(new TxOut(Money.Coins(1), c.ChangeScript));
+        var claimedTxid = realFunding.GetHash().ToString();
+        c.Chain.RawTx = _ => otherFunding.ToHex();
+        c.Chain.Unspent = _ => new List<Outpoint> { new(claimedTxid, 0) };
+        c.Validate.Legs[1] = new RgbLeg
+        {
+            AssignmentType = 4000,
+            SealKind = "revealedConcreteOutpoint",
+            Outpoint = $"{claimedTxid}:0",
+            Amount = 900
+        };
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
 }

@@ -21,6 +21,7 @@ public class RGBWalletService : IRGBWalletService
     readonly EventAggregator _events;
     readonly ConcurrentDictionary<string, string> _addressCache = new();
     readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
+    readonly SendLockCoordinator _sendCoordinator;
 
     public RGBWalletService(
         IRgbLibService rgbLib,
@@ -40,6 +41,42 @@ public class RGBWalletService : IRGBWalletService
         _currencyNameTable = currencyNameTable;
         _events = events;
         _log = log;
+        _sendCoordinator = new SendLockCoordinator(
+            _sendLocks, SetNeedsRecoveryAsync, ClearNeedsRecoveryAsync, id => _rgbLib.UnloadWallet(id));
+    }
+
+    async Task SetNeedsRecoveryAsync(string walletId, CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var w = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"wallet {walletId} not found");
+        if (w.NeedsRecovery) return;
+        w.NeedsRecovery = true;
+        await ctx.SaveChangesAsync(ct);
+    }
+
+    async Task ClearNeedsRecoveryAsync(string walletId, CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var w = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"wallet {walletId} not found");
+
+        // Fsync the Stock .dat files BEFORE clearing so that cleared implies the accepted
+        // state is durable on disk; a crash after fsync but before the commit only re-quarantines.
+        var stockDir = RgbStockDurability.ResolveStockDir(
+            _rgbLib.GetWalletDataDir(walletId, w.Network), w.MasterFingerprint);
+        RgbStockDurability.FsyncStockDats(stockDir);
+
+        if (!w.NeedsRecovery) return;
+        w.NeedsRecovery = false;
+        await ctx.SaveChangesAsync(ct);
+    }
+
+    async Task<bool> IsNeedsRecoveryAsync(string walletId, CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var w = await ctx.RGBWallets.FindAsync([walletId], ct);
+        return w?.NeedsRecovery ?? true;
     }
 
     public const int MinAllocationsPerUtxo = 1;
@@ -105,31 +142,42 @@ public class RGBWalletService : IRGBWalletService
             EncryptedMnemonic = _mnemonicProtection.Protect(mnemonic),
             Network = walletNetwork,
             CreatedAt = DateTimeOffset.UtcNow,
-            MaxAllocationsPerUtxo = ResolveAllocationsPerUtxo(maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo)
+            MaxAllocationsPerUtxo = ResolveAllocationsPerUtxo(maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo),
+            NeedsRecovery = true
         };
 
-        await using (var ctx = _db.CreateContext())
-        {
-            ctx.RGBWallets.Add(wallet);
-            try { await ctx.SaveChangesAsync(ct); }
-            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
-                || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
-            {
-                throw new InvalidOperationException("A wallet already exists for this store.");
-            }
-        }
-
-        _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
-
+        // Born-quarantined: hold the send lock BEFORE the row becomes visible so a racing send
+        // both blocks and observes NeedsRecovery=true; the reconciling refresh clears it on success.
+        var sendLock = _sendLocks.GetOrAdd(wallet.Id, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
         try
         {
-            await _rgbLib.RefreshAsync(wallet.Id, ct);
-            await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+            await using (var ctx = _db.CreateContext())
+            {
+                ctx.RGBWallets.Add(wallet);
+                try { await ctx.SaveChangesAsync(ct); }
+                catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+                    || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    throw new InvalidOperationException("A wallet already exists for this store.");
+                }
+            }
+
+            _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+
+            try
+            {
+                await _rgbLib.RefreshAsync(wallet.Id, ct);
+                await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+                await ClearNeedsRecoveryAsync(wallet.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Post-restore sync failed for wallet {Id} — left quarantined", wallet.Id);
+                try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Post-restore sync failed for wallet {Id}", wallet.Id);
-        }
+        finally { sendLock.Release(); }
 
         _log.LogInformation("restored wallet {Id} for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
         return wallet;
@@ -331,7 +379,8 @@ public class RGBWalletService : IRGBWalletService
     public async Task<RgbAsset> IssueAssetAsync(string walletId, string ticker, string name, long amt, int precision = 0, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
-        var asset = await _rgbLib.IssueAssetNiaAsync(walletId, ticker, name, [amt], precision, ct);
+        var asset = await _sendCoordinator.WithSendLockAsync(walletId,
+            () => _rgbLib.IssueAssetNiaAsync(walletId, ticker, name, [amt], precision, ct), ct);
 
         await using var ctx = _db.CreateContext();
         var existing = await ctx.RGBAssets.FindAsync([walletId, asset.AssetId], ct);
@@ -387,8 +436,13 @@ public class RGBWalletService : IRGBWalletService
     public async Task RefreshWalletAsync(string walletId, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
-        await _rgbLib.RefreshAsync(walletId, ct);
-        await _rgbLib.GetBtcBalanceAsync(walletId, ct, sync: true);
+        // Background refresh: skip if a send holds the lock — the send's own write-ahead
+        // covers state mutation; a concurrent refresh would either block it or race the Stock.
+        await _sendCoordinator.TryWithSendLockAsync(walletId, async () =>
+        {
+            await _rgbLib.RefreshAsync(walletId, ct);
+            await _rgbLib.GetBtcBalanceAsync(walletId, ct, sync: true);
+        }, ct);
     }
 
     public async Task<List<RgbTransfer>> GetTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default)
@@ -400,7 +454,11 @@ public class RGBWalletService : IRGBWalletService
     const int RgbLibTransferStatusWaitingConfirmations = 1;
     const int RgbLibTransferStatusFailed = 4;
 
-    public async Task<int> CleanupExpiredTransfersAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct = default)
+    public Task<int> CleanupExpiredTransfersAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct = default)
+        => _sendCoordinator.WithSendLockAsync(walletId,
+            () => CleanupExpiredTransfersInternalAsync(walletId, walletNetwork, masterFingerprint, ct), ct);
+
+    async Task<int> CleanupExpiredTransfersInternalAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct)
     {
         var walletDataDir = _rgbLib.GetWalletDataDir(walletId, walletNetwork);
         var dbPath = Path.Combine(walletDataDir, masterFingerprint, "rgb_lib_db");
@@ -417,8 +475,10 @@ public class RGBWalletService : IRGBWalletService
         if (count > 0)
         {
             _log.LogInformation("Cleaned up {Count} expired blind receive transfers for wallet {WalletId}", count, walletId);
-            try { await _rgbLib.RefreshAsync(walletId, ct); }
-            catch (Exception ex) { _log.LogDebug(ex, "Post-cleanup refresh failed for wallet {WalletId}", walletId); }
+            // WHY: this runs inside the WithSendLock write-ahead op; a swallowed refresh failure
+            // would let the coordinator clear NeedsRecovery over a possibly-incomplete Stock.
+            // Must propagate so the failure path leaves the wallet quarantined + evicts the handle.
+            await _rgbLib.RefreshAsync(walletId, ct);
         }
         return count;
     }
@@ -448,7 +508,8 @@ public class RGBWalletService : IRGBWalletService
             EncryptedMnemonic = _mnemonicProtection.Protect(mnemonic),
             Network = walletNetwork,
             CreatedAt = DateTimeOffset.UtcNow,
-            MaxAllocationsPerUtxo = ResolveAllocationsPerUtxo(maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo)
+            MaxAllocationsPerUtxo = ResolveAllocationsPerUtxo(maxAllocationsPerUtxo ?? _cfg.MaxAllocationsPerUtxo),
+            NeedsRecovery = true
         };
 
         var walletDataDir = _rgbLib.GetWalletDataDir(wallet.Id, walletNetwork);
@@ -518,59 +579,69 @@ public class RGBWalletService : IRGBWalletService
             throw new InvalidOperationException("Failed to finalize restored wallet data");
         }
 
+        // Born-quarantined: hold the send lock BEFORE the row becomes visible so a racing send
+        // both blocks and observes NeedsRecovery=true; the reconciling refresh clears it on success.
+        var sendLock = _sendLocks.GetOrAdd(wallet.Id, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
         try
         {
-            await using var ctx = _db.CreateContext();
-            ctx.RGBWallets.Add(wallet);
-            await ctx.SaveChangesAsync(ct);
-        }
-        catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
-            || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
-        {
-            try { Directory.Delete(walletDataDir, true); }
-            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
-            throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
-        }
-        catch
-        {
-            try { Directory.Delete(walletDataDir, true); }
-            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
-            throw;
-        }
-
-        try
-        {
-            await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
-            await _rgbLib.GetAddressAsync(wallet.Id, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
             try
             {
                 await using var ctx = _db.CreateContext();
-                ctx.RGBWallets.Remove(wallet);
+                ctx.RGBWallets.Add(wallet);
                 await ctx.SaveChangesAsync(ct);
             }
-            catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
-            try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
-            try { Directory.Delete(walletDataDir, true); }
-            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
-            throw new InvalidOperationException(
-                "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
-        }
+            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+                || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                try { Directory.Delete(walletDataDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
+                throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
+            }
+            catch
+            {
+                try { Directory.Delete(walletDataDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
+                throw;
+            }
 
-        _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+            try
+            {
+                await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
+                await _rgbLib.GetAddressAsync(wallet.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
+                try
+                {
+                    await using var ctx = _db.CreateContext();
+                    ctx.RGBWallets.Remove(wallet);
+                    await ctx.SaveChangesAsync(ct);
+                }
+                catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
+                try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+                try { Directory.Delete(walletDataDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
+                throw new InvalidOperationException(
+                    "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
+            }
 
-        try
-        {
-            await _rgbLib.RefreshAsync(wallet.Id, ct);
-            await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+            _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+
+            try
+            {
+                await _rgbLib.RefreshAsync(wallet.Id, ct);
+                await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+                await ClearNeedsRecoveryAsync(wallet.Id, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Post-restore sync failed for wallet {Id} — left quarantined", wallet.Id);
+                try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+            }
         }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Post-restore sync failed for wallet {Id}", wallet.Id);
-        }
+        finally { sendLock.Release(); }
 
         _log.LogInformation("restored wallet {Id} from backup for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
         return wallet;
@@ -580,14 +651,24 @@ public class RGBWalletService : IRGBWalletService
     {
         var wallet = await GetWalletOrThrow(walletId, ct);
 
-        _rgbLib.UnloadWallet(walletId);
-        _signerProvider.UnloadSigner(walletId);
-        _addressCache.TryRemove(walletId, out _);
-        _sendLocks.TryRemove(walletId, out _);
+        // WHY: hold the wallet's send lock across delete+commit so no concurrent send runs with
+        // broken exclusivity; only evict the semaphore AFTER the row-delete has committed. If the
+        // commit fails the wallet survives WITH its lock intact rather than losing exclusivity.
+        var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+        await sendLock.WaitAsync(ct);
+        try
+        {
+            await using var ctx = _db.CreateContext();
+            ctx.RGBWallets.Remove(wallet);
+            await ctx.SaveChangesAsync(ct);
 
-        await using var ctx = _db.CreateContext();
-        ctx.RGBWallets.Remove(wallet);
-        await ctx.SaveChangesAsync(ct);
+            _rgbLib.UnloadWallet(walletId);
+            _signerProvider.UnloadSigner(walletId);
+            _addressCache.TryRemove(walletId, out _);
+        }
+        finally { sendLock.Release(); }
+
+        _sendLocks.TryRemove(walletId, out _);
 
         _log.LogInformation("deleted wallet {Id}, data dir left at {Dir}",
             walletId, _rgbLib.GetWalletDataDir(walletId, wallet.Network));
@@ -721,7 +802,9 @@ public class RGBWalletService : IRGBWalletService
         _log.LogInformation("Sent {Amount} sats to {Address}, txid={Txid}, fee={Fee}",
             amountSats, destinationAddress, txid, fee);
 
-        try { await _rgbLib.RefreshAsync(walletId, ct); }
+        // Inline write-ahead (already holds _sendLocks): a refresh failure leaves the wallet
+        // quarantined (sync-pending) rather than silently proceeding with possibly-stale state.
+        try { await _sendCoordinator.WriteAheadInlineAsync(walletId, () => _rgbLib.RefreshAsync(walletId, ct), ct); }
         catch (Exception ex) { _log.LogDebug(ex, "Post-send refresh failed"); }
 
         return (txid, amountSats, fee);
@@ -768,80 +851,113 @@ public class RGBWalletService : IRGBWalletService
         _log.LogInformation("SendAsset: {Ticker} amount={Amount} to {RecipientId}",
             asset.Ticker, amount, invoiceData.RecipientId[..Math.Min(30, invoiceData.RecipientId.Length)]);
 
-        var sendBeginResult = await _rgbLib.SendBeginAsync(walletId, recipientMap, feeRate, 1, ct);
-
-        var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
-            ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
-        var batchTransferIdx = parsedSendBegin.BatchTransferIdx
-            ?? throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
-
+        // Snapshot the on-disk Stock BEFORE send_begin so the gate scans state untouched by
+        // this send; taken inside one native ExecuteAsync so it cannot race a concurrent write.
+        var stockSnapshot = await _rgbLib.SnapshotStockAsync(walletId, ct);
         try
         {
-            await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, parsedSendBegin, amount, resolvedAssetId, ct);
-        }
-        catch (Exception gateEx)
-        {
-            _log.LogError(gateEx, "SendAsset: intent gate rejected transfer {Idx} for wallet {WalletId}", batchTransferIdx, walletId);
-            try { await _rgbLib.FailTransfersAsync(walletId, batchTransferIdx, false, true, CancellationToken.None); }
-            catch (Exception failEx) { _log.LogError(failEx, "SendAsset: FailTransfers failed after gate rejection for wallet {WalletId}", walletId); }
-            if (gateEx is RgbIntentVerificationException) throw;
-            throw new RgbIntentVerificationException($"RGB send intent verification failed: {gateEx.Message}", gateEx);
-        }
+            var sendBeginResult = await _rgbLib.SendBeginAsync(walletId, recipientMap, feeRate, 1, ct);
 
-        string signedPsbt;
-        try
-        {
-            var unsignedPsbt = parsedSendBegin.Psbt.Trim('"');
-            var changeAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
-            signedPsbt = await SignPsbtLocallyAsync(walletId, unsignedPsbt, network,
-                new SigningPolicy
-                {
-                    MaxUnknownOutputSats = 0,
-                    MaxFeeSats = EstimateTaprootFee(3, 3, feeRate) * 3,
-                    AllowedScripts = new HashSet<Script> { changeAddr.ScriptPubKey },
-                    MaxOutputCount = 10
-                }, ct);
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "SendAsset: signing failed after SendBegin for wallet {WalletId} — reloading wallet to reset rgb-lib state", walletId);
+            var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
+                ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
+            var batchTransferIdx = parsedSendBegin.BatchTransferIdx
+                ?? throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
+
             try
             {
-                _rgbLib.UnloadWallet(walletId);
-                await _rgbLib.GetOrCreateWalletAsync(walletId, ct);
+                await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, parsedSendBegin, amount, resolvedAssetId, stockSnapshot, ct);
             }
-            catch (Exception reloadEx) { _log.LogWarning(reloadEx, "Failed to reload wallet {WalletId} after signing failure", walletId); }
-            throw;
+            catch (Exception gateEx)
+            {
+                _log.LogError(gateEx, "SendAsset: intent gate rejected transfer {Idx} for wallet {WalletId}", batchTransferIdx, walletId);
+                try { await _rgbLib.FailTransfersAsync(walletId, batchTransferIdx, false, true, CancellationToken.None); }
+                catch (Exception failEx) { _log.LogError(failEx, "SendAsset: FailTransfers failed after gate rejection for wallet {WalletId}", walletId); }
+                if (gateEx is RgbIntentVerificationException) throw;
+                throw new RgbIntentVerificationException($"RGB send intent verification failed: {gateEx.Message}", gateEx);
+            }
+
+            string signedPsbt;
+            try
+            {
+                var unsignedPsbt = parsedSendBegin.Psbt.Trim('"');
+                var changeAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
+                signedPsbt = await SignPsbtLocallyAsync(walletId, unsignedPsbt, network,
+                    new SigningPolicy
+                    {
+                        MaxUnknownOutputSats = 0,
+                        MaxFeeSats = EstimateTaprootFee(3, 3, feeRate) * 3,
+                        AllowedScripts = new HashSet<Script> { changeAddr.ScriptPubKey },
+                        MaxOutputCount = 10
+                    }, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "SendAsset: signing failed after SendBegin for wallet {WalletId} — reloading wallet to reset rgb-lib state", walletId);
+                try
+                {
+                    _rgbLib.UnloadWallet(walletId);
+                    await _rgbLib.GetOrCreateWalletAsync(walletId, ct);
+                }
+                catch (Exception reloadEx) { _log.LogWarning(reloadEx, "Failed to reload wallet {WalletId} after signing failure", walletId); }
+                throw;
+            }
+
+            // Write-ahead: mark durable-quarantine BEFORE consume_fascia mutates the Stock.
+            await SetNeedsRecoveryAsync(walletId, ct);
+
+            string txid;
+            try
+            {
+                txid = await _rgbLib.SendEndAsync(walletId, signedPsbt, ct);
+            }
+            catch
+            {
+                // send_end failure is indeterminate — leave quarantined + evict the handle.
+                try { _rgbLib.UnloadWallet(walletId); } catch { }
+                throw;
+            }
+
+            string? broadcastWarning = null;
+            try
+            {
+                var psbtObj = PSBT.Parse(signedPsbt, network);
+                psbtObj.TryFinalize(out _);
+                var rawTx = psbtObj.ExtractTransaction();
+
+                var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
+                var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
+                using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
+                await electrum.ConnectAsync(ct);
+                await electrum.BroadcastTransactionAsync(rawTx.ToHex(), ct);
+            }
+            catch (Exception ex)
+            {
+                broadcastWarning = "RGB state committed but transaction broadcast failed. It may need to be rebroadcast manually.";
+                _log.LogError(ex, "SendAsset: broadcast failed for txid={Txid}. RGB state committed but tx may not be on chain.", txid);
+            }
+
+            _log.LogInformation("SendAsset completed: {Ticker} amount={Amount}, txid={Txid}",
+                asset.Ticker, amount, txid);
+
+            // Clear quarantine only after a successful reconciling refresh (fsync Stock then commit).
+            // A refresh failure leaves the send successful but the wallet sync-pending/quarantined.
+            try
+            {
+                await _rgbLib.RefreshAsync(walletId, ct);
+                await ClearNeedsRecoveryAsync(walletId, ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "SendAsset: post-send refresh failed — wallet {WalletId} left quarantined (sync-pending)", walletId);
+                try { _rgbLib.UnloadWallet(walletId); } catch { }
+            }
+
+            return (txid, amount, resolvedAssetId, asset.Ticker, broadcastWarning);
         }
-
-        var txid = await _rgbLib.SendEndAsync(walletId, signedPsbt, ct);
-
-        string? broadcastWarning = null;
-        try
+        finally
         {
-            var psbtObj = PSBT.Parse(signedPsbt, network);
-            psbtObj.TryFinalize(out _);
-            var rawTx = psbtObj.ExtractTransaction();
-
-            var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-            var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
-            using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
-            await electrum.ConnectAsync(ct);
-            await electrum.BroadcastTransactionAsync(rawTx.ToHex(), ct);
+            RgbStockDurability.DeleteSnapshot(stockSnapshot);
         }
-        catch (Exception ex)
-        {
-            broadcastWarning = "RGB state committed but transaction broadcast failed. It may need to be rebroadcast manually.";
-            _log.LogError(ex, "SendAsset: broadcast failed for txid={Txid}. RGB state committed but tx may not be on chain.", txid);
-        }
-
-        _log.LogInformation("SendAsset completed: {Ticker} amount={Amount}, txid={Txid}",
-            asset.Ticker, amount, txid);
-
-        try { await _rgbLib.RefreshAsync(walletId, ct); }
-        catch (Exception ex) { _log.LogDebug(ex, "Post-send-asset refresh failed"); }
-
-        return (txid, amount, resolvedAssetId, asset.Ticker, broadcastWarning);
     }
 
     static bool IsTaproot(Script script)
@@ -895,8 +1011,13 @@ public class RGBWalletService : IRGBWalletService
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");
 
     async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
-        SendBeginResult parsedSendBegin, long amount, string operatorAssetId, CancellationToken ct)
+        SendBeginResult parsedSendBegin, long amount, string operatorAssetId, string stockDir, CancellationToken ct)
     {
+        // Burn-prevention: a quarantined wallet may have an incompletely-persisted Stock, so the
+        // native input scan cannot be trusted to see every real allocation. Refuse to sign.
+        if (await IsNeedsRecoveryAsync(walletId, ct))
+            throw new RgbIntentVerificationException("wallet is quarantined pending recovery — refusing to sign");
+
         var details = parsedSendBegin.Details
             ?? throw new RgbIntentVerificationException("send_begin returned no details");
 
@@ -917,7 +1038,13 @@ public class RGBWalletService : IRGBWalletService
 
         var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
         var validate = RgbVerifyNative.Validate(
-            consignmentPath, unsignedTxid, networkSettings.ElectrumUrl, RgbChainNetMapper.PrefixForNetwork(network));
+            consignmentPath, unsignedTxid, networkSettings.ElectrumUrl, RgbChainNetMapper.PrefixForNetwork(network), stockDir);
+
+        // Finding B: refuse unless every allocation on every PSBT input is accounted for by this
+        // single-contract transfer — a co-spent input bearing another contract would burn it.
+        if (!validate.InputsAccounted)
+            throw new RgbIntentVerificationException(
+                "intent gate: not every PSBT input allocation is accounted for by the transfer — refusing to sign");
 
         var commitment = RgbVerifyNative.CommitmentCheck(details.FasciaPath, unsignedTxid, opretHex, details.Entropy);
 

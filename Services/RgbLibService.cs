@@ -503,9 +503,31 @@ public class RgbLibService : IRgbLibService
             var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
             var args = new object?[] { walletStruct, onlineJson, null, "[]", false };
-            _refreshMethod.Invoke(null, args);
+            var result = _refreshMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);
+
+            // WHY: fail-closed — anything other than a confirmed Ok-with-payload (null result,
+            // Err, or Ok with a null pointer) must throw so the write-ahead path quarantines.
+            if (GetNativeResult(result) == null)
+                throw new RgbLibException(GetNativeError(result) ?? "refresh failed");
+        }, ct);
+    }
+
+    public async Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        await using var ctx = _db.CreateContext();
+        var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
+        var stockDir = RgbStockDurability.ResolveStockDir(
+            _config.GetWalletDataDir(walletId, dbWallet.Network), dbWallet.MasterFingerprint);
+
+        return await handle.ExecuteAsync(_ =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return RgbStockDurability.SnapshotStock(stockDir);
         }, ct);
     }
     

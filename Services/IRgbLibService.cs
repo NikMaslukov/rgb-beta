@@ -19,6 +19,7 @@ public interface IRgbLibService : IDisposable
     
     Task<List<RgbTransfer>> ListTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default);
     Task RefreshAsync(string walletId, CancellationToken ct = default);
+    Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default);
 
     Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default);
 

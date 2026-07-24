@@ -1,19 +1,24 @@
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use amplify::confinement::Confined;
 use amplify::{ByteArray, Wrapper};
 use serde::Serialize;
 
-use rgbcore::bitcoin::Transaction;
+use rgbcore::bitcoin::{OutPoint, Transaction};
 use rgbcore::dbc::{Method, Proof};
 use rgbcore::validation::ValidationConfig;
 use rgbcore::seals::txout::TxPtr;
-use rgbcore::{Assign, ChainNet, ContractId, Transition, Txid};
+use rgbcore::{Assign, ChainNet, ContractId, OpId, Opout, Transition, Txid};
 use rgbstd::containers::{ConsignmentExt, FileContent, Transfer, WitnessBundle};
 use rgbstd::contract::IssuerWrapper;
 use rgbstd::indexers::AnyResolver;
+use rgbstd::persistence::fs::FsBinStore;
+use rgbstd::persistence::{MemIndex, MemStash, MemState, Stock};
 
 use schemata::{NonInflatableAsset, NIA_SCHEMA_ID, TS_TRANSFER};
+
+use crate::inputs::{scan_inputs, ObservedInput};
 
 #[derive(Serialize)]
 struct Leg {
@@ -39,6 +44,9 @@ struct ValidatedTransfer {
     witness_txid: String,
     prevouts: Vec<String>,
     legs: Vec<Leg>,
+    #[serde(rename = "inputsAccounted")]
+    inputs_accounted: bool,
+    inputs: Vec<ObservedInput>,
 }
 
 pub(crate) fn validate(
@@ -46,6 +54,7 @@ pub(crate) fn validate(
     unsigned_txid: String,
     indexer_url: String,
     network: String,
+    stock_dir: String,
 ) -> Result<String, String> {
     let consignment = Transfer::load_file(&consignment_path)
         .map_err(|e| format!("failed to load consignment: {e}"))?;
@@ -69,13 +78,24 @@ pub(crate) fn validate(
         .map_err(|e| format!("consignment validation failed: {e}"))?;
 
     let contract_id = consignment.contract_id();
-    let bundle = select_anchored_bundle(&consignment, txid)?;
+    let (bundle, transition) = select_transfer_transition(&consignment, txid)?;
     let witness_tx = bundle
         .pub_witness
         .tx()
         .ok_or_else(|| "anchored bundle does not embed its witness transaction".to_string())?;
-    let transition = enforce_transition_rules(bundle)?;
     verify_anchor(bundle, contract_id, witness_tx)?;
+
+    let store = FsBinStore::new(std::path::PathBuf::from(&stock_dir))
+        .map_err(|e| format!("failed to open stock dir: {e}"))?;
+    let stock = Stock::<MemStash, MemState, MemIndex>::load(store, false)
+        .map_err(|e| format!("failed to load stock: {e}"))?;
+    let scan = scan_inputs(
+        &stock,
+        contract_id,
+        transition,
+        &input_map_of(bundle),
+        &witness_prevouts(witness_tx),
+    )?;
 
     let transfer = ValidatedTransfer {
         contract_id: contract_id.to_string(),
@@ -83,6 +103,8 @@ pub(crate) fn validate(
         witness_txid: witness_tx.compute_txid().to_string(),
         prevouts: extract_prevouts(witness_tx),
         legs: extract_legs(transition)?,
+        inputs_accounted: scan.inputs_accounted,
+        inputs: scan.inputs,
     };
 
     serde_json::to_string(&transfer).map_err(|e| e.to_string())
@@ -156,6 +178,32 @@ fn enforce_transition_rules(bundle: &WitnessBundle) -> Result<&Transition, Strin
         ));
     }
     Ok(transition)
+}
+
+fn select_transfer_transition(
+    consignment: &Transfer,
+    txid: Txid,
+) -> Result<(&WitnessBundle, &Transition), String> {
+    let bundle = select_anchored_bundle(consignment, txid)?;
+    let transition = enforce_transition_rules(bundle)?;
+    Ok((bundle, transition))
+}
+
+fn input_map_of(bundle: &WitnessBundle) -> BTreeMap<Opout, OpId> {
+    bundle
+        .bundle
+        .input_map
+        .iter()
+        .map(|(opout, opid)| (*opout, *opid))
+        .collect()
+}
+
+fn witness_prevouts(witness_tx: &Transaction) -> Vec<OutPoint> {
+    witness_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect()
 }
 
 fn verify_anchor(

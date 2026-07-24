@@ -33,6 +33,7 @@ public class RGBPluginDbContext : DbContext
             entity.Property(e => e.XpubColored).IsRequired();
             entity.Property(e => e.MasterFingerprint).IsRequired();
             entity.Property(e => e.MaxAllocationsPerUtxo).HasDefaultValue(10);
+            entity.Property(e => e.NeedsRecovery).HasDefaultValue(false);
         });
 
         modelBuilder.Entity<RGBInvoice>(entity =>

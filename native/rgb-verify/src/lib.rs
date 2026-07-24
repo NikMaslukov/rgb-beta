@@ -1,6 +1,7 @@
 use std::ffi::{c_char, CStr, CString};
 
 mod commitment;
+mod inputs;
 mod invoice;
 mod validate;
 
@@ -69,6 +70,7 @@ pub extern "C" fn rgbverify_validate(
     unsigned_txid: *const c_char,
     indexer_url: *const c_char,
     network: *const c_char,
+    stock_dir: *const c_char,
 ) -> CResultString {
     guard(|| {
         validate(
@@ -76,6 +78,7 @@ pub extern "C" fn rgbverify_validate(
             cstr_to_string(unsigned_txid),
             cstr_to_string(indexer_url),
             cstr_to_string(network),
+            cstr_to_string(stock_dir),
         )
     })
 }

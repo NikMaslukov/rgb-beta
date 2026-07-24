@@ -30,6 +30,7 @@ public class RGBWallet
     public DateTimeOffset? LastSyncAt { get; set; }
     public bool IsActive { get; set; } = true;
     public int MaxAllocationsPerUtxo { get; set; } = 10;
+    public bool NeedsRecovery { get; set; }
 }
 
 

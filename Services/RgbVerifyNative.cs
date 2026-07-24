@@ -61,7 +61,8 @@ public static class RgbVerifyNative
         [MarshalAs(UnmanagedType.LPUTF8Str)] string consignmentPath,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string unsignedTxid,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string indexerUrl,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string network);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string network,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string stockDir);
 
     [DllImport("rgbverifycffi", CallingConvention = CallingConvention.Cdecl)]
     static extern CResultString rgbverify_commitment_check(
@@ -76,8 +77,8 @@ public static class RgbVerifyNative
     public static RgbDecodeInvoiceResult DecodeInvoice(string invoice)
         => Deserialize<RgbDecodeInvoiceResult>(Read(rgbverify_decode_invoice(invoice)), "decode_invoice");
 
-    public static RgbValidateResult Validate(string consignmentPath, string unsignedTxid, string indexerUrl, string network)
-        => Deserialize<RgbValidateResult>(Read(rgbverify_validate(consignmentPath, unsignedTxid, indexerUrl, network)), "validate");
+    public static RgbValidateResult Validate(string consignmentPath, string unsignedTxid, string indexerUrl, string network, string stockDir)
+        => Deserialize<RgbValidateResult>(Read(rgbverify_validate(consignmentPath, unsignedTxid, indexerUrl, network, stockDir)), "validate");
 
     public static RgbCommitmentCheckResult CommitmentCheck(string fasciaPath, string unsignedTxid, string opretCommitmentBytes, ulong entropy)
         => Deserialize<RgbCommitmentCheckResult>(Read(rgbverify_commitment_check(fasciaPath, unsignedTxid, opretCommitmentBytes, entropy)), "commitment_check");

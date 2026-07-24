@@ -20,6 +20,23 @@ public class RgbValidateResult
     [JsonPropertyName("witnessTxid")] public string WitnessTxid { get; set; } = "";
     [JsonPropertyName("prevouts")] public List<string> Prevouts { get; set; } = [];
     [JsonPropertyName("legs")] public List<RgbLeg> Legs { get; set; } = [];
+    [JsonPropertyName("inputsAccounted")] public bool InputsAccounted { get; set; }
+    [JsonPropertyName("inputs")] public List<RgbObservedInput> Inputs { get; set; } = [];
+}
+
+public class RgbObservedInput
+{
+    [JsonPropertyName("outpoint")] public string Outpoint { get; set; } = "";
+    [JsonPropertyName("observed")] public List<RgbObservedAllocation> Observed { get; set; } = [];
+}
+
+public class RgbObservedAllocation
+{
+    [JsonPropertyName("contractId")] public string ContractId { get; set; } = "";
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+    [JsonPropertyName("amount")] public ulong? Amount { get; set; }
+    [JsonPropertyName("accounted")] public bool Accounted { get; set; }
+    [JsonPropertyName("reason")] public string Reason { get; set; } = "";
 }
 
 public class RgbLeg
