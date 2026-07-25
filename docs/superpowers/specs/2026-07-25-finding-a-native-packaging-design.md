@@ -4,7 +4,7 @@
 **Code base HEAD:** `04c1781` (spec commits sit on top; all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 5 — after spec-gate round 4 (changelogs for rounds 1–4 in §10)
+**Revision:** 6 — after spec-gate round 5 (changelogs for rounds 1–5 in §10)
 
 ---
 
@@ -146,7 +146,10 @@ Plugin Builder included — could satisfy. And `release.yml` is `workflow_dispat
 (`:23-31`) and tags + publishes a GitHub Release (`:168-186`), so any half-state on the branch is
 releasable by a mis-click.
 
-**Phase 1 — committable immediately, CI stays green, no behaviour change, `<None Include>` retained.**
+**Phase 1 — committable immediately, CI stays green, `<None Include>` retained.** No functional
+change to sends, receives, or any request path; it does add one startup diagnostic, which on a current
+Plugin-Builder install will log the missing-native error (that is the audit-mandated behaviour, not a
+regression).
 
 1. `native/rgb-verify/packaging/RgbVerifyCffi.csproj` + `native/rgb-verify/packaging/_._`;
 2. the four `Compile/Content/EmbeddedResource/None Remove` glob guards in the plugin csproj (§4.1);
@@ -301,7 +304,8 @@ Interface — plain shell flags, no MSBuild-style arguments: `--stage`, `--pack-
    it; the assembling job asserts only file presence and package layout. A library that loads but lacks
    an export yields `EntryPointNotFound` — the second failure mode the finding names.
 3. **Pack** with `dotnet pack -c Release -p:Version=<version>` into `local-nuget-feed/`, then delete
-   `~/.nuget/packages/rgbverifycffi/<version>` so a rebuilt nupkg at the same version is re-extracted
+   `${NUGET_PACKAGES:-$HOME/.nuget/packages}/rgbverifycffi/<version>` (honouring a `NUGET_PACKAGES`
+   override, or the eviction silently no-ops) so a rebuilt nupkg at the same version is re-extracted
    rather than served stale — the hazard and remedy `CLAUDE.md` records for the `rgblib …-c8local`
    repack. Callers restore with `--force-evaluate`, the verified remedy for `NU1403`
    (`-p:RestoreLockedMode=false` does **not** suppress `NU1403`; content-hash validation is active
@@ -362,13 +366,33 @@ New `Services/RgbNativeSelfCheck.cs`:
 ```
 internal delegate bool NativeProbe(out IntPtr handle, out IReadOnlyList<string> searched);
 
+internal sealed class RgbNativeUnavailableException : Exception { … }   // defined in this file
+
 internal static class RgbNativeSelfCheck
 {
+    // throws RgbNativeUnavailableException — the phase-2 (hard-fail) entry point
     internal static void Verify(NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    public  static void Verify();   // probe    = RgbVerifyNative.TryLoadFromCandidates
-                                    // hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
+    internal static void Verify();          // bound to the real probe (below)
+
+    // catches EVERY exception, reports it, returns false — the phase-1 (log-only) entry point
+    internal static bool VerifyOrLog(ILogger? logger, NativeProbe probe, Func<IntPtr, string, bool> hasExport);
+    internal static bool VerifyOrLog(ILogger? logger);
 }
+// real bindings: probe     = RgbVerifyNative.TryLoadFromCandidates
+//                hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
 ```
+
+There is **no mode flag**. The two phases differ by which entry point `RGBPlugin.Execute` calls — one
+line — which is what makes the phase-2 flip a reviewable one-line diff and lets both behaviours be
+unit-tested directly (T12, T13). `Execute` itself is not the test subject: it requires a
+`PluginServiceCollection` whose `BootstrapServices` resolve `IConfiguration` (`RGBPlugin.cs:70-72`) and
+would then register the whole service graph, and on any dev/CI host the native is present so the failure
+path cannot be produced there at all.
+
+`VerifyOrLog` catches **every** exception, not just `RgbNativeUnavailableException`. A typed-only catch
+would let an unexpected exception on the probe path escape `Execute` and trigger the
+`disable:` + `ConfigException` restart — precisely the fleet-wide self-DoS that phase 1 exists to avoid.
+(A reviewer measured one plausible source: `NativeLibrary.TryGetExport` throwing on a zero handle.)
 
 **Resolution parity by shared code — NOT by the high-level `NativeLibrary` APIs.** This was measured,
 because two successive spec revisions got it wrong by reasoning:
@@ -437,20 +461,28 @@ handle and requires `TryGetExport` for all four of `rgbverify_decode_invoice`, `
 resolve when applicable, expected package id+version, and remediation (`scripts/pack-rgbverify.sh` for
 dev; "the published `.btcpay` is missing the gate native" for prod). No secrets, no PII, no wallet data.
 
-**Call site and mode.** `RGBPlugin.Execute`, immediately **after** the `if (config == null) return;`
-early return (`RGBPlugin.cs:32-33`), before any service registration — placing it before that return
-would penalise a host with no RGB configuration at all, which can never sign.
+**Call site.** `RGBPlugin.Execute`, after the `config` check at `RGBPlugin.cs:32-33`, before any service
+registration.
 
-The probe takes a mode so the two phases differ by one argument, not by two implementations:
+⚠ **That early return is dead code and must not be relied on.** `LoadConfiguration`
+(`RGBPlugin.cs:68-100`) has no `null` return path — it either deserialises `rgb.json` or falls through to
+`new RGBConfiguration(...)` at `:94-99`. So the probe runs on **every** install, and the phase-2
+hard-fail blast radius is every install of the plugin, not only RGB-configured ones. §5.3's restart-loop
+exposure is correspondingly fleet-wide. Placement after the check is still correct (it costs nothing and
+stays correct if a null path is ever added), but the earlier rationale — "an unconfigured host never runs
+the probe" — was false and is withdrawn.
 
-- **phase 1 — log-only:** catch `RgbNativeUnavailableException` and log it at error level, then continue.
-  Satisfies the audit's literal "logs a loud, actionable error" clause with no package dependency, and
-  is safe to merge because sends already fail closed. A logger is reachable at this point — verified:
-  `LoadConfiguration` already obtains one the same way at `RGBPlugin.cs:89`
-  (`ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`), so the probe reuses
-  that pattern rather than introducing a new sink.
-- **phase 2 — hard-fail:** let it propagate. T13 asserts the phase-2 wiring propagates and the phase-1
-  wiring does not, so the flip cannot be made silently or forgotten.
+- **phase 1 — log-only:** `RgbNativeSelfCheck.VerifyOrLog(logger)`. Satisfies the audit's literal "logs a
+  loud, actionable error" clause with no package dependency, and is safe to merge because sends already
+  fail closed.
+- **phase 2 — hard-fail:** `RgbNativeSelfCheck.Verify()`. T12/T13 assert the two behaviours, so the flip
+  cannot be made silently or forgotten.
+
+**Logging sink.** The logger is obtained as `LoadConfiguration` already does at `RGBPlugin.cs:89`:
+`ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`. That is `GetService`, so
+it can return `null` — and an audit-mandated error that silently disappears is worse than useless.
+`VerifyOrLog` therefore falls back to `Console.Error` when `logger` is `null`, so the message always
+reaches the operator's output. T12 covers both sinks.
 
 **Operational consequence, explicitly accepted by the user.** Throwing from `Execute` makes
 `PluginManager` log the error, queue `disable:BTCPayServer.Plugins.RgbUtexo`, and throw
@@ -477,7 +509,7 @@ Every RID therefore has CI provenance; the production trust core is not a develo
 job then has the native (G4). No interim steps are ever committed (§4.0).
 
 **`release.yml`** (phase 2) — **remove** the native build step (`:96-108`): the native now comes from the
-package, the step would be dead, and the §7.4 gate deletes the tree it stages. Keep the existing
+package and the step would be dead. Keep the existing
 `publish-out` native check (`:136-140`). Add §7.4's gate (provenance assertion + `-local` guard +
 masking-mechanism check) as a **separate job with its own `actions/checkout`**, gating the release but
 never sharing a workspace with the publishing job — see §7.4 for why an in-workspace run would poison
@@ -553,10 +585,11 @@ no longer builds a native at all.
 | native missing an export | pack-time `nm` check fails (on the matching OS); at runtime the probe fails on `TryGetExport` |
 | native absent / wrong architecture / unreadable | every candidate `TryLoad` returns false ⇒ probe reports the searched paths ⇒ phase 1 logs, phase 2 disables the plugin |
 | `SetDllImportResolver` registration deleted by a future refactor | probe stays green (it shares the path logic, not the registration); real sends fail closed; caught by the existing binding smoke test (§4.5) |
+| unexpected exception on the probe path (e.g. an export query against a zero handle) | phase 1: caught by `VerifyOrLog`'s catch-all, logged, startup continues. Phase 2: propagates, plugin disabled — same as any probe failure |
 | native ABI- or contract-mismatched | **not detected by the probe** (N6); first real call fails and the gate fails closed, as today |
 | dependent shared library missing | normally caught at `dlopen`; a lazily-bound symbol may defer to first call, where the gate fails closed |
 | glibc newer than target | `dlopen` fails ⇒ probe throws ⇒ plugin disabled (§5.5); prevented by G7 |
-| plugin has no RGB configuration | early `return` runs first; probe never executes |
+| plugin has no RGB configuration | probe **still runs**: `LoadConfiguration` never returns null (`RGBPlugin.cs:94-99`), so the `config == null` return at `:33` is dead code. Phase-2 hard-fail therefore affects every install, configured or not (§4.5) |
 | warm NuGet cache masking a missing source | §7.4 isolates `NUGET_PACKAGES` |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
 | packaging project's `obj/` polluting the plugin build | glob `Remove`s (§4.1); T10 guards |
@@ -602,14 +635,14 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 | T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected probe+export fakes reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
 | T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every searched candidate path, and `RgbVerifyCffi` | same |
 | T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
-| T12 | 1 | `PluginStartup_LogOnlyMode_DoesNotPropagate` | with a failing probe, the phase-1 wiring logs at error level and `Execute` completes — the audit's "logs a loud, actionable error" clause, and proof phase 1 cannot self-DoS | the log-only wiring does not exist |
+| T12 | 1 | `VerifyOrLog_FailingProbe_LogsAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` and writes the actionable message; asserted for **both** sinks (an injected `ILogger` capturing at error level, and the `Console.Error` fallback when `logger` is `null`); and with a probe that throws an arbitrary exception type it still returns `false` — the catch-all that stops phase 1 self-DoSing. Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path on a host where the native is present | `VerifyOrLog` does not exist |
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, §4.4) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards §4.0 |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
 | T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host — the native genuinely arrived via the package | package not referenced yet |
 | T7 | 2 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` has, under `targets[*]["RgbVerifyCffi/<version>"].runtimeTargets`, an entry with `assetType == "native"` for the host RID — provenance, not presence, and not a `libraries`-section match | native currently arrives as a copied `None` item |
-| T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj contains **no** `None Include` whose path references `native/rgb-verify/runtimes` — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element) and normalises `\` to `/` | the `<None Include>` block still exists |
-| T13 | 2 | `PluginStartup_HardFailMode_Propagates` | with a failing probe, the phase-2 wiring lets `RgbNativeUnavailableException` propagate out of `Execute` — so the log-only→hard-fail flip cannot be silently skipped or forgotten | phase 2 has not flipped the mode |
+| T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes` — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
+| T13 | 2 | `Verify_FailingProbe_Throws` | `Verify` with a failing injected probe throws `RgbNativeUnavailableException` (contrast with T12), pinning the semantic difference the phase-2 call-site flip relies on. The flip itself — which entry point `Execute` calls — is evidenced by §7.5's live runs | asserts the phase-2 entry point's contract |
 
 Tests reading repo files (T8, T9, T10, T11) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
@@ -666,29 +699,40 @@ proj, locks = sys.argv[1], sys.argv[2:]
 def die(m): sys.exit(f"::error::{m}")
 root = ET.parse(proj).getroot()                      # missing/!well-formed file => nonzero exit
 def attr(e, n): return (e.get(n) or "")
-# 1. the masking mechanism must be gone: a re-added <None Include> keeps every
-#    presence/provenance assertion green while restoring finding A's root cause.
-if any("native/rgb-verify/runtimes" in attr(e, "Include").replace("\\", "/")
-       for e in root.iter() if e.tag.endswith("None")):
-    die("plugin csproj still packs native/rgb-verify/runtimes — finding A's root cause")
-# 2. no locally built package version may ship — csproj AND both lockfiles.
-refs = [e for e in root.iter() if e.tag.endswith("PackageReference")
+# 1. The masking mechanism must be gone: re-adding it keeps every presence/provenance
+#    assertion green while restoring finding A's root cause. Any item type and either
+#    Include= or Update= can repack the tree, so check all of them.
+PACKING = ("None", "Content", "EmbeddedResource")
+for e in root.iter():
+    if not e.tag.rsplit('}', 1)[-1] in PACKING: continue
+    path = (attr(e, "Include") + " " + attr(e, "Update")).replace("\\", "/")
+    if "native/rgb-verify/runtimes" in path:
+        die("plugin csproj still packs native/rgb-verify/runtimes — finding A's root cause")
+# 2. RgbVerifyCffi must be referenced, at a published (non -local) version, and both
+#    lockfiles must pin that same version.
+refs = [e for e in root.iter() if e.tag.rsplit('}', 1)[-1] == "PackageReference"
         and attr(e, "Include") == "RgbVerifyCffi"]
 if not refs: die("no RgbVerifyCffi PackageReference — the gate native would be absent")
-if any("-local" in attr(e, "Version") for e in refs): die("RgbVerifyCffi pinned to a -local build")
+want = attr(refs[0], "Version")
+if "-local" in want: die("RgbVerifyCffi pinned to a -local build")
 for lf in locks:
     d = json.load(open(lf))
-    for tfm in d.get("dependencies", {}).values():
-        for name, info in tfm.items():
-            if name.lower() == "rgbverifycffi" and "-local" in json.dumps(info):
-                die(f"{lf} pins RgbVerifyCffi to a -local build")
+    seen = [info for tfm in d.get("dependencies", {}).values()
+            for name, info in tfm.items() if name.lower() == "rgbverifycffi"]
+    if not seen: die(f"{lf} has no RgbVerifyCffi entry — lockfile is stale")
+    for info in seen:
+        if "-local" in json.dumps(info): die(f"{lf} pins RgbVerifyCffi to a -local build")
+        if info.get("resolved") != want:
+            die(f"{lf} resolves RgbVerifyCffi {info.get('resolved')}, csproj wants {want}")
 PY
 
 git clean -dfx native/rgb-verify/runtimes                  # kill staging-tree influence
 ISO=$(mktemp -d)                                            # kill global-packages-cache influence
-COMMON="-c Release -p:ContinuousIntegrationBuild=true -p:StaticWebAssetsEnabled=false"
+# NB: `dotnet restore -c Release` / `--configuration` are invalid (measured: MSB1001 Unknown switch).
+# Configuration must reach restore as a property, and only publish takes -c.
+COMMON="-p:Configuration=Release -p:ContinuousIntegrationBuild=true -p:StaticWebAssetsEnabled=false"
 NUGET_PACKAGES="$ISO/pkgs" dotnet restore "$PROJ" --locked-mode $COMMON
-NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$PROJ" --no-restore $COMMON -o "$ISO/pub"
+NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$PROJ" --no-restore -c Release $COMMON -o "$ISO/pub"
 
 for rid in linux-x64 linux-arm64; do
   f="$ISO/pub/runtimes/$rid/native/librgbverifycffi.so"
@@ -727,7 +771,15 @@ Properties this encodes, each the fix to a defect a reviewer found:
   racing `obj/` — intermittent MSB3030/MSB3491);
 - provenance inspected via `targets[…].runtimeTargets`, not a `"RgbVerifyCffi/"` match that the
   `libraries` section also satisfies;
-- `git diff --quiet` proves the run did not rewrite tracked lockfiles.
+- guards parse XML/JSON and cover every packing item type (`None`/`Content`/`EmbeddedResource`), both
+  `Include=` and `Update=`, backslash paths, and a namespaced csproj — all executed against fixtures,
+  along with lockfile-stale and csproj↔lockfile version-drift cases;
+- the restore runs `--locked-mode`, which cannot rewrite the lockfile, so no separate "did it mutate
+  tracked files" check is needed (an earlier revision claimed a `git diff --quiet` that the script did
+  not contain);
+- the job runs `actions/checkout` with **`submodules: recursive`**: the plugin's BTCPay
+  `ProjectReference` is `Condition="Exists(…)"` (`csproj:61-62`), so a plain checkout silently drops it
+  and the job would fail on compile errors instead of the native assertion.
 
 **This gate cannot pass before S3** — the honest signal that the fix is not yet real, not a reason to
 weaken the gate. It must fail at base HEAD `04c1781` and pass after phase 2.
@@ -794,6 +846,29 @@ scripts are inert if unreferenced.
 ---
 
 ## 10. Revision history
+
+### Revision 6 — after spec-gate round 5
+
+Round 5 independently **confirmed** revision 5's two riskiest mechanisms by measurement: the
+shared-`TryLoadFromCandidates` probe parity holds (probe loads with no prior `DllImport`; a subsequent
+real `DllImport` still works; absent/garbage/wrong-arch images all yield a clean `false`), and the gate's
+lockfile traversal matches this repo's real schema. Remaining defects, all fixed:
+
+| Issue | Resolution |
+|---|---|
+| `dotnet restore -c Release` is **invalid** — measured `MSB1001: Unknown switch` (so is `--configuration`); under `set -euo pipefail` the gate aborted before publishing and could never pass | configuration reaches restore as `-p:Configuration=Release`; `-c` is used only on publish (§7.4) |
+| `LoadConfiguration` never returns null (`RGBPlugin.cs:94-99`), so the `config == null` return at `:33` is dead code — the claim that an unconfigured host skips the probe was false, and phase-2 hard-fail blast radius is **every** install | rationale withdrawn and corrected; blast radius stated honestly (§4.5, §5.6, §5.3) |
+| Phase-1 wiring caught only `RgbNativeUnavailableException`, so any other exception on the probe path would escape `Execute` and trigger the `disable:`+`ConfigException` restart — the very self-DoS phase 1 exists to prevent | `VerifyOrLog` catches **every** exception; T12 covers the arbitrary-exception case (§4.5) |
+| No logging sink was specified, and `GetService<ILoggerFactory>()` can return `null`, silently dropping the audit-mandated error; T12 had nothing to observe | sink specified (the `RGBPlugin.cs:89` pattern) with a `Console.Error` fallback when the factory is null; T12 asserts both sinks (§4.5) |
+| The "mode" mechanism was undefined — neither signature had a mode parameter, so T12/T13 had no subject; and `Execute` is untestable (needs `PluginServiceCollection`+`IConfiguration`, and dev/CI hosts have the native present) | no mode flag: two entry points (`Verify` throws, `VerifyOrLog` logs), the phases differ by one call-site line, and T12/T13 target the entry points directly (§4.5, §7.1) |
+| Masking guard inspected only `None` elements with `Include=`; `Content Include=`, `Update=`, or a namespaced csproj would repack the root cause and pass | guard covers `None`/`Content`/`EmbeddedResource` × `Include`/`Update`, strips the MSBuild namespace, normalises `\`; all cases executed against fixtures (§7.4, T11) |
+| Lockfile guard only rejected `-local`: an absent entry or a version disagreeing with the csproj passed | guard now requires the entry to exist and its `resolved` to equal the csproj version (§7.4) |
+| `RgbNativeUnavailableException` was thrown and asserted but never defined or given a home | defined in `Services/RgbNativeSelfCheck.cs` (§4.5, §11) |
+| Gate job needs `submodules: recursive` — the BTCPay `ProjectReference` is `Exists`-conditional (`csproj:61-62`), so a plain checkout fails on compile errors rather than the native assertion | stated (§7.4, §4.6) |
+| §7.4 listed a `git diff --quiet` property the script did not contain | claim replaced with the actual guarantee (`--locked-mode` cannot rewrite a lockfile) (§7.4) |
+| §4.6 still justified deleting `release.yml`'s native build partly by "the gate deletes the tree it stages" — stale once the gate moved to its own checkout | justification trimmed (§4.6) |
+| §4.0 called phase 1 "no behaviour change" while it wires a startup diagnostic that fires on current installs | reworded: no functional change, one added diagnostic (§4.0) |
+| Pack-script cache eviction hardcoded `~/.nuget/packages`, no-oping under a `NUGET_PACKAGES` override | honours the override (§4.2) |
 
 ### Revision 5 — after spec-gate round 4
 
@@ -886,7 +961,7 @@ Not adopted: that `--locked-mode` and `--force-evaluate` conflict — verified t
 | `native/rgb-verify/packaging/RgbVerifyCffi.csproj`, `native/rgb-verify/packaging/_._` | 1 |
 | `scripts/pack-rgbverify.sh`, `scripts/verify-publish-native.sh` | 1 |
 | `.github/workflows/pack-native.yml` | 1 |
-| `Services/RgbNativeSelfCheck.cs` | 1 |
+| `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`) | 1 |
 | test file(s) for T1–T4, T8–T10, T12 | 1 |
 | test file(s) for T6, T7, T11, T13 | 2 |
 
