@@ -232,7 +232,21 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   `DefaultProbe` and the real-binding lambda all carry `existedButFailed` too. Widening only
   `TryLoadFromCandidates` — as an earlier draft did — leaves an injected probe with no way to signal
   present-but-unloadable, which makes T3(h) unsatisfiable through the specified surface and leaves the
-  binding lambda passing three arguments to a four-out-parameter method. It takes `baseDir` explicitly so `ResolveNative` can pass
+  binding lambda passing three arguments to a four-out-parameter method (measured: `CS7036`).
+
+  **Measured with the channel widened** — three states, using a real loadable dylib and a real text file
+  named `librgbverifycffi.dylib` at a candidate path:
+
+  ```
+  (i)   no candidate:        loaded=False  searched=2  existedButFailed=0   claims packaging defect
+  (ii)  candidate loads:     loaded=True
+  (iii) present, unloadable: loaded=False  searched=2  existedButFailed=1   names the path, no defect claim
+  messages differ = True
+  ```
+
+  T3 clauses (a)–(g) hold in **both** failing branches — including (g) under `StringComparison.Ordinal`,
+  since the paths and filename are lowercase so `RgbVerifyCffi` is absent while (d) still holds — and (h)
+  is non-vacuous: the packaging-defect claim appears only in (i), the failing path only in (iii). It takes `baseDir` explicitly so `ResolveNative` can pass
   `ResolveBaseDir(assembly)` (honouring its own `assembly` parameter) and the probe can pass the plugin
   assembly's directory — neither silently substitutes a different base.
 
