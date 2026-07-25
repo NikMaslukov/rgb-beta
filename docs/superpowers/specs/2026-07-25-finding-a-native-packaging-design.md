@@ -681,6 +681,14 @@ Tests reading repo files (T8, T9, T10, T11, T13) locate the repo root from an
 lockfile JSON — it must not grep the tree, or it matches this spec's prose and its own source. T6/T7
 assert against the host RID and pass on both the dev Mac and CI.
 
+T13's Roslyn dependency needs no new package: verified that `Microsoft.CodeAnalysis.CSharp` already
+reaches the Tests project **transitively** (it appears as `Transitive` in
+`BTCPayServer.Plugins.RgbUtexo.Tests/packages.lock.json`, and the assemblies are present in the test
+output) via the plugin's `Microsoft.CodeAnalysis.CSharp.Workspaces` reference (csproj:69). That is a
+transitive edge, so if the plugin ever drops that reference T13 breaks at compile time — an explicit
+`PackageReference` in the Tests project is then the fix. Noted rather than pre-added, to avoid an
+unnecessary direct dependency.
+
 A "probe never invokes the native" test would be unfalsifiable: the injected seam exposes only `probe`
 and `hasExport`, so there is no invoke capability to assert against. That property is structural and is
 recorded as a `WHY` comment at the seam.
