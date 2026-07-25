@@ -373,8 +373,7 @@ run, and never said what breaks. Required order:
    - **No candidate path existed** → the native is absent from this build. Until the packaging fix ships a
      Plugin-Builder install has **no** build containing it, so "install a fixed build" would be false
      advice; say this is a known packaging defect in the plugin distribution.
-   - **A candidate existed but would not load** → name those paths and say the file is present but could
-     not be loaded, which points at an architecture mismatch, a corrupt file, or incompatible system
+   - **A candidate existed but would not load** → name those paths and say the file **`exists but could not be loaded`**, which points at an architecture mismatch, a corrupt file, or incompatible system
      libraries (for example a glibc floor newer than the host). **Do not claim a packaging defect here** —
      it is a different problem with a different fix, and the glibc case is the one the parent spec calls
      the most likely real-world trigger.
