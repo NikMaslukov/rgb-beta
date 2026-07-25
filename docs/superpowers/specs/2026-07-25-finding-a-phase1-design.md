@@ -5,7 +5,21 @@
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `docs/superpowers/specs/2026-07-25-finding-a-native-packaging-design.md` — problem statement, threat model, sequencing, and the
 open decisions live there and are not repeated here.
-**Revision:** 1 (split out of the parent spec at revision 11; the parent's rounds 1–9 review history applies)
+**Revision:** 4 (split out of the parent spec at its revision 11; the parent's rounds 1–9 review history
+applies to both phases)
+
+**Phase-1 gate changelog**
+- **rev 2** — split damage: `Verify` gained logger/sink parameters (T14 had no injection seam); added T15,
+  since phase 1's only deliverable — `Execute` actually invoking the probe — had no automated guard; removed
+  an orphaned `release.yml` fragment; pack verification no longer restores the real projects (it would have
+  rewritten lockfiles this phase declares unchanged); docs scoped to `CLAUDE.md`.
+- **rev 3** — both entry points take the bootstrap `IServiceProvider` so the logger factory resolves inside
+  the callee's guard; resolving it in the call-site argument expression left it outside the catch-all.
+- **rev 4** — the *convenience* overloads are the only place resolution runs, so they must carry their own
+  `try` (measured: the natural expression-bodied delegation propagates out of `Execute`); T12 exercises the
+  single-argument overload with a hostile provider; T15's Roslyn rule keys on the `ExpressionStatement`
+  (measured: keying on the invocation node matched nothing); call-site bullets aligned to the real
+  overloads.
 **Precondition:** none. **Mergeable on its own.**
 
 ---
@@ -324,8 +338,19 @@ internal static bool VerifyOrLog(IServiceProvider? sp)
 }
 ```
 
-The same applies to `Verify(IServiceProvider?)`, except that it rethrows the probe failure by design —
-it must still not surface a *logger-resolution* failure in its place.
+`Verify(IServiceProvider?)` needs the same wrapper for the same reason, with one difference: it rethrows
+the *probe* failure by design, but a *logger-resolution* failure must never take its place. Measured
+against an unguarded draft, a throwing provider surfaced a bare `InvalidOperationException` instead of the
+actionable `RgbNativeUnavailableException` T14 promises. Required shape:
+
+```
+internal static void Verify(IServiceProvider? sp)
+{
+    ILoggerFactory? factory = null;
+    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* diagnostics must not mask the finding */ }
+    Verify(factory, Console.Error, DefaultProbe, DefaultHasExport);
+}
+```
 
 A null-only fallback would be the wrong design here, for a reason worth stating because it inverts the
 earlier rationale: BTCPay *does* register a real factory on the plugin-load path
@@ -459,8 +484,8 @@ written before phase-2's changes.
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException` — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
-| T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `InvocationExpression` naming `VerifyOrLog` as a **live, unguarded statement** — a direct child of the method body, no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, **including when the `IServiceProvider` overload is given a provider whose `GetService` throws** — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
 Tests reading repo files (T8, T9, T10, T15) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
