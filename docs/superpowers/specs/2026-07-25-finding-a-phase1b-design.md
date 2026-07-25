@@ -1,6 +1,6 @@
 # Finding A — phase 1b: `RgbVerifyCffi` packaging infrastructure
 
-**Date:** 2026-07-25 · **Branch:** `fix/sqlite-vuln`
+**Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln`
 **Code base HEAD:** `04c1781` (all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `docs/superpowers/specs/2026-07-25-finding-a-native-packaging-design.md` — problem statement, threat model, sequencing, and the
@@ -138,8 +138,29 @@ T10 guards this. The Tests project has no default-glob exposure to that path and
 </Target>
 ```
 
-plus `RequireAllRids` (enabled by the `RequireAllRids` MSBuild property, which the pack script sets
-from its `--require-all-rids` flag — §2.2) asserting all three RID files exist.
+plus `RequireAllRids`, given verbatim so the flag→property→target chain is defined end to end rather
+than named:
+
+```xml
+<!-- The shipped RID set is declared ONCE here and consumed by the guard, the pack script and CI, so
+     adding or dropping a RID is a one-line change and cannot drift between them. -->
+<ItemGroup>
+  <GateRid Include="linux-x64"   Lib="librgbverifycffi.so" />
+  <GateRid Include="osx-arm64"   Lib="librgbverifycffi.dylib" />
+  <!-- PROVISIONAL: linux-arm64 is parent decision 3 and is NOT yet confirmed by the user. Until it is,
+       this line stays commented out; uncommenting it is the whole change. Hardwiring it would make
+       `dotnet pack` fail outright if the decision goes the other way. -->
+  <!-- <GateRid Include="linux-arm64" Lib="librgbverifycffi.so" /> -->
+</ItemGroup>
+
+<Target Name="RequireAllRids" BeforeTargets="Pack" Condition="'$(RequireAllRids)' == 'true'">
+  <Error Condition="!Exists('../runtimes/%(GateRid.Identity)/native/%(GateRid.Lib)')"
+         Text="RgbVerifyCffi: declared RID %(GateRid.Identity) has no native at ../runtimes/%(GateRid.Identity)/native/%(GateRid.Lib)" />
+</Target>
+```
+
+The pack script's `--require-all-rids` flag maps to `-p:RequireAllRids=true` on the `dotnet pack`
+invocation; without the flag the property is unset and only `RequireProdNative` applies.
 
 **`Directory.Build.props` must be amended.** Its `ItemGroup Condition` at `:10` injects
 `<PackageReference Include="Microsoft.Bcl.Memory" …/>` (`:11`) into every project except the plugin and
@@ -156,10 +177,21 @@ exclusive modes: passing both runs staging then packing (what §4.3 does), passi
 defaults to both. Phases:
 
 1. **Stage** into `native/rgb-verify/runtimes/<rid>/native/`: host RID via
-   `native/rgb-verify/build-native.sh` (unchanged, still the single build entry point); cross RIDs via
-   containers — **`linux-x64` MUST build in `rust:1-bookworm`** (`--platform linux/amd64`), matching
-   `CLAUDE.md` and pinning the glibc floor to Debian 12 (G7); `linux-arm64` likewise under
-   `--platform linux/arm64`.
+   `native/rgb-verify/build-native.sh` (unchanged, still the single build entry point); cross RIDs via containers. **`linux-x64` MUST build in `rust:1-bookworm`**
+   (`--platform linux/amd64`), pinning the glibc floor to Debian 12; a provisional `linux-arm64` likewise
+   under `--platform linux/arm64`. Four details the earlier one-sentence version left to improvisation,
+   each of which bites:
+   - **Separate `CARGO_TARGET_DIR` per RID.** `build-native.sh` builds host-only into
+     `native/rgb-verify/target/release`; a container reusing that path collides with host artifacts and
+     silently packs the wrong object. Pass `-e CARGO_TARGET_DIR=/w/target/<rid>` and copy from there.
+   - **Mount and workdir:** `-v "$PWD/native/rgb-verify":/w -w /w`, matching the recipe already in
+     `CLAUDE.md`.
+   - **Root-owned output:** container artifacts land as root on Linux hosts. Either run with
+     `--user "$(id -u):$(id -g)"` or `chown` the copied file, or the next host-side build fails on a
+     permission error.
+   - **Emulated builds are slow.** A QEMU `linux/amd64` Rust build on Apple Silicon takes minutes, not
+     seconds; on CI prefer a native runner per architecture over emulation. "One more build job" was an
+     understatement in the earlier draft.
 2. **Assert exports per RID, on an OS that can read that object format.** GNU `nm` cannot read Mach-O
    and `nm -gU` is BSD-only, so the ELF check (`nm -D --defined-only`) runs on Linux and the Mach-O
    check (`nm -gU`) on macOS. In `pack-native.yml` each RID's check therefore runs in the job that built
@@ -202,10 +234,15 @@ is why S2 cannot live in `release.yml`: that workflow is dispatchable on any ref
 Release (`:186`), so using it pre-merge would tag unmerged code.
 
 - job `linux-x64`: build in a `rust:1-bookworm` container (G7), ELF export check, upload artifact;
-- job `linux-arm64`: same, `--platform linux/arm64` — on an x64 GitHub runner this requires binfmt/QEMU registration (`docker/setup-qemu-action`) or, preferably, `runs-on: ubuntu-24.04-arm` to build natively; the `--platform` flag alone works only on an Apple-Silicon dev machine;
+- job `linux-arm64` (**only once parent decision 3 is confirmed**): `runs-on: ubuntu-24.04-arm`, building natively. Not QEMU: emulated Rust builds are slow enough to dominate the workflow, and `--platform linux/arm64` alone works only on an Apple-Silicon dev machine;
 - job `osx-arm64`: `macos-14` runner, Mach-O export check, upload artifact;
-- job `assemble`: download all three, `pack-rgbverify.sh --pack-only --require-all-rids --version <v>`,
+- job `assemble`: download every RID artifact, `pack-rgbverify.sh --pack-only --require-all-rids --version <v>`,
   assert the nupkg layout (§2.1), upload the canonical nupkg for the org to publish at S3.
+
+Workflow inputs and artifact names are fixed rather than left to the implementer: a required `version`
+input (the value passed to `--version`, e.g. `0.11.1-rc.10-native.1`); per-RID artifacts named
+`gate-native-<rid>` each containing `runtimes/<rid>/native/<lib>`; and a single output artifact named
+`RgbVerifyCffi-<version>-nupkg`.
 
 Every RID therefore has CI provenance; the production trust core is not a developer's cross-build.
 
@@ -274,7 +311,7 @@ phase 1, used by phase 2's closure) is what catches it.
 | native ABI- or contract-mismatched | not detected by the probe (see §2.4); the first real call fails and the gate fails closed, as today |
 | `SetDllImportResolver` registration deleted by a future refactor | probe stays green (it shares the path logic, not the registration); caught by the existing binding smoke test |
 | packaging project's `obj/` polluting the plugin build | glob `Remove`s (§2.1); T10 guards |
-| `CopyLocalLockFileAssemblies` removed later | T8 fails |
+| `CopyLocalLockFileAssemblies` removed later | not load-bearing in this phase (nothing references the package yet); phase 2 owns that guard |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
 | concurrency | none introduced; the probe runs once, single-threaded, before any service exists |
 | malicious input | none reachable; the probe takes no external input |

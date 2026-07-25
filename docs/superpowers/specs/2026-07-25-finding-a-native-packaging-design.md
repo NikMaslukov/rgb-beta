@@ -4,18 +4,21 @@
 **Code base HEAD:** `04c1781` (all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 12 — split into phase specs after spec-gate round 9
+**Revision:** 13 — phase 1 split into 1a/1b after the phase-1 gate's round 5
 
 > **This document is the shared context.** The implementable work lives in two child specs, each gated
 > independently:
 >
 > | Spec | Precondition | Closes |
 > |---|---|---|
-> | `2026-07-25-finding-a-phase1-design.md` | none — mergeable now | the audit's "log a loud, actionable error" clause |
-> | `2026-07-25-finding-a-phase2-design.md` | **S3**: the org has published the package to nuget.org | finding A itself |
+> | `2026-07-26-finding-a-phase1a-design.md` | **none — mergeable now** | the audit's "log a loud, actionable error" clause |
+> | `2026-07-25-finding-a-phase1b-design.md` | none, but only *useful* once S3 is scheduled | nothing — it produces the package |
+> | `2026-07-25-finding-a-phase2-design.md` | **S3**: the org has published to nuget.org | finding A itself |
 >
-> Split at revision 11 because the document had grown past 1,100 lines and the review-gated workflow
-> prefers gating smaller artifacts. Rounds 1–9 of review history (§10) applies to both children.
+> Split at revision 11 because the document had grown past 1,100 lines. Phase 1 was split again after its
+> own gate round 5, when a reviewer showed the packaging half closes no audit clause, carries a project +
+> two scripts + a workflow + build-file edits, and had zero automated coverage — while the only thing
+> needing it is blocked on an external publish. Rounds 1–9 of the history in §10 apply to all children.
 
 ---
 
