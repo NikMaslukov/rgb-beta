@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 24 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 25 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history (condensed).** rev 1 split from the phase-1 spec. rev 2–4 corrected the false
 "diagnostic only" claim (this phase rewrites the live `ResolveNative` path), made the message
@@ -249,10 +249,10 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   broken-but-present native to report a packaging defect that is not their problem.
 
   **The whole channel must be widened together**, or the distinction cannot be tested: `NativeProbe`,
-  `DefaultProbe` and the real-binding lambda all carry `existedButFailed` too. Widening only
+  `DefaultProbe` and the forwarding bodies all carry `existedButFailed` too. Widening only
   `TryLoadFromCandidates` — as an earlier draft did — leaves an injected probe with no way to signal
   present-but-unloadable, which makes T3(h) unsatisfiable through the specified surface and leaves the
-  binding lambda passing three arguments to a four-out-parameter method (measured: `CS7036`).
+  forwarding body passing three arguments to a four-out-parameter method (measured: `CS7036`).
 
   **Measured with the channel widened** — the load-failure states, using a real loadable dylib and a real text file
   named `librgbverifycffi.dylib` at a candidate path:
