@@ -4,7 +4,7 @@
 **Code base HEAD:** `04c1781` (spec commits sit on top; all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 8 — after spec-gate round 7 (changelogs for rounds 1–7 in §10)
+**Revision:** 9 — after spec-gate round 7 (changelogs for rounds 1–7 in §10)
 
 ---
 
@@ -672,10 +672,10 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
 | T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host. **Precondition, mandatory:** written and observed failing against a tree where `native/rgb-verify/runtimes` is cleaned, the `<None Include>` is still present-or-removed, **and the `PackageReference` is not yet added** — a clean staging tree alone is not enough, because once phase-2 step 1 lands the package itself supplies the native and the test passes at introduction. The Tests output also already contains both natives today via the old copy path (verified). Weaker evidence than T7; see the note below | without that precondition it does not fail first — the machine-local-state trap §1 warns about |
 | T7 | 2 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` has, under `targets[*]["RgbVerifyCffi/<version>"].runtimeTargets`, an entry with `assetType == "native"` for the host RID — provenance, not presence, and not a `libraries`-section match | native currently arrives as a copied `None` item |
-| T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes` — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
+| T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes`, and no `<Copy>` task restaging the gate native — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
 | T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | **Roslyn-parsed**, not text-matched: parse `RGBPlugin.cs` with `Microsoft.CodeAnalysis.CSharp` (already a plugin dependency, csproj:69), locate the `Execute` method declaration, and assert its body contains an `InvocationExpression` naming the throwing entry point and **no** invocation naming `VerifyOrLog`. A syntax-tree rule is required because a plain source-text match would be satisfied by a commented-out or `#if`-disabled call — as the flip's only automated guard that would be worthless. (A behavioural `Verify_FailingProbe_Throws` would instead duplicate T3 and could not fail first, since `Verify` and its throw contract both land in phase 1.) | phase 1's call site invokes `VerifyOrLog`, so it fails until the flip lands |
 
-Tests reading repo files (T8, T9, T10, T11) locate the repo root from an
+Tests reading repo files (T8, T9, T10, T11, T13) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
 `$(MSBuildThisFileDirectory)..`, so they work for out-of-tree runs. T9 must parse the csproj XML and the
 lockfile JSON — it must not grep the tree, or it matches this spec's prose and its own source. T6/T7
@@ -741,6 +741,8 @@ for p in projects:
     except FileNotFoundError:
         if p == projects[0]: die(f"{p} not found")     # the csproj must exist
         continue                                       # Directory.Build.* are optional
+    except ET.ParseError as ex:
+        die(f"{p} is not parseable XML ({ex}) — cannot verify it does not mask the gate native")
     for e in root.iter():
         if tag(e) not in PACKING: continue
         src = (attr(e, "Include") + " " + attr(e, "Update")).replace("\\", "/")
@@ -748,13 +750,26 @@ for p in projects:
                " ".join((c.text or "") for c in e)).replace("\\", "/")
         if "native/rgb-verify/runtimes" in src or "rgbverifycffi" in (src + dst).lower():
             die(f"{p} still packs the gate native by hand — finding A's root cause")
-        if "runtimes/" in dst and "native" in dst:
-            die(f"{p} retargets an item into runtimes/**/native — possible masking path")
+        # No literal "native" requirement: the repo's own idiom is
+        # Link="runtimes/%(RecursiveDir)%(Filename)%(Extension)", where the unexpanded
+        # attribute text never contains "native". Any packing item aimed at runtimes/ is suspect.
+        if "runtimes/" in dst:
+            die(f"{p} retargets a packing item into runtimes/ — possible masking path")
+    # <Copy> inside a <Target> can restage the native without any packing item at all;
+    # the csproj already uses exactly that idiom for the restore helper (csproj:103-110).
+    for e in root.iter():
+        if tag(e) != "Copy": continue
+        spec_txt = (attr(e, "SourceFiles") + " " + attr(e, "DestinationFolder") + " " +
+                    attr(e, "DestinationFiles")).replace("\\", "/").lower()
+        if "rgbverifycffi" in spec_txt or "rgb-verify/runtimes" in spec_txt:
+            die(f"{p} restages the gate native via a Copy task — possible masking path")
 root = ET.parse(projects[0]).getroot()
 # 2. Exactly one RgbVerifyCffi reference, at a published (non -local) version, and both
 #    lockfiles must pin that same version. Checking only the first reference would let a
 #    second, differently-versioned one through.
-refs = [e for e in root.iter() if tag(e) == "PackageReference" and attr(e, "Include") == "RgbVerifyCffi"]
+# NuGet ids are case-insensitive; match accordingly so a case variant cannot slip past
+refs = [e for e in root.iter() if tag(e) == "PackageReference"
+        and attr(e, "Include").lower() == "rgbverifycffi"]
 if not refs: die("no RgbVerifyCffi PackageReference — the gate native would be absent")
 if len(refs) > 1: die(f"{len(refs)} RgbVerifyCffi PackageReferences — ambiguous version")
 want = attr(refs[0], "Version")
@@ -910,6 +925,21 @@ scripts are inert if unreferenced.
 ---
 
 ## 10. Revision history
+
+### Revision 9 — also from spec-gate round 7 (second reviewer)
+
+The second round-7 reviewer independently reproduced the guard's real-repo behaviour, compiled a replica
+proving the refactored resolver probes the same paths in the same order as today's (parity confirmed), and
+established that MSBuild's `IncrementalClean` prunes stale `runtimes/**` copies — so T6's precondition is
+sufficient. Its remaining findings:
+
+| Issue | Resolution |
+|---|---|
+| Masking rule 2 was evaded by **the repo's own idiom**: `<None Include="staged/**"><Link>runtimes/%(RecursiveDir)…</Link>` passes, because the unexpanded attribute text contains no literal `native` | the `and "native" in dst` conjunct dropped — any packing item retargeted at `runtimes/` now trips. Verified: the evasion fixture trips, and the legitimate phase-2 csproj + real `Directory.Build.props` still pass |
+| Neither guard nor T11 inspected `<Target>`/`<Copy>` restaging, although the plugin csproj already ships that exact idiom (`CopyRestoreHelper`, csproj:103-110) | guard now flags any `<Copy>` whose source/destination names the gate native or `rgb-verify/runtimes`; T11 extended. Verified against a `Copy`-based evasion fixture |
+| `Include == "RgbVerifyCffi"` was case-sensitive while the lockfile lookup was `.lower()`, so a case-variant id (legal in NuGet) produced a misleading "no PackageReference" error | both comparisons case-insensitive; verified with a lowercase-id fixture |
+| T13 was absent from §7.1's repo-root-locating list | added |
+| (author-found while testing) an unparseable `Directory.Build.props` crashed the guard with a traceback instead of a clear failure | `ET.ParseError` caught and reported actionably; verified |
 
 ### Revision 8 — after spec-gate round 7
 
