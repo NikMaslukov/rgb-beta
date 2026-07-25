@@ -350,22 +350,21 @@ if unreferenced.
 
 ---
 
-## 6. Files touched (phase 1)
+## 6. Files touched (phase 1b)
+
+Phase 1a owns `Services/RgbNativeSelfCheck.cs`, the `Services/RgbVerifyNative.cs` extraction, the
+`RGBPlugin.cs` call site, the Tests-csproj `AssemblyMetadata`, and tests T1–T4/T12/T14/T15/T16. None of
+them are restated here; an earlier draft claimed both, giving two specs duplicate ownership of the same
+files.
 
 **New:** `native/rgb-verify/packaging/RgbVerifyCffi.csproj`, `native/rgb-verify/packaging/_._`,
 `scripts/pack-rgbverify.sh`, `scripts/verify-native-loads-debian.sh`,
-`.github/workflows/pack-native.yml`,
-`Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`), test file(s) for
-T1–T4, T8–T10, T12, T14, T15.
+`.github/workflows/pack-native.yml`, test file(s) for P1–P2.
 
 **Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (packaging-glob `Remove`s only),
-`Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths` (deduped),
-`TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` to `internal`; rewrite `ResolveNative`
-to use them), `RGBPlugin.cs` (probe call site after `:33`, log-only),
-`Directory.Build.props` (`:10` exclusion), `.gitignore` (`local-nuget-feed/`),
-`BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata("RepoRoot", …)`), `CLAUDE.md`
-(pack workflow, glibc floor, log-only check, phase sequence).
+`Directory.Build.props` (`:10` exclusion), `.gitignore` (`local-nuget-feed/`), `CLAUDE.md` (the pack
+workflow and the glibc floor).
 
 **Deliberately unchanged:** `nuget.config`, both `packages.lock.json`, `.github/workflows/ci.yml`,
-`.github/workflows/release.yml`, `BTCPayServer.Plugins.RgbUtexo.slnx` (the packaging project is kept out
-of the solution so no repo-wide build or test run picks it up), and the `<None Include>` block itself.
+`.github/workflows/release.yml`, `BTCPayServer.Plugins.RgbUtexo.slnx` (the packaging project stays out of
+the solution so no repo-wide build or test run picks it up), and the `<None Include>` block.

@@ -21,9 +21,22 @@ the only thing that needs it (phase 2) is blocked indefinitely on an external pu
 `2026-07-25-finding-a-phase1b-design.md`, which can wait; this cannot.
 
 **Delivery is unchanged.** The native still ships via the existing
-`<None Include="native/rgb-verify/runtimes/**">` (`BTCPayServer.Plugins.RgbUtexo.csproj:79-84`). Phase 1a
-adds a diagnostic and nothing else, so it cannot make production worse: today a missing native fails every
-send closed; after this, the same, plus a startup error that says so.
+`<None Include="native/rgb-verify/runtimes/**">` (`BTCPayServer.Plugins.RgbUtexo.csproj:79-84`).
+
+**But this phase is *not* "a diagnostic and nothing else", and an earlier draft claimed so wrongly.** It
+also rewrites `ResolveNative` (`Services/RgbVerifyNative.cs:17-40`) to share its candidate loop with the
+probe — and that is the **live P/Invoke resolution path every RGB send already depends on**. A refactor
+bug there breaks sends that work today, which is strictly worse than the status quo. The risk is real
+enough that this spec carries two obligations it would not otherwise need:
+
+- **T16** exercises real resolution through the refactored `ResolveNative` (not the probe), so a
+  behaviour change is caught by the suite rather than by a merchant.
+- **§3.1 requires a live signet send** before merge. The existing binding smoke test
+  (`RgbVerifyBindingTests.cs:67-72`) is not sufficient cover: it cannot run in CI at all, because
+  `ci.yml` stages no native (finding-B codex follow-up #1, still open).
+
+With those, the net effect is: today a missing native fails every send closed; after this, the same, plus
+a startup error that says so — and the resolution path is measurably unchanged.
 
 **Log-only, never throwing.** A hard-failing probe here would auto-disable the plugin on every production
 BTCPay, since the artifact still lacks the native. The hard-fail flip belongs to phase 2.
@@ -168,11 +181,15 @@ run, and never said what breaks. Required order:
    plugin are unaffected. (An operator who reads nothing else must still learn this.)
 2. **What is missing, concretely:** the expected filename for this platform and
    `RuntimeInformation.RuntimeIdentifier`, plus every candidate path searched.
-3. **Operator remediation:** install a plugin build that ships the gate native for this platform, or
-   raise it with the plugin vendor quoting this message. Note the platform explicitly when the RID is
-   outside the supported set, since that is a different fix.
-4. **Developer remediation, last:** the `RgbVerifyCffi` package that will supply it from phase 2 on, and
-   `scripts/pack-rgbverify.sh` for a local build.
+3. **Operator remediation — honest about what they can actually do.** Until the packaging fix ships,
+   a Plugin-Builder install has **no** build that contains the native, so "install a fixed build" would
+   be false advice. The message says: this is a known packaging defect in the plugin distribution; quote
+   this message to the plugin vendor. If the RID is outside the supported set, say so explicitly — that
+   is a different problem with a different fix.
+4. **Developer remediation, last, and only naming things that exist:** `native/rgb-verify/build-native.sh`
+   builds and stages the native for the host RID. The message must **not** name
+   `scripts/pack-rgbverify.sh` or the `RgbVerifyCffi` package — neither exists after phase 1a, and citing
+   an unpublished package is precisely the developer-facing wording this rewrite was called on.
 
 No secrets, no PII, no wallet data.
 
@@ -277,15 +294,16 @@ none of them apply here.
 Behavioural tests are written and observed failing before the corresponding change. T14 additionally
 requires the intra-phase ordering in its row.
 
-|---|---|---|
-|---|---|
-| T1 | 1 | `CandidatePaths_DedupesAndPreservesProbeOrder` | expectations **derived from `RuntimeIdentifiers()`** (widened to `internal` for this reason — it is private today, so the test could not otherwise see it), not hardcoded to two entries: candidates are `runtimes/<rid>/native/<file>` for each distinct RID in order, then the flat path; no duplicates; platform-correct filename. (A non-portable host RID such as `linux-musl-x64` legitimately yields three candidates, so a fixed-length expectation would be wrong.) | `CandidatePaths` does not exist |
-| T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected fakes for all four parameters, probe+export reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
-| T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` whose message contains **the consequence** (that RGB sends will be rejected), the RID, the expected filename, every searched candidate path, an operator-facing remediation, and `RgbVerifyCffi`. Asserting the consequence string is what keeps the message operator-actionable rather than a list of identifiers | same |
-| T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
-| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2.4 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the `IServiceProvider` overload specifically, with a failing probe injected via its optional parameter — a provider whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — never the provider's exception — **and the injected sink still receives the message**. Not "both sinks": a throwing provider leaves `factory` null, so the logger cannot. This clause is why the sink is acquired under its own guard *before* the factory — measured, sharing one guard sent the diagnostic to `TextWriter.Null`, i.e. nowhere, at the exact moment phase 2 auto-disables the plugin — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
-| T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
+| # | Test | Asserts | First fails because |
+|---|---|---|---|
+| T1 | `CandidatePaths_DedupesAndPreservesProbeOrder` | expectations **derived from `RuntimeIdentifiers()`** (widened to `internal` for this reason — it is private today, so the test could not otherwise see it), not hardcoded to two entries: candidates are `runtimes/<rid>/native/<file>` for each distinct RID in order, then the flat path; no duplicates; platform-correct filename. (A non-portable host RID such as `linux-musl-x64` legitimately yields three candidates, so a fixed-length expectation would be wrong.) | `CandidatePaths` does not exist |
+| T2 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected fakes for all four parameters, probe+export reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
+| T3 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` whose message satisfies, as assertions rather than a substring sweep: (a) it states that RGB sends will be rejected; (b) it states receiving is unaffected; (c) that consequence text appears **before** the first candidate path in the string (`IndexOf` comparison) — consequence-first ordering is the property that makes it readable to an operator, and ordering is testable where "is it actionable" is not; (d) it contains the RID and the platform-correct filename; (e) it contains every searched candidate path; (f) it contains `build-native.sh`; and (g) it does **not** contain `pack-rgbverify.sh` or `RgbVerifyCffi`, neither of which exists after this phase | same |
+| T4 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
+| T12 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the `IServiceProvider` overload specifically, with a failing probe injected via its optional parameter — a provider whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
+| T14 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — never the provider's exception — **and the injected sink still receives the message**. Not "both sinks": a throwing provider leaves `factory` null, so the logger cannot. This clause is why the sink is acquired under its own guard *before* the factory — measured, sharing one guard sent the diagnostic to `TextWriter.Null`, i.e. nowhere, at the exact moment phase 2 auto-disables the plugin — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T15 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
+| T16 | `ResolvedNative_LoadsThroughRefactoredResolver` | with the native staged for the host RID, a real `DllImport` through `RgbVerifyNative` still binds after the `ResolveNative` refactor — the guard that the live P/Invoke path was not broken. Must **fail loudly rather than skip** when no native is staged, so an unstaged CI box reports "unverified" instead of a false green | the refactor does not exist yet |
 
 Tests reading repo files (T15) locate the repo root from an `AssemblyMetadata("RepoRoot", …)` attribute
 injected by the Tests csproj from `$(MSBuildThisFileDirectory)..`.
@@ -300,12 +318,33 @@ plausible probe can pass every unit test and still fail inside BTCPay.
 2. **native removed** — the actionable message is logged with the RID, every searched path, and the
    consequence, and the plugin **still loads**.
 
-**Plus a Plugin-Builder-equivalent check, which needs no package and is available today.** Run
-`git clean -dfx native/rgb-verify/runtimes` then `dotnet publish -c Release` with an isolated
-`NUGET_PACKAGES`, and confirm the published tree contains **no** `librgbverifycffi.*`. That is finding A
-reproduced on demand, and it is the run that proves the diagnostic fires for the *production* reason
-rather than only for a native deleted by hand on a dev Mac. Without it this phase would verify itself
-somewhere that isn't production — the exact pattern that produced finding A.
+3. **A live signet send**, because §1's refactor touches the live P/Invoke resolution path. Unit tests
+   cover the probe; only a real send proves `ResolveNative` still binds the native for an actual
+   `DllImport` under the plugin host.
+
+**Plus a Plugin-Builder-equivalent check, which needs no package and is available today** — run in a
+**throwaway git worktree, never the working tree**:
+
+```bash
+W=$(mktemp -d); git worktree add --detach "$W" HEAD      # never mutate the working tree
+git -C "$W" clean -dfx native/rgb-verify/runtimes         # the Plugin Builder has no staged natives
+ISO=$(mktemp -d)
+NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$W/BTCPayServer.Plugins.RgbUtexo.csproj" \
+  -c Release -o "$ISO/pub" -p:StaticWebAssetsEnabled=false
+find "$ISO/pub" -iname '*rgbverifycffi*'                  # expected: no output
+git worktree remove --force "$W"
+```
+
+Three things this wording fixes, each of which a reviewer caught in the previous draft: the clean must
+not run in the working tree (`build-native.sh` builds the **host RID only**, so a `git clean` there
+irreversibly destroys the container-built `linux-x64` artifact, which is exactly the file the other steps
+need); the project path must be explicit (both the `.slnx` and the csproj sit at the repo root, and
+publishing via the solution drags in six btcpayserver submodule projects); and `-c Release` belongs on
+`publish` (`dotnet restore -c Release` is invalid — MSB1001).
+
+**What it proves, precisely:** that a Plugin-Builder-equivalent publish ships no gate native — finding A
+reproduced on demand. It does **not** run the resulting tree, so it does not by itself show the
+diagnostic firing; that evidence comes from run 2 above. An earlier draft claimed the stronger thing.
 
 ---
 
@@ -320,7 +359,7 @@ schema change, no persisted state, no wire-format change.
 ## 5. Files touched
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
-T1–T4, T12, T14, T15.
+T1–T4, T12, T14, T15, T16.
 
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
 (deduped), `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` to `internal`; rewrite
