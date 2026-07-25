@@ -47,7 +47,7 @@ enforcing this — no test or CI check can.
 ### 4.4 Plugin csproj (phase 2)
 
 - **Remove** `<None Include="native/rgb-verify/runtimes/**">` (`:79-84`). Leaving it would let the old
-  path mask a broken package — T11 and §7.4 enforce its absence, because presence-only assertions stay
+  path mask a broken package — T11 and §4 enforce its absence, because presence-only assertions stay
   green if both mechanisms coexist.
 - **Add** `<PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.1" />` beside `RgbLib`.
 - Regenerate `packages.lock.json` for **both** the plugin and the Tests project, against nuget.org, so
@@ -311,10 +311,10 @@ packing and after the clean, never against a tree the pack script just populated
 - **Not closed until all six hold:** (a) the org has published `RgbVerifyCffi 0.11.1-rc.10-native.1` to
   nuget.org, **and its `contentHash` in the regenerated lockfiles equals the SHA-512 recorded from the
   nupkg `pack-native.yml` produced** (committed as `native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512`
-  and asserted by §7.4 check 2). Without this, §6(a) only proves *something* was published under that id,
+  and asserted by §4 check 2). Without this, §6(a) only proves *something* was published under that id,
   and a substituted package would silently become the trust core — §3's residual risk (i) rests on this;
   (b) phase 2 has landed with both lockfiles regenerated against nuget.org under strict
-  pinning; (c) §7.4's gate passes in CI; (e) **the native extracted from that same `.btcpay` loads on a
+  pinning; (c) §4's gate passes in CI; (e) **the native extracted from that same `.btcpay` loads on a
   Debian-like linux-x64 target with all four exports resolvable** — verified by
   `scripts/verify-native-loads-debian.sh`, which runs
   `python3 -c "import ctypes; ctypes.CDLL(...)"` plus a `hasattr` check for each export inside a
