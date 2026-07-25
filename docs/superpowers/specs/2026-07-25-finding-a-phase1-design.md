@@ -5,7 +5,7 @@
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `docs/superpowers/specs/2026-07-25-finding-a-native-packaging-design.md` — problem statement, threat model, sequencing, and the
 open decisions live there and are not repeated here.
-**Revision:** 7 (split out of the parent spec at its revision 11; the parent's rounds 1–9 review history
+**Revision:** 8 (split out of the parent spec at its revision 11; the parent's rounds 1–9 review history
 applies to both phases)
 
 **Phase-1 gate changelog**
@@ -29,10 +29,17 @@ applies to both phases)
 - **rev 6** — T14 stopped claiming "both sinks" for a throwing provider (`factory` is null then, so only a
   writer could receive it); T12 asserts sink *content* only through the 4-arg overload, since the 1-arg
   overload's hardcoded `Console.Error` would need `Console.SetError` to observe.
-- **rev 7** — T14's throwing-provider clause reduced further to the thrown *type* alone: with the provider
-  throwing on the guard's first statement, `sink` never advances past `TextWriter.Null`, so no output is
-  observable through that overload at all. Revision marker and changelog corrected (the body had already
-  carried rev-5/6 changes while the header still said rev 4). Pack-script flags defined as composable.
+- **rev 7** — revision marker and changelog corrected (the body had already carried rev-5/6 changes while
+  the header still said rev 4); pack-script flags defined as composable; a stubborn phase-2 `T6/T7`
+  sentence finally removed.
+- **rev 8** — a reviewer implemented the surface verbatim and **ran** the specified test suite: 10 of 11
+  clauses passed, and the failure was a **production defect, not a test-wording problem**. Sharing one
+  `try` between `sink = Console.Error` and `factory = sp?.GetService(...)` meant a throwing provider
+  aborted before the sink was assigned, sending the diagnostic to `TextWriter.Null` — emitted *nowhere*,
+  at precisely the moment phase 2 auto-disables the plugin. Fixed with **separate guards, sink acquired
+  first**; measured, that makes all 11 clauses pass. Both convenience overloads also take an optional
+  `sink`, so content is observable in tests without `Console.SetError`; and the message must always name
+  `RgbVerifyCffi` (T3 asserts that string, which a phase-1-only wording would not have contained).
 **Precondition:** none. **Mergeable on its own.**
 
 ---
