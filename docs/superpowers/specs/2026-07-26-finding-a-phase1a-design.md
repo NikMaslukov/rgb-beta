@@ -464,8 +464,13 @@ T1–T4, T12, T14, T15, T16, T17.
 `ResolveNative` to use them — measured behaviour-preserving), `RGBPlugin.cs` (probe call site immediately after the `ctx` cast at `:30`, before
 `LoadConfiguration`; log-only), `BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata("RepoRoot", …)`),
 `.github/workflows/ci.yml` (Rust toolchain + `build-native.sh` staging in the test job, mirroring
-`release.yml:96-108`), and **`README.md`** — a short "startup diagnostic" note stating what the message
-means and that RGB sends fail closed while it is present.
+`release.yml:96-108`), and **`README.md`** — a new `### "RGB pre-sign verification library could not be loaded"` entry under the
+existing `## Troubleshooting` section (`README.md:268`), placed adjacent to `### Plugin not loading`
+(`:284`) since an operator hitting this will look there first. Content: what the startup error means, that
+**RGB sends fail closed while it is present** and receiving is unaffected, the reporting channel, and a
+cross-reference to `### RGB Send Intent Verification (pre-sign gate)` (`:240`), which already explains why
+a missing verifier must block sends. Keep it to a short entry — phase 2 owns the broader README rewrite
+(`:299` "Platform Support" and the build sections), so this must not pre-empt it.
 
 ⚠ **Documentation must NOT go to `CLAUDE.md`.** Verified: `CLAUDE.md` is **untracked** at HEAD
 (`git ls-files` returns nothing for it; it is not gitignored either) and contains live credentials, so a
