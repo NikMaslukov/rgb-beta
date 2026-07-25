@@ -445,7 +445,10 @@ The probe takes a mode so the two phases differ by one argument, not by two impl
 
 - **phase 1 — log-only:** catch `RgbNativeUnavailableException` and log it at error level, then continue.
   Satisfies the audit's literal "logs a loud, actionable error" clause with no package dependency, and
-  is safe to merge because sends already fail closed.
+  is safe to merge because sends already fail closed. A logger is reachable at this point — verified:
+  `LoadConfiguration` already obtains one the same way at `RGBPlugin.cs:89`
+  (`ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`), so the probe reuses
+  that pattern rather than introducing a new sink.
 - **phase 2 — hard-fail:** let it propagate. T13 asserts the phase-2 wiring propagates and the phase-1
   wiring does not, so the flip cannot be made silently or forgotten.
 
@@ -647,7 +650,10 @@ set, which rewrites `obj/project.assets.json` and `obj/*.nuget.g.props`. Inserte
 released `.btcpay` resolve from a throwaway cache. Same hazard for `Pack .btcpay` (`:143`).
 
 Guards are parsed, not grepped — a line-oriented grep is evadable by a multi-line
-`<PackageReference>` and silently passes when the file is missing:
+`<PackageReference>` and silently passes when the file is missing. The lockfile traversal below matches
+this repo's actual schema, verified against `packages.lock.json`:
+`{version, dependencies: {"<tfm>": {"<PackageId>": {type, requested, resolved, contentHash}}}}`, so
+serialising each entry and searching it catches a `-local` string in either `requested` or `resolved`.
 
 ```bash
 set -euo pipefail
