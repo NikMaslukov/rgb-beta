@@ -1114,6 +1114,13 @@
           "NBitcoin": "[10.0.5, )",
           "Newtonsoft.Json": "[13.0.4, )"
         }
+      },
+      "rgbrestorehelper": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.Bcl.Memory": "[9.0.16, )",
+          "RgbLib": "[0.3.0-beta.30, )"
+        }
       }
     }
   }

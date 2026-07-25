@@ -30,7 +30,6 @@ public interface IRgbLibService : IDisposable
     RgbInvoiceData DecodeInvoice(string invoiceString);
 
     Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default);
-    void RestoreBackup(string backupPath, string password, string targetDir);
 
     RgbKeys GenerateKeys(string network);
     RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network);

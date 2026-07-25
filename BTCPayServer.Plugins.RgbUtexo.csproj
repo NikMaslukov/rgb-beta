@@ -39,6 +39,10 @@
         <Content Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
         <EmbeddedResource Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
         <None Remove="BTCPayServer.Plugins.RgbUtexo.Tests\**" />
+        <Compile Remove="RgbRestoreHelper\**" />
+        <Content Remove="RgbRestoreHelper\**" />
+        <EmbeddedResource Remove="RgbRestoreHelper\**" />
+        <None Remove="RgbRestoreHelper\**" />
     </ItemGroup>
 
     <ItemDefinitionGroup>
@@ -83,5 +87,20 @@
     <ItemGroup>
         <InternalsVisibleTo Include="BTCPayServer.Plugins.RgbUtexo.Tests" />
     </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="RgbRestoreHelper/RgbRestoreHelper.csproj">
+            <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+        </ProjectReference>
+    </ItemGroup>
+
+    <Target Name="CopyRestoreHelper" AfterTargets="Build">
+        <ItemGroup>
+            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.dll" />
+            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.runtimeconfig.json" />
+            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.deps.json" />
+        </ItemGroup>
+        <Copy SourceFiles="@(HelperOut)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    </Target>
 
 </Project>

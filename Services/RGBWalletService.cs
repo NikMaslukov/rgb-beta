@@ -22,6 +22,8 @@ public class RGBWalletService : IRGBWalletService
     readonly ConcurrentDictionary<string, string> _addressCache = new();
     readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
     readonly SendLockCoordinator _sendCoordinator;
+    static readonly SemaphoreSlim _restoreGate = new(1, 1);
+    readonly RestoreExecutor _restoreExecutor;
 
     public RGBWalletService(
         IRgbLibService rgbLib,
@@ -31,7 +33,8 @@ public class RGBWalletService : IRGBWalletService
         RgbWalletSignerProvider signerProvider,
         CurrencyNameTable currencyNameTable,
         EventAggregator events,
-        ILogger<RGBWalletService> log)
+        ILogger<RGBWalletService> log,
+        RestoreExecutor restoreExecutor)
     {
         _rgbLib = rgbLib;
         _db = db;
@@ -41,6 +44,7 @@ public class RGBWalletService : IRGBWalletService
         _currencyNameTable = currencyNameTable;
         _events = events;
         _log = log;
+        _restoreExecutor = restoreExecutor;
         _sendCoordinator = new SendLockCoordinator(
             _sendLocks, SetNeedsRecoveryAsync, ClearNeedsRecoveryAsync, id => _rgbLib.UnloadWallet(id));
     }
@@ -516,132 +520,136 @@ public class RGBWalletService : IRGBWalletService
         var parentDir = Path.GetDirectoryName(walletDataDir)!;
         Directory.CreateDirectory(parentDir);
 
-        var stagingDir = Path.Combine(parentDir, $"{RestoreStagingPrefix}{wallet.Id}-{Guid.NewGuid():N}");
-
         // SECURITY: Backup file is validated before reaching native code:
         // - 5MB upload limit (controller [RequestSizeLimit])
         // - ZIP structure + entry validation (controller ValidateBackupFileHeader)
-        // - Post-extraction 50MB size cap (below)
-        // - Staging directory isolation: native restore writes to a staging dir,
-        //   only moved to final location on success. On timeout, the staging dir
-        //   is left for deferred cleanup at next startup — never deleted while
-        //   native code may still be writing.
-        // Remaining risk: malformed ZIP contents could exploit rgb-lib parser bugs.
-        // This requires admin authentication and is accepted risk — fuzzing the
-        // native decoder is upstream work (rgb-lib-c-sharp).
-        var restoreTask = Task.Run(() => _rgbLib.RestoreBackup(backupPath, password, stagingDir));
-        var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30), ct);
-        var completed = await Task.WhenAny(restoreTask, timeoutTask);
-        if (completed == timeoutTask)
-        {
-            _log.LogWarning("Backup restore timed out after 30 seconds — staging dir {Dir} left for deferred cleanup", stagingDir);
-            throw new InvalidOperationException("Backup restore timed out after 30 seconds");
-        }
-        await restoreTask;
-
-        var dirSize = new DirectoryInfo(stagingDir)
-            .EnumerateFiles("*", SearchOption.AllDirectories)
-            .Sum(f => f.Length);
-        if (dirSize > 50 * 1024 * 1024)
-        {
-            try { Directory.Delete(stagingDir, true); }
-            catch (Exception ex) { _log.LogDebug(ex, "Failed to clean up oversized staging dir {Dir}", stagingDir); }
+        // - Post-extraction size cap (configurable RestoreDiskCapBytes, below)
+        // The native restore runs in a separate killable child process (RestoreExecutor):
+        // a hung/oversized restore is terminated and the staging dir is deleted only once the
+        // child is confirmed reaped, else left for the startup sweep.
+        // The single-flight gate guards the expensive native restore and every persistent
+        // side effect (staging dir, Directory.Move, DB row); the cheap, side-effect-free key
+        // derivation and in-memory row build above are intentionally left outside it, so a
+        // rejected concurrent restore creates no staging dir and no wallet row.
+        var entered = await _restoreGate.WaitAsync(TimeSpan.Zero, ct);
+        if (!entered)
             throw new InvalidOperationException(
-                $"Restored wallet data exceeds size limit ({dirSize / 1024 / 1024}MB > 50MB)");
-        }
-
-        var expectedFingerprint = wallet.MasterFingerprint?.ToLowerInvariant();
-        var stagingFingerprintDirs = Directory.GetDirectories(stagingDir)
-            .Select(d => Path.GetFileName(d).ToLowerInvariant())
-            .Where(name => name.Length == 8 && name.All(c => "0123456789abcdef".Contains(c)))
-            .ToList();
-
-        if (stagingFingerprintDirs.Count > 0 && !string.IsNullOrEmpty(expectedFingerprint)
-            && !stagingFingerprintDirs.Contains(expectedFingerprint))
-        {
-            _log.LogError("Mnemonic/backup mismatch: user mnemonic derives fingerprint {Expected} but backup contains {Found}",
-                expectedFingerprint, string.Join(",", stagingFingerprintDirs));
-            try { Directory.Delete(stagingDir, true); }
-            catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after fingerprint mismatch"); }
-            throw new InvalidOperationException(
-                "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
-        }
-
+                "Another wallet restore is already in progress. Try again once it completes.");
         try
         {
-            Directory.Move(stagingDir, walletDataDir);
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Failed to move staging dir {Staging} to {Final}", stagingDir, walletDataDir);
-            try { Directory.Delete(stagingDir, true); }
-            catch { }
-            throw new InvalidOperationException("Failed to finalize restored wallet data");
-        }
+            var stagingDir = Path.Combine(parentDir, $"{RestoreStagingPrefix}{wallet.Id}-{Guid.NewGuid():N}");
 
-        // Born-quarantined: hold the send lock BEFORE the row becomes visible so a racing send
-        // both blocks and observes NeedsRecovery=true; the reconciling refresh clears it on success.
-        var sendLock = _sendLocks.GetOrAdd(wallet.Id, _ => new SemaphoreSlim(1, 1));
-        await sendLock.WaitAsync(ct);
-        try
-        {
-            try
+            await _restoreExecutor.ExecuteAsync(backupPath, stagingDir, password, ct);
+
+            var dirSize = new DirectoryInfo(stagingDir)
+                .EnumerateFiles("*", SearchOption.AllDirectories)
+                .Sum(f => f.Length);
+            var diskCap = _cfg.RestoreDiskCapBytes;
+            if (dirSize > diskCap)
             {
-                await using var ctx = _db.CreateContext();
-                ctx.RGBWallets.Add(wallet);
-                await ctx.SaveChangesAsync(ct);
-            }
-            catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
-                || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
-            {
-                try { Directory.Delete(walletDataDir, true); }
-                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
-                throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
-            }
-            catch
-            {
-                try { Directory.Delete(walletDataDir, true); }
-                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
-                throw;
+                try { Directory.Delete(stagingDir, true); }
+                catch (Exception ex) { _log.LogDebug(ex, "Failed to clean up oversized staging dir {Dir}", stagingDir); }
+                throw new InvalidOperationException(
+                    $"Restored wallet data exceeds size limit ({dirSize / 1024 / 1024}MB > {diskCap / 1024 / 1024}MB)");
             }
 
-            try
+            var expectedFingerprint = wallet.MasterFingerprint?.ToLowerInvariant();
+            var stagingFingerprintDirs = Directory.GetDirectories(stagingDir)
+                .Select(d => Path.GetFileName(d).ToLowerInvariant())
+                .Where(name => name.Length == 8 && name.All(c => "0123456789abcdef".Contains(c)))
+                .ToList();
+
+            if (stagingFingerprintDirs.Count > 0 && !string.IsNullOrEmpty(expectedFingerprint)
+                && !stagingFingerprintDirs.Contains(expectedFingerprint))
             {
-                await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
-                await _rgbLib.GetAddressAsync(wallet.Id, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
-                try
-                {
-                    await using var ctx = _db.CreateContext();
-                    ctx.RGBWallets.Remove(wallet);
-                    await ctx.SaveChangesAsync(ct);
-                }
-                catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
-                try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
-                try { Directory.Delete(walletDataDir, true); }
-                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
+                _log.LogError("Mnemonic/backup mismatch: user mnemonic derives fingerprint {Expected} but backup contains {Found}",
+                    expectedFingerprint, string.Join(",", stagingFingerprintDirs));
+                try { Directory.Delete(stagingDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after fingerprint mismatch"); }
                 throw new InvalidOperationException(
                     "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
             }
 
-            _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
-
             try
             {
-                await _rgbLib.RefreshAsync(wallet.Id, ct);
-                await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
-                await ClearNeedsRecoveryAsync(wallet.Id, ct);
+                Directory.Move(stagingDir, walletDataDir);
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "Post-restore sync failed for wallet {Id} — left quarantined", wallet.Id);
-                try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+                _log.LogError(ex, "Failed to move staging dir {Staging} to {Final}", stagingDir, walletDataDir);
+                try { Directory.Delete(stagingDir, true); }
+                catch { }
+                throw new InvalidOperationException("Failed to finalize restored wallet data");
             }
+
+            // Born-quarantined: hold the send lock BEFORE the row becomes visible so a racing send
+            // both blocks and observes NeedsRecovery=true; the reconciling refresh clears it on success.
+            var sendLock = _sendLocks.GetOrAdd(wallet.Id, _ => new SemaphoreSlim(1, 1));
+            await sendLock.WaitAsync(ct);
+            try
+            {
+                try
+                {
+                    await using var ctx = _db.CreateContext();
+                    ctx.RGBWallets.Add(wallet);
+                    await ctx.SaveChangesAsync(ct);
+                }
+                catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
+                    || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    try { Directory.Delete(walletDataDir, true); }
+                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
+                    throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
+                }
+                catch
+                {
+                    try { Directory.Delete(walletDataDir, true); }
+                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
+                    throw;
+                }
+
+                try
+                {
+                    await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
+                    await _rgbLib.GetAddressAsync(wallet.Id, ct);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
+                    try
+                    {
+                        await using var ctx = _db.CreateContext();
+                        ctx.RGBWallets.Remove(wallet);
+                        await ctx.SaveChangesAsync(ct);
+                    }
+                    catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
+                    try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+                    try { Directory.Delete(walletDataDir, true); }
+                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
+                    throw new InvalidOperationException(
+                        "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
+                }
+
+                _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
+
+                try
+                {
+                    await _rgbLib.RefreshAsync(wallet.Id, ct);
+                    await _rgbLib.GetBtcBalanceAsync(wallet.Id, ct, sync: true);
+                    await ClearNeedsRecoveryAsync(wallet.Id, ct);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex, "Post-restore sync failed for wallet {Id} — left quarantined", wallet.Id);
+                    try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+                }
+            }
+            finally { sendLock.Release(); }
         }
-        finally { sendLock.Release(); }
+        finally
+        {
+            _restoreGate.Release();
+        }
 
         _log.LogInformation("restored wallet {Id} from backup for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
         return wallet;

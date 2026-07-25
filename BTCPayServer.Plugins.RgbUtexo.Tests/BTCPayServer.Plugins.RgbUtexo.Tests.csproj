@@ -22,5 +22,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../BTCPayServer.Plugins.RgbUtexo.csproj" />
+    <ProjectReference Include="../RgbRestoreHelper/RgbRestoreHelper.csproj" />
   </ItemGroup>
 </Project>

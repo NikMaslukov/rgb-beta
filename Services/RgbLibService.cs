@@ -31,7 +31,6 @@ public class RgbLibService : IRgbLibService
     readonly MethodInfo _createUtxosEndMethod;
     readonly MethodInfo _refreshMethod;
     readonly MethodInfo _listTransactionsMethod;
-    readonly MethodInfo _restoreBackupMethod;
     readonly MethodInfo _sendBeginMethod;
     readonly MethodInfo _sendEndMethod;
 
@@ -61,7 +60,6 @@ public class RgbLibService : IRgbLibService
         _createUtxosEndMethod = _nativeMethodsType.GetMethod("rgblib_create_utxos_end")!;
         _refreshMethod = _nativeMethodsType.GetMethod("rgblib_refresh")!;
         _listTransactionsMethod = _nativeMethodsType.GetMethod("rgblib_list_transactions")!;
-        _restoreBackupMethod = _nativeMethodsType.GetMethod("rgblib_restore_backup")!;
         _sendBeginMethod = _nativeMethodsType.GetMethod("rgblib_send_begin")!;
         _sendEndMethod = _nativeMethodsType.GetMethod("rgblib_send_end")!;
     }
@@ -615,37 +613,6 @@ public class RgbLibService : IRgbLibService
         }, ct);
 
         return tempPath;
-    }
-
-    public void RestoreBackup(string backupPath, string password, string targetDir)
-    {
-        var args = new object?[] { backupPath, password, targetDir };
-        var result = _restoreBackupMethod.Invoke(null, args);
-
-        if (result == null)
-            throw new RgbLibException("restore_backup returned null");
-
-        var cResultType = result.GetType();
-        var isSuccessProp = cResultType.GetProperty("IsSuccess");
-        if (isSuccessProp == null)
-            throw new RgbLibException("restore_backup: cannot read result type");
-
-        var isSuccess = (bool)(isSuccessProp.GetValue(result) ?? false);
-        if (!isSuccess)
-        {
-            var errorMsg = "restore_backup failed";
-            try
-            {
-                var getError = cResultType.GetMethod("GetError");
-                if (getError != null)
-                    errorMsg = getError.Invoke(result, null)?.ToString() ?? errorMsg;
-            }
-            catch (Exception ex)
-            {
-                _log.LogDebug(ex, "Could not extract error from CResult");
-            }
-            throw new RgbLibException(errorMsg);
-        }
     }
 
     [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]

@@ -45,6 +45,8 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<MnemonicProtectionService>();
         services.AddSingleton<RgbWalletSignerProvider>();
         services.AddHostedService(sp => sp.GetRequiredService<RgbWalletSignerProvider>());
+        services.AddSingleton<IRestoreProcessRunner, RestoreProcessRunner>();
+        services.AddSingleton<RestoreExecutor>();
         services.AddSingleton<RGBWalletService>();
         services.AddSingleton<IRGBWalletService>(sp => sp.GetRequiredService<RGBWalletService>());
         services.AddSingleton<RGBPaymentMethodHandler>();

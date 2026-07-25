@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using BTCPayServer.Plugins.RgbUtexo.Services;
 
 namespace BTCPayServer.Plugins.RgbUtexo;
 
@@ -60,6 +61,32 @@ public class RGBConfiguration
 
     [JsonPropertyName("allow_private_transport_endpoints")]
     public bool AllowPrivateTransportEndpoints { get; set; }
+
+    [JsonPropertyName("restore_timeout_seconds")]
+    public int RestoreTimeoutSeconds { get; set; } = 30;
+
+    [JsonPropertyName("restore_disk_cap_bytes")]
+    public long RestoreDiskCapBytes { get; set; } = 52_428_800;
+
+    [JsonPropertyName("restore_ram_cap_bytes")]
+    public long RestoreRamCapBytes { get; set; } = 536_870_912;
+
+    [JsonPropertyName("restore_cpu_limit_seconds")]
+    public int RestoreCpuLimitSeconds { get; set; } = 30;
+
+    [JsonPropertyName("restore_poll_ms")]
+    public int RestorePollMs { get; set; } = 500;
+
+    [JsonPropertyName("restore_reap_grace_seconds")]
+    public int RestoreReapGraceSeconds { get; set; } = 5;
+
+    public RestoreLimits ToRestoreLimits() => new(
+        Timeout: TimeSpan.FromSeconds(RestoreTimeoutSeconds),
+        DiskCapBytes: RestoreDiskCapBytes,
+        RamCapBytes: RestoreRamCapBytes,
+        CpuLimit: TimeSpan.FromSeconds(RestoreCpuLimitSeconds),
+        Poll: TimeSpan.FromMilliseconds(RestorePollMs),
+        ReapGrace: TimeSpan.FromSeconds(RestoreReapGraceSeconds));
 
     public RGBConfiguration() { }
 
