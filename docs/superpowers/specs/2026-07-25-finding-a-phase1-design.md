@@ -5,7 +5,7 @@
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `docs/superpowers/specs/2026-07-25-finding-a-native-packaging-design.md` — problem statement, threat model, sequencing, and the
 open decisions live there and are not repeated here.
-**Revision:** 4 (split out of the parent spec at its revision 11; the parent's rounds 1–9 review history
+**Revision:** 7 (split out of the parent spec at its revision 11; the parent's rounds 1–9 review history
 applies to both phases)
 
 **Phase-1 gate changelog**
@@ -20,6 +20,19 @@ applies to both phases)
   single-argument overload with a hostile provider; T15's Roslyn rule keys on the `ExpressionStatement`
   (measured: keying on the invocation node matched nothing); call-site bullets aligned to the real
   overloads.
+- **rev 5** — optional `probe`/`hasExport` seams added to both convenience overloads: without them T12 and
+  T14 were unsatisfiable, because the hardwired real probe **succeeds** wherever the native is staged, so a
+  hostile provider is swallowed and no failure occurs. `DefaultProbe`/`DefaultHasExport` declared as static
+  **methods** (a `static readonly` field's type initializer would run outside the guard). The sink is now
+  acquired inside the `try` with a `TextWriter.Null` fallback. Verified: `probe ?? DefaultProbe`
+  method-group null-coalescing compiles.
+- **rev 6** — T14 stopped claiming "both sinks" for a throwing provider (`factory` is null then, so only a
+  writer could receive it); T12 asserts sink *content* only through the 4-arg overload, since the 1-arg
+  overload's hardcoded `Console.Error` would need `Console.SetError` to observe.
+- **rev 7** — T14's throwing-provider clause reduced further to the thrown *type* alone: with the provider
+  throwing on the guard's first statement, `sink` never advances past `TextWriter.Null`, so no output is
+  observable through that overload at all. Revision marker and changelog corrected (the body had already
+  carried rev-5/6 changes while the header still said rev 4). Pack-script flags defined as composable.
 **Precondition:** none. **Mergeable on its own.**
 
 ---
@@ -133,8 +146,11 @@ Update` is inert absent such a reference.)
 
 ### 2.2 Build + pack script (new) — `scripts/pack-rgbverify.sh`
 
-Interface — plain shell flags, no MSBuild-style arguments: `--stage`, `--pack-only`,
-`--require-all-rids`, `--version <v>`. Phases:
+Interface — plain shell flags, no MSBuild-style arguments: `--stage`, `--pack-only`, `--require-all-rids`,
+`--version <v>`. `--stage` and `--pack-only` are **independent, composable switches**, not mutually
+exclusive modes: passing both runs staging then packing (what §4.3 does), passing one runs only that part
+(the assemble job passes `--pack-only`, since its natives arrive as CI artifacts), and passing neither
+defaults to both. Phases:
 
 1. **Stage** into `native/rgb-verify/runtimes/<rid>/native/`: host RID via
    `native/rgb-verify/build-native.sh` (unchanged, still the single build entry point); cross RIDs via
@@ -508,7 +524,7 @@ written before phase-2's changes.
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` (never the provider's exception) and reports to the `TextWriter`. **Not** "both sinks" in that case: a throwing provider leaves `factory` null by construction, so only the writer can receive it — asserting both would be unsatisfiable — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — **never** the provider's exception. That clause asserts the thrown type only: the provider throws on the first statement inside the guard, so `sink` never advances past `TextWriter.Null` and `factory` stays null, and the 1-arg overload exposes neither for inspection. Asserting sink or logger content there would be unsatisfiable by construction — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
 | T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
 Tests reading repo files (T8, T9, T10, T15) locate the repo root from an
