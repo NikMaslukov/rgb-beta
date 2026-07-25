@@ -290,10 +290,10 @@ exposure is correspondingly fleet-wide. Placement after the check is still corre
 stays correct if a null path is ever added), but the earlier rationale — "an unconfigured host never runs
 the probe" — was false and is withdrawn.
 
-- **phase 1 — log-only:** `RgbNativeSelfCheck.VerifyOrLog(logger)`. Satisfies the audit's literal "logs a
+- **phase 1 — log-only:** `RgbNativeSelfCheck.VerifyOrLog(ctx.BootstrapServices)`. Satisfies the audit's literal "logs a
   loud, actionable error" clause with no package dependency, and is safe to merge because sends already
   fail closed.
-- **phase 2 — hard-fail (specified in the phase-2 spec, not implemented here):** `RgbNativeSelfCheck.Verify()`, which **logs to both sinks and then throws**. It
+- **phase 2 — hard-fail (specified in the phase-2 spec, not implemented here):** `RgbNativeSelfCheck.Verify(ctx.BootstrapServices)`, which **logs to both sinks and then throws**. It
   must log itself rather than relying on `PluginManager`'s catch (`PluginManager.cs:313`) to surface the
   message, so the audit's "logs a loud, actionable error" clause is satisfied by our own code in the end
   state, not by host behaviour we do not control. T14 asserts this. T12 pins `VerifyOrLog`'s behaviour and T15 pins that `Execute` actually calls it; T13 (phase 2) pins the flip, so it
@@ -305,9 +305,27 @@ way `LoadConfiguration` already does at `RGBPlugin.cs:89`
 `VerifyOrLog`, not in the argument expression at the call site. If it were evaluated at the call site it
 would sit outside the catch-all, and a throwing `GetService`/`CreateLogger` would escape `Execute` and
 trigger the `disable:` + restart that phase 1 exists to prevent. The call site therefore passes
-`ctx.BootstrapServices` (a property access) and `VerifyOrLog` resolves, formats, and reports entirely
-within its own guard. Writing to the sink is itself wrapped, so a failing `TextWriter` cannot throw out
-of the probe either.
+`ctx.BootstrapServices` (verified a plain auto-property on `PluginServiceCollection` that cannot throw)
+and `VerifyOrLog` resolves, formats, and reports entirely within its own guard. Writing to the sink is
+itself wrapped, so a failing `TextWriter` cannot throw out of the probe either.
+
+**The single-argument overload must wrap the resolution in its own `try`.** It is the only place
+`GetService<ILoggerFactory>()` / `CreateLogger` runs, and the natural expression-bodied delegation —
+`=> VerifyOrLog(sp?.GetService<ILoggerFactory>(), Console.Error, probe, hasExport)` — evaluates that call
+in the *argument list*, outside every guard, so a throwing service provider escapes `Execute` and
+triggers the `disable:` + restart cascade. Required shape:
+
+```
+internal static bool VerifyOrLog(IServiceProvider? sp)
+{
+    ILoggerFactory? factory = null;
+    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* never let diagnostics break startup */ }
+    return VerifyOrLog(factory, Console.Error, DefaultProbe, DefaultHasExport);
+}
+```
+
+The same applies to `Verify(IServiceProvider?)`, except that it rethrows the probe failure by design —
+it must still not surface a *logger-resolution* failure in its place.
 
 A null-only fallback would be the wrong design here, for a reason worth stating because it inverts the
 earlier rationale: BTCPay *does* register a real factory on the plugin-load path
@@ -342,7 +360,7 @@ Release (`:186`), so using it pre-merge would tag unmerged code.
 
 Every RID therefore has CI provenance; the production trust core is not a developer's cross-build.
 
-**`ci.yml`** — in the merged state a plain restore suffices (the package is on nuget.org) and the test
+**`ci.yml`** — phase 2 will make a plain restore sufficient once the package is on nuget.org and the test
 job then has the native (G4). No interim steps are ever committed (the parent's sequencing section).
 
 Phase 1 makes **no** change to `ci.yml` or `release.yml`.
@@ -437,7 +455,7 @@ written before phase-2's changes.
 | T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected fakes for all four parameters, probe+export reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
 | T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every searched candidate path, and `RgbVerifyCffi` | same |
 | T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
-| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2.4 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger` and a throwing `TextWriter` also return `false` rather than propagating** (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
+| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2.4 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the single-argument overload specifically — an `IServiceProvider` whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
@@ -505,7 +523,7 @@ if unreferenced.
 `scripts/pack-rgbverify.sh`, `scripts/verify-native-loads-debian.sh`,
 `.github/workflows/pack-native.yml`,
 `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`), test file(s) for
-T1–T4, T8–T10, T12, T14.
+T1–T4, T8–T10, T12, T14, T15.
 
 **Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (packaging-glob `Remove`s only),
 `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths` (deduped),
