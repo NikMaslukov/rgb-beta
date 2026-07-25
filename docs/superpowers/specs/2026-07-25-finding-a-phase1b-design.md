@@ -343,17 +343,17 @@ phase nothing references `RgbVerifyCffi`, so restoring the real projects would b
 
 ## 5. Rollback
 
-Remove the probe call site and the new files; revert the `Directory.Build.props` exclusion, the
-`.gitignore` entry, and the `Services/RgbVerifyNative.cs` extractions. No data migration, no schema
-change, no persisted state, no wire-format change. The packaging project, scripts and workflow are inert
-if unreferenced.
+Remove the packaging project, the two scripts and `pack-native.yml`; revert the packaging-glob `Remove`s,
+the `Directory.Build.props` exclusion, the `.gitignore` entry and the `README.md` note. Phase 1a's probe,
+its `RgbVerifyNative` extractions and its call site are **not** this phase's to revert — an earlier draft
+claimed them, contradicting §6's ownership statement.
 
 ---
 
 ## 6. Files touched (phase 1b)
 
 Phase 1a owns `Services/RgbNativeSelfCheck.cs`, the `Services/RgbVerifyNative.cs` extraction, the
-`RGBPlugin.cs` call site, the Tests-csproj `AssemblyMetadata`, and tests T1–T4/T12/T14/T15/T16. None of
+`RGBPlugin.cs` call site, the Tests-csproj `AssemblyMetadata`, and tests T1–T4, T12, T14, T15, T16 and T17. None of
 them are restated here; an earlier draft claimed both, giving two specs duplicate ownership of the same
 files.
 
@@ -362,8 +362,8 @@ files.
 `.github/workflows/pack-native.yml`, test file(s) for P1–P2.
 
 **Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (packaging-glob `Remove`s only),
-`Directory.Build.props` (`:10` exclusion), `.gitignore` (`local-nuget-feed/`), `CLAUDE.md` (the pack
-workflow and the glibc floor).
+`Directory.Build.props` (`:10` exclusion), `.gitignore` (`local-nuget-feed/`), `README.md` (the pack workflow and the glibc floor). **Not `CLAUDE.md`** — verified untracked at HEAD and
+credential-bearing, so it cannot carry a tracked deliverable.
 
 **Deliberately unchanged:** `nuget.config`, both `packages.lock.json`, `.github/workflows/ci.yml`,
 `.github/workflows/release.yml`, `BTCPayServer.Plugins.RgbUtexo.slnx` (the packaging project stays out of

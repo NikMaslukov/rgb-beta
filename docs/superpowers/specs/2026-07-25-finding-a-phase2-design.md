@@ -5,7 +5,10 @@
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `docs/superpowers/specs/2026-07-25-finding-a-native-packaging-design.md` — problem statement, threat model, sequencing, and the
 open decisions live there and are not repeated here.
-**Phase 1 spec:** `docs/superpowers/specs/2026-07-25-finding-a-phase1-design.md` — must be merged first.
+**Preconditions (two separate specs, only one of which is S3-blocked):**
+`2026-07-26-finding-a-phase1a-design.md` — the probe, T14 and the Tests-csproj `AssemblyMetadata`; merges
+independently of S3. `2026-07-25-finding-a-phase1b-design.md` — produces the package; useful only once S3
+is scheduled. (An earlier header named `…-phase1-design.md`, which no longer exists — phase 1 was split.)
 **Revision:** 1 (split out of the parent spec at revision 11; the parent's rounds 1–9 review history applies)
 
 > **HARD PRECONDITION — S3.** This phase cannot be implemented, merged, or verified until the org has
@@ -31,7 +34,16 @@ enforcing this — no test or CI check can.
 
 1. add the `PackageReference`; **remove** `<None Include="native/rgb-verify/runtimes/**">` (`:79-84`);
 2. regenerate both lockfiles against nuget.org under strict pinning;
-3. flip the probe from log-only to hard-fail (one call-site change);
+3. flip the probe from log-only to hard-fail. **This is not "one call-site change" — it invalidates two
+   statements phase 1a's message makes, and three artefacts pin them:**
+   - *"Receiving and the rest of the plugin are unaffected"* becomes **false**: once `Execute` throws,
+     `PluginManager` disables the whole plugin, so receiving stops too.
+   - The *"no build containing it exists — a known packaging defect"* branch becomes **false**: after S3 a
+     build containing the native does exist, so the operator remediation changes to "upgrade to a plugin
+     build that ships it".
+   So this step must also amend §2's message content, the T3/T4/T14 assertions that pin the old wording,
+   and the `README.md` troubleshooting entry 1a added. Also claim the audit's process-fix (iii) here —
+   *"a startup self-test that refuses RGB sends"* — which 1a explicitly does not close;
 4. bump the plugin version in **both** places `release.yml` validates a tag against —
    `btcpay.plugin.json:6` and `BTCPayServer.Plugins.RgbUtexo.csproj:9` (both `1.0.10` today) — or the
    release job's tag check rejects the tag (`release.yml:61-85`);
@@ -107,9 +119,10 @@ restores with `NUGET_PACKAGES` pointed at a temp directory and a specific proper
 publish (`:117-124`) it would make the released `.btcpay` resolve from a throwaway cache. Keep the
 existing `publish-out` native check (`:136-140`). Remove `:96-108` and `:93-94`.
 
-**`ci.yml`** — no change needed: once the package is on nuget.org the existing restore supplies the
-native, which also closes finding-B codex follow-up #1 (the binding smoke test no longer `DllNotFound`s
-on a clean checkout).
+**`ci.yml`** — phase 1a added a Rust toolchain + `build-native.sh` staging step to the test job (and
+thereby closed finding-B codex follow-up #1, which this spec previously claimed). Once the package is on
+nuget.org that staging is **dead** and should be removed here, exactly as `release.yml:93-108` is —
+restore then supplies the native.
 
 ### 2.4 Documentation
 
@@ -360,8 +373,10 @@ persisted state, no wire-format change.
 `<Version>` `:9`; `WHY` comment on `:12` recording that `CopyLocalLockFileAssemblies=true` is
 load-bearing), `RGBPlugin.cs` (flip to `Verify()`), `btcpay.plugin.json` (`:6`),
 `packages.lock.json` ×2 (regenerated against nuget.org), `.github/workflows/release.yml`,
-`CLAUDE.md`, `README.md`, `.github/README.md`, `audit-july-22-conclusions.md`.
+`README.md` (including the troubleshooting entry 1a added, which this phase must correct),
+`.github/README.md`, `audit-july-22-conclusions.md`. **Not `CLAUDE.md`** — verified untracked at HEAD and
+credential-bearing, so it cannot carry a tracked deliverable.
 
-**Deliberately unchanged:** `nuget.config`, `.github/workflows/ci.yml`, `native/rgb-verify/src/**`,
+**Deliberately unchanged:** `nuget.config`, `native/rgb-verify/src/**`,
 `native/rgb-verify/build-native.sh`, `native/rgb-verify/.gitignore`, `Services/RgbIntentVerifier.cs`,
 `Services/RGBWalletService.cs`, `Services/MemoryWalletSigner.cs`, `Services/RgbPsbtInspector.cs`.
