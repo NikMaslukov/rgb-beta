@@ -168,8 +168,20 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   assembly declares **six** `[DllImport("rgblibcffi")]` entries at `Services/RgbLibService.cs:618-640`.
   So the resolver is consulted for rgb-lib's P/Invokes as well. Without the guard, a rewritten resolver
   falls through to the shared `NativeFileName()`-based loop and hands rgb-lib calls an **rgbverifycffi**
-  handle — `EntryPointNotFound` across the entire wallet path, i.e. a far worse regression than the bug
-  this phase diagnoses. T17 guards it.
+  handle.
+
+  **Measured, not reasoned** — a two-native replica (one assembly, a `RgbVerifyNative`-shaped resolver
+  plus a second class P/Invoking a different library, mirroring `RgbLibService`):
+
+  ```
+  guard present:  verify_answer() = 11    rgblib_answer() = 22
+  guard removed:  verify_answer() = 11    rgblib THREW EntryPointNotFoundException
+                                          "Unable to find an entry point named 'rgblib_answer'"
+  ```
+
+  So the consequence is exactly as stated: the gate keeps working while **every rgb-lib entry point
+  disappears** — the whole wallet path, a far worse regression than the bug this phase diagnoses, and one
+  that would look like "the plugin is broken" rather than "the native is missing". T17 guards it.
 - **`ResolveNative` itself is widened to `internal`.** It is private today (`:17`, no access modifier) and
   `InternalsVisibleTo` (`csproj:88`) does not reach private members, so T17 could not invoke it at all —
   the same "asserts behaviour on a private member" defect that already killed T1's first draft and two of
