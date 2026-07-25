@@ -356,8 +356,11 @@ run, and never said what breaks. Required order:
      and the message must say exactly that: the self-check failed, naming the exception type, and it must
      **not** fabricate one of the other diagnoses. An earlier draft required "the full token set" here,
      which is unsatisfiable without inventing a packaging-defect claim the code has no evidence for.
-     Required tokens: the two universal lines, `self-check failed`, the exception type name, and the
-     reporting channel — no state-specific token from states 1–3. An
+     Required tokens: the two universal lines, `self-check failed`, the exception type name, the reporting
+     channel and `build-native.sh` — and no state-specific token from states 1–3. (`build-native.sh` is
+     developer remediation, not a searched path, so it belongs here too; an earlier draft excluded it from
+     state 5, which was unenforceable — it is not a state-specific token, so no test asserted its absence
+     and an implementation emitting it stayed green either way.) An
      earlier draft branched on two states only, so an implementer following it literally would emit the
      "known packaging defect" line for an ABI-drifted native — the same misdiagnosis the branch exists to
      prevent, surviving in the one state nobody enumerated. T4 asserts this branch.
@@ -390,7 +393,7 @@ exact substrings are normative:
 | `is the wrong version` + `expected symbol` | missing-export only |
 | `self-check failed` + the exception type name | state 5 (probe threw) only |
 | `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` | every failure state |
-| `build-native.sh` | states 1–3 (omitted in state 5, where no path was searched) |
+| `build-native.sh` | every failure state, including state 5 |
 
 Each state-specific token must be **absent** from the other three failure states — that mutual exclusion is what
 makes the branch assertions non-vacuous, and every test that asserts a state must assert both the tokens
