@@ -414,6 +414,14 @@ passes on the commit that introduces it, and exists to fail later if resolver/pr
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
 
+**Standing rule: a signature change moves as a unit.** Twice now a parameter has been added to one member
+and not to the delegate, default, or call sites that carry it — rev 5's optional seams and rev 10's
+`existedButFailed`, the latter caught only because a reviewer compiled the sketch and hit `CS7036`. When
+any signature in §2 changes, every surface in the chain changes in the same edit: the producer, the
+`NativeProbe` delegate, `DefaultProbe`/`DefaultHasExport`, both convenience overloads, the documented
+binding lambdas, and any test clause that consumes the new value. A partial widening is not a smaller
+change — it is a spec that does not compile.
+
 **Standing rule for every test clause in this spec — five separate clauses have violated it.** A clause may only
 assert against a member reachable from the Tests assembly: `public`, or `internal` **and declared anywhere
 in §2** — the class sketch and the extraction list both count (`InternalsVisibleTo` at `csproj:88` reaches
