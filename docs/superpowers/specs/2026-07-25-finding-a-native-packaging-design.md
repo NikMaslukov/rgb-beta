@@ -3,6 +3,7 @@
 **Date:** 2026-07-25 · **Branch:** `fix/sqlite-vuln` · **Base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
+**Revision:** 2 — rewritten after spec-gate round 1 (see §10 for what changed and why)
 
 ---
 
@@ -21,30 +22,34 @@ the first RGB send hits `DllNotFoundException` inside the gate. The gate fails c
 asset send fails in production**. Nothing is silently signed — the trust invariant holds — but the
 plugin is unusable for sends. This is very likely the real cause of the demo-server send failures.
 
-**Why this was not caught:** on a developer machine that has run `build-native.sh`, the gitignored
-`runtimes/` tree *is* populated, so a local `dotnet publish` produces a correct-looking output
-containing the native. Verification on such a machine is meaningless. `release.yml` also passes
-because it explicitly builds the native first (`.github/workflows/release.yml:96-106`) — it is not
-Plugin-Builder-equivalent.
+**Why this was not caught.** On a developer machine that has run `build-native.sh`, the gitignored
+`runtimes/` tree *is* populated, so a local `dotnet publish` produces a correct-looking output. The
+verification was performed against machine-local state that does not exist in a fresh clone.
+`release.yml` also passes because it explicitly builds the native first
+(`.github/workflows/release.yml:96-106`) — it is not Plugin-Builder-equivalent.
 
-**Verifiable reproduction of the defect at HEAD:**
+**This failure mode generalises, and the spec must not repeat it.** Any acceptance check for this fix
+that reads machine-local state is worthless. There are three such states, not one:
 
-```bash
-git clean -dfx native/rgb-verify/runtimes           # what a fresh clone looks like
-dotnet publish BTCPayServer.Plugins.RgbUtexo.csproj -c Release -o /tmp/pubA \
-  -p:StaticWebAssetsEnabled=false
-find /tmp/pubA -iname '*rgbverifycffi*'             # today: EMPTY  ⇒ the finding
-```
+1. the gitignored `native/rgb-verify/runtimes/` staging tree,
+2. the NuGet **global-packages cache** (`~/.nuget/packages`) — a warm cache resolves a package with
+   no reachable source at all,
+3. a local NuGet **folder feed**.
 
-This exact command is the acceptance gate for the fix (§7.4).
+The acceptance gate in §7.4 neutralises all three. Empirically confirmed during this design: with a
+cold cache (`NUGET_PACKAGES` pointed at an empty dir) a nonexistent folder source fails restore with
+`NU1301`, whereas with a warm cache the same configuration restores successfully — i.e. cache warmth
+alone flips the result.
+
+**Verifiable reproduction of the defect at base HEAD:** see §7.4; at `04c1781` the gate fails.
 
 ### Secondary defect closed by the same change
 
 `ci.yml`'s test job never stages the native (`.github/workflows/ci.yml:43-60`), so
 `RgbVerifyBindingTests.NativeDecodeInvoice_Malformed_ThrowsThroughFreePath`
-(`BTCPayServer.Plugins.RgbUtexo.Tests/RgbVerifyBindingTests.cs:67-72`) throws `DllNotFound` on a
-clean checkout. This is finding-B codex follow-up #1. Once the native arrives via a package, CI gets
-it from restore.
+(`BTCPayServer.Plugins.RgbUtexo.Tests/RgbVerifyBindingTests.cs:67-72`) throws `DllNotFound` on a clean
+checkout. This is finding-B codex follow-up #1. Once the native arrives via a package, CI gets it from
+restore.
 
 ---
 
@@ -52,24 +57,24 @@ it from restore.
 
 **Goals**
 
-- G1. The artifact produced by `dotnet publish` **with no custom native build step** contains
-  `runtimes/linux-x64/native/librgbverifycffi.so`.
-- G2. A missing or unloadable gate native is detected **at plugin startup** with a loud, actionable
+- G1. The artifact produced by `dotnet publish` **with no custom native build step, a cold NuGet
+  cache, and no local feed** contains `runtimes/linux-x64/native/librgbverifycffi.so`.
+- G2. A gate native that cannot be loaded is detected **at plugin startup** with a loud, actionable
   error, not per-send.
-- G3. An automated gate proves G1 on a *clean* `runtimes/` tree, so this defect cannot silently
+- G3. An automated gate proves G1 under those isolation conditions, so this defect cannot silently
   regress.
 - G4. CI's `dotnet test` obtains the native from restore (closes finding-B follow-up #1).
-- G5. No native binaries or `.nupkg` blobs are committed to git.
+- G5. No native binaries and no `.nupkg` blobs are committed to git.
+- G6. The **committed** repository state is the **final** state: sources = nuget.org only, strict
+  lockfile pinning intact. No interim mechanism is merged.
 
 **Non-goals**
 
 - N1. Any change to gate logic, the Rust verifier's verification behaviour, `RgbIntentVerifier`,
-  `RGBWalletService.RunIntentGateAsync`, or any signing path. This is a delivery fix only.
-- N2. `win-x64` and `linux-arm64` natives. BTCPay production is linux-x64; `windows-gnu` is finicky
-  (see `CLAUDE.md`). Out of scope.
-- N3. Automating the nuget.org publish. EMU cannot publish; that step is manual and org-owned (§6).
-- N4. Reproducible/byte-identical Rust builds. Out of reach for this toolchain; §5.2 handles the
-  consequence instead.
+  `RGBWalletService.RunIntentGateAsync`, or any signing path. Delivery fix only.
+- N2. `win-x64` and `linux-arm64` natives. BTCPay production is linux-x64. Out of scope.
+- N3. Automating the nuget.org publish. EMU cannot publish; the push is manual and org-owned.
+- N4. Reproducible/byte-identical Rust builds. Out of reach; §4.2 and §5.1 handle the consequence.
 - N5. Signing the `.nupkg`. The org's publish flow owns that.
 
 ---
@@ -78,333 +83,342 @@ it from restore.
 
 The attack the C8 gate defends against is a **compromised in-process rgb-lib** crafting a PSBT that
 diverts or burns assets. The only defence is that a *separate* code path — `rgbverifycffi`, which
-pins `rgb =0.11.1-rc.10` and does not link rgb-lib — independently re-derives the intent from the
-consignment and refuses to sign on mismatch.
+pins the `rgb-ops` / `rgb-consensus` / `rgb-schemas` / `rgb-invoicing` crates at `=0.11.1-rc.10` and
+does **not** link rgb-lib (`native/rgb-verify/Cargo.toml:11-19`) — independently re-derives the intent
+and refuses to sign on mismatch.
 
-If that binary is absent, the defence is not weakened-but-present: it is **entirely absent**. The
-current fail-closed behaviour means absence costs liveness, not funds — but a plugin that cannot send
-is also the state an attacker would want if the alternative were a bypass. So the control this spec
-adds is *availability of the trust core in the shipped artifact*, enforced by:
+If that binary is absent, the defence is not weakened-but-present: it is **entirely absent**. Current
+fail-closed behaviour means absence costs liveness, not funds. The control this spec adds is
+*availability of the trust core in the shipped artifact*, enforced at three levels:
 
-1. **Delivery via an immutable, restore-resolved package** rather than a build-time side effect, so
-   the artifact cannot be produced without the native. (`dotnet publish` cannot succeed at all if the
-   package is unresolvable — restore fails first. Fail-loud replaces fail-silent.)
-2. **A startup probe** that refuses to load the plugin when the native is unloadable, so an operator
-   learns at boot rather than on a customer's first send.
-3. **A clean-checkout publish assertion** in CI, so the packaging can never regress to a form that
-   depends on a gitignored build artifact.
+1. **Delivery by restore, not by a build-time side effect.** A `PackageReference` cannot be satisfied
+   by machine-local staging; if the package is unavailable, restore fails and no artifact is produced
+   at all. Fail-loud replaces fail-silent.
+2. **A startup probe** that refuses to load the plugin when the native cannot be loaded, so an
+   operator learns at boot rather than on a customer's first send.
+3. **An isolation-hardened publish assertion** (§7.4) that cannot pass on machine-local state.
 
-**Invariants preserved.** No path introduced here allows the gate to be skipped. The self-check only
-ever *adds* a rejection (it can refuse to start the plugin; it can never permit a send). Absence or
-corruption of the native ⇒ plugin refuses to load ⇒ zero sends ⇒ no false-ACCEPT. rgb-lib never
-becomes the verification baseline; nothing about the verification path changes.
+**Invariants preserved.** Nothing here can cause a send to be signed without independent
+verification. The probe only ever *adds* a refusal; it can never permit a send. Absence or corruption
+of the native ⇒ plugin refuses to load ⇒ zero sends ⇒ no false-ACCEPT. rgb-lib never becomes the
+verification baseline; the verification path is untouched (N1).
 
-**Residual risks.** (i) The gate native's *contents* are trusted from the package; a malicious
-nuget.org package at that id/version would substitute the trust core. Mitigated by `packages.lock.json`
-SHA-512 pinning once the package is on nuget.org (§5.2) plus org ownership of the id. (ii) The probe
-proves the library loads and its four symbols are callable — it does not prove the verification logic
-is correct (that is finding B's gate, unchanged). (iii) linux-x64 only: a non-linux-x64 production
-deployment would have no native and the plugin would refuse to load — loud, not silent (§5.4).
+**Residual risks.** (i) The native's *contents* are trusted from the package. Mitigated by
+`packages.lock.json` SHA-512 pinning against the immutable published package (§4.4, G6) plus org
+ownership of the package id. (ii) The probe proves the library loads and its four entry points
+resolve; it does not prove the verification logic is correct (that is finding B's gate, unchanged).
+(iii) linux-x64 + osx-arm64 only: any other production platform gets a hard startup failure — loud,
+not silent (§5.4). (iv) Hard-fail has a restart-loop failure mode (§5.3).
 
 ---
 
 ## 4. Design
 
-Seven components. Every path below is repo-relative.
+### 4.0 Sequencing — the package is published *before* the switch is merged
+
+This ordering is part of the design, not an afterthought, because it is what makes G6 achievable and
+it removes an entire class of interim breakage (no local source in the committed config, no lockfile
+exemption, no window in which the Plugin Builder cannot build).
+
+| # | Step | Owner | Gate |
+|---|---|---|---|
+| S1 | Freeze the native; build `linux-x64` + `osx-arm64`; verify the four exports on each | this repo | `nm` export check (§4.2) |
+| S2 | Produce the canonical `RgbVerifyCffi 0.11.1-rc.10-native.1` nupkg containing **both** RIDs | this repo (script) | layout assertion (§7.3) |
+| S3 | **Publish that nupkg to nuget.org** | **org (manual — EMU cannot publish)** | package visible on nuget.org |
+| S4 | Flip the plugin to the published version, regenerate both lockfiles under strict pinning, drop every interim local-feed mechanism | this repo | §7.4 isolated gate passes |
+| S5 | Merge | — | CI green with committed (nuget.org-only) config |
+| S6 | Tag v1.0.11+, then **inspect the actual Plugin-Builder `.btcpay`** for `runtimes/linux-x64/native/librgbverifycffi.so` | this repo + org | the audit's explicit demand |
+
+**Development before S3 happens on this branch against a local feed**, using an **interim version
+string** `0.11.1-rc.10-native.1-local` and explicit command-line sources — never the committed
+`nuget.config` (§4.3). The interim and canonical versions are deliberately distinct so they can never
+collide in the NuGet cache, and so no locally built artifact can ever shadow the org-published trust
+core. S4 is a small, reviewable commit: version bump + lockfiles + removal of the interim CI steps.
+
+**Consequence to accept explicitly:** between the first implementation commit and S4, CI on this
+branch **fails restore** unless the interim local-feed steps are present, and the change **must not
+be merged**. Merging the probe before the package delivery works would auto-disable the plugin on
+every production BTCPay (worse than today, where only sends fail), so the whole change is one atomic
+unit gated on S3.
 
 ### 4.1 `RgbVerifyCffi` — native-only NuGet package (new)
 
 Mirrors how `rgblibcffi` already reaches the plugin through the `RgbLib` package
-(`BTCPayServer.Plugins.RgbUtexo.csproj:64`; verified layout
+(`BTCPayServer.Plugins.RgbUtexo.csproj:64`; layout verified at
 `~/.nuget/packages/rgblib/0.3.0-beta.30/runtimes/<rid>/native/librgblibcffi.*`).
 
-Package contents:
-
 ```
-lib/net8.0/_._                                          (empty placeholder — see below)
+lib/net8.0/_._                                          (placeholder — required, see below)
 runtimes/linux-x64/native/librgbverifycffi.so           (production RID — mandatory)
-runtimes/osx-arm64/native/librgbverifycffi.dylib        (dev RID — present in dev-built packages)
+runtimes/osx-arm64/native/librgbverifycffi.dylib        (dev RID — mandatory in the canonical package)
 ```
 
-- **Id:** `RgbVerifyCffi` · **Version:** `0.11.1-rc.10-native.1`. The version encodes the pinned
-  `rgb` crate version (`native/rgb-verify/Cargo.toml` pins `=0.11.1-rc.10`) so the trust-critical
-  dependency is visible in the dependency graph. The `-native.N` suffix increments on native
-  rebuilds at the same rgb pin. Valid SemVer2 prerelease (`rc`, `10-native`, `1` are all legal
-  identifiers); the plan MUST assert this by actually packing and restoring, not by inspection.
-- **Why `lib/net8.0/_._`:** a package containing only `runtimes/**` and no framework-compatible
-  asset is rejected with `NU1202` ("not compatible with net10.0"). The empty `_._` placeholder is the
-  standard runtime-package idiom (SQLitePCLRaw uses it). `net8.0` is chosen over `net10.0` so the
-  package remains consumable by net8.0+ consumers; the plugin targets `net10.0`, which is compatible.
-  `RgbLib` needs no placeholder only because it ships a real managed dll.
+- **Id:** `RgbVerifyCffi`. **Canonical version:** `0.11.1-rc.10-native.1`; **interim version:**
+  `0.11.1-rc.10-native.1-local`. The version encodes the pinned rgb crate family version so the
+  trust-critical dependency is visible in the graph; `-native.N` increments on native rebuilds at the
+  same pin. Both strings were verified end-to-end (pack → restore → lockfile entry) during design.
+- **Why `lib/net8.0/_._`:** a package with only `runtimes/**` and no framework-compatible asset is
+  rejected `NU1202`. The empty `_._` placeholder is the standard runtime-package idiom.
+  `net8.0` keeps the package consumable by net8.0+; the plugin's `net10.0` is compatible. `RgbLib`
+  needs no placeholder only because it ships a real managed dll.
 - **No dependencies.** The nuspec dependency group must be empty.
+- **The canonical package MUST contain both RIDs.** A linux-x64-only canonical package would make the
+  startup probe hard-fail permanently on every developer Mac; an osx-arm64-only one would not run in
+  production. Because ubuntu cannot produce a Mach-O dylib, the canonical package is assembled from
+  two CI jobs (§4.6).
 
-**Packaging project:** `native/rgb-verify/packaging/RgbVerifyCffi.csproj` — a stub project used only
-to run `dotnet pack` (no `nuget` CLI exists on the dev machine or in CI images; `dotnet pack` needs a
-project). Required properties:
+**Packaging project** `native/rgb-verify/packaging/RgbVerifyCffi.csproj` — a stub project so
+`dotnet pack` can be used (no `nuget` CLI exists on the dev machine or in the CI images):
 
 | Property | Value | Why |
 |---|---|---|
 | `TargetFramework` | `net8.0` | matches the `_._` placeholder tfm |
 | `IncludeBuildOutput` | `false` | no managed assembly in this package |
-| `SuppressDependenciesWhenPacking` | `true` | belt-and-braces against any injected `PackageReference` becoming a package dependency |
-| `IsPackable` / `Version` / `PackageId` | `true` / `0.11.1-rc.10-native.1` / `RgbVerifyCffi` | the single source of truth for the package version |
-| `NoWarn` | `NU5128` | "no lib/ref assemblies for the declared tfm" — expected for a native-only package |
-
-Item mapping (packs whatever is staged, so one script works on both host platforms):
+| `SuppressDependenciesWhenPacking` | `true` | guarantees a dependency-free nuspec |
+| `PackageId` / `Version` | `RgbVerifyCffi` / passed in via `-p:Version=` | single source of the version is the pack invocation, so interim vs canonical cannot drift silently |
+| `NoWarn` | `NU5128` | expected for a native-only package |
 
 ```xml
 <None Include="../runtimes/**/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)%(Filename)%(Extension)" />
 <None Include="_._"              Pack="true" PackagePath="lib/net8.0/_._" />
 ```
 
-**Mandatory prod-RID guard** — the pack MUST fail rather than silently emit a package that would
-reproduce the finding:
+**Mandatory prod-RID guard** — the pack must fail rather than emit a package that reproduces the
+finding:
 
 ```xml
 <Target Name="RequireProdNative" BeforeTargets="Pack">
-  <!-- A package without the production RID would reproduce audit finding A: the artifact
-       publishes cleanly but the C8 gate cannot load, so every RGB send fails. -->
+  <!-- A package without the production RID would reproduce audit finding A: the artifact publishes
+       cleanly but the C8 gate cannot load, so every RGB send fails. -->
   <Error Condition="!Exists('../runtimes/linux-x64/native/librgbverifycffi.so')"
          Text="RgbVerifyCffi: runtimes/linux-x64/native/librgbverifycffi.so missing — build it before packing (see CLAUDE.md)" />
 </Target>
 ```
 
+An equivalent `RequireBothRids` guard, enabled by a property (`-p:RequireAllRids=true`), is used for
+the canonical S2 pack so a one-RID canonical package cannot be produced by accident.
+
 **`Directory.Build.props` must be amended.** Line 10 injects
-`<PackageReference Include="Microsoft.Bcl.Memory" .../>` into every project whose
-`MSBuildProjectName` is not the plugin or the tests. The packaging project would inherit it, which
-(a) forces a restore/dependency it does not need and (b) risks leaking a dependency into the nupkg.
-Add `RgbVerifyCffi` to that exclusion condition.
+`<PackageReference Include="Microsoft.Bcl.Memory" …/>` into every project except the plugin and the
+tests. The packaging project would inherit it, forcing an unnecessary restore and risking a leaked
+package dependency. Add `RgbVerifyCffi` to that exclusion. (`Directory.Build.targets`'
+`PackageReference Update` is inert when no such reference exists, so it needs no change.)
 
 ### 4.2 Build + pack script (new) — `scripts/pack-rgbverify.sh`
 
-Two phases, both idempotent:
+Phases, both idempotent:
 
-1. **Stage natives** into `native/rgb-verify/runtimes/<rid>/native/`:
-   - host RID via `native/rgb-verify/build-native.sh` (unchanged, still the single build entry point);
-   - `linux-x64` when the host is not linux-x64, via the `--platform linux/amd64 rust:1-bookworm`
-     container recipe already documented in `CLAUDE.md` ("Building Native Libraries for Production
-     RIDs"), i.e. `apt-get install cmake clang` then
-     `cargo build --release --target x86_64-unknown-linux-gnu`.
-   - After staging, assert the four exports exist on the linux-x64 artifact, reusing the same
-     `nm -D --defined-only | grep` check `release.yml:104-106` performs. A library that loads but
-     lacks an export yields `EntryPointNotFound` at call time — the second failure mode named in the
-     finding — so export presence is checked at pack time, not just file presence.
-2. **Pack** `native/rgb-verify/packaging/RgbVerifyCffi.csproj` with `dotnet pack -c Release`, output
-   into the local feed directory `local-nuget-feed/`. Then delete the extracted package from the
-   global cache (`~/.nuget/packages/rgbverifycffi/<version>`) so a rebuilt nupkg at the same version
-   is re-extracted rather than served stale — the same hazard, and the same remedy, as the
-   `rgblib …-c8local` repack procedure in `CLAUDE.md`.
+1. **Stage** natives into `native/rgb-verify/runtimes/<rid>/native/`: host RID via
+   `native/rgb-verify/build-native.sh` (unchanged, still the single build entry point); `linux-x64`
+   when the host is not linux-x64 via the `--platform linux/amd64 rust:1-bookworm` recipe already in
+   `CLAUDE.md` (`apt-get install cmake clang`, then
+   `cargo build --release --target x86_64-unknown-linux-gnu`).
+2. **Assert exports** on every staged native, reusing the check `release.yml:104-106` performs
+   (`nm -D --defined-only` for all four symbols; `nm -gU` on Mach-O). A library that loads but lacks
+   an export yields `EntryPointNotFound` — the second failure mode the finding names — so this is
+   checked at pack time, not merely file presence.
+3. **Pack** with `dotnet pack -c Release -p:Version=<version>` into `local-nuget-feed/`, then delete
+   `~/.nuget/packages/rgbverifycffi/<version>` so a rebuilt nupkg at the same version is re-extracted
+   rather than served stale — the hazard and remedy already documented in `CLAUDE.md` for the
+   `rgblib …-c8local` repack. Callers additionally restore with `--force-evaluate`, which is the
+   verified remedy for the `NU1403` content-hash error (`-p:RestoreLockedMode=false` does **not**
+   suppress `NU1403`; hash validation is active whenever a lockfile exists).
 
-On CI (ubuntu-x64) phase 1 stages linux-x64 only (host build, no container needed). On the dev Mac it
-stages both. See §5.2 for the consequence.
+### 4.3 Local feed — deliberately NOT in the committed `nuget.config`
 
-### 4.3 Local feed + `nuget.config`
+`nuget.config` stays exactly as it is (`<clear/>` + nuget.org). The local feed is supplied **only** on
+the command line, by the dev script and by the interim CI steps:
 
-`nuget.config` currently is `<clear/>` + nuget.org only. Add the local feed **before** nuget.org:
-
-```xml
-<add key="local-rgbverify" value="./local-nuget-feed" />
+```
+dotnet restore <proj> --source https://api.nuget.org/v3/index.json --source ./local-nuget-feed --force-evaluate
 ```
 
-`local-nuget-feed/` is added to the root `.gitignore` — the feed is *built*, never committed (G5).
-A relative path in `nuget.config` resolves relative to the config file, so it works from any working
-directory in the repo and in CI.
+Rationale, both halves empirically verified during design:
 
-**Consequence, stated plainly:** because the source is a local folder that is empty on a fresh
-clone, `dotnet restore` **fails with NU1101 until `scripts/pack-rgbverify.sh` has been run** (or the
-package exists on nuget.org). This is a deliberate fail-loud trade — see §5.1, which also covers what
-it means for the Plugin Builder.
+- Adding a folder source to the committed config would break restore **permanently for every
+  consumer, including the Plugin Builder, even after S3** — a folder source that does not exist fails
+  restore with `NU1301` on a cold cache, and a gitignored directory cannot exist in a fresh clone
+  (git does not track empty directories). This is strictly worse than the bug being fixed.
+- A local source listed ahead of nuget.org would let a locally built nupkg **shadow the
+  org-published trust core** indefinitely, voiding residual-risk mitigation (i) in §3. Keeping it off
+  the committed config, plus the distinct interim version string, makes shadowing impossible.
+
+`local-nuget-feed/` is added to the root `.gitignore` (G5).
 
 ### 4.4 Plugin csproj
 
-- **Remove** `<None Include="native/rgb-verify/runtimes/**">` (`:79-84`) — the whole mechanism that
-  depends on a gitignored build artifact. This is the root-cause removal; leaving it would let the
-  old path silently mask a broken package.
-- **Add** `<PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.1" />` next to the
-  `RgbLib` reference.
-- Regenerate `packages.lock.json` for **both** the plugin and the Tests project
-  (`dotnet restore <csproj> --force-evaluate`), per the lockfile rules in `CLAUDE.md`.
+- **Remove** `<None Include="native/rgb-verify/runtimes/**">` (`:79-84`) — the mechanism that depends
+  on a gitignored build artifact. Leaving it would let the old path mask a broken package.
+- **Add** `<PackageReference Include="RgbVerifyCffi" Version="…" />` beside `RgbLib` (interim version
+  during development, canonical at S4).
+- Regenerate `packages.lock.json` for **both** the plugin and the Tests project. At S4 this is done
+  against nuget.org with the immutable published package, so strict pinning is intact in the merged
+  state (G6) and no lockfile exemption is ever committed.
 
-Package `runtimes/**` natives reach a RID-agnostic (non-self-contained) plugin build and flow
-transitively into the Tests project's output — empirically true in this repo today for
-`librgblibcffi` (present in both `bin/Debug/net10.0/runtimes/*/native/` and
-`BTCPayServer.Plugins.RgbUtexo.Tests/bin/Debug/net10.0/runtimes/*/native/`). The Tests project's
-`ProjectReference` to the plugin carries no `ExcludeAssets`, so native assets propagate; the
-`ExcludeAssets` in the plugin's `ItemDefinitionGroup` (`:53`) applies to the plugin's *own*
-`ProjectReference` items (the BTCPay submodule), not to this.
+**`CopyLocalLockFileAssemblies=true` (`BTCPayServer.Plugins.RgbUtexo.csproj:12`) becomes
+load-bearing.** Verified during design: a net10.0 class library does **not** copy package native
+assets into its *build* output unless that property is set; with it set, they do. Local Debug dev
+loads the plugin from `bin/Debug/net10.0` via `DEBUG_PLUGINS`, so removing that property would strip
+the native from Debug builds and — with the new probe — hard-fail the plugin locally. Guarded by test
+T8 and a `WHY` comment at the property.
+
+Verified asset flow for all four contexts that matter:
+
+| Context | Native present | Mechanism |
+|---|---|---|
+| `dotnet publish` (the `.btcpay`) | yes | package RID assets are part of the publish set |
+| plugin `bin/Debug` (local dev) | yes | `CopyLocalLockFileAssemblies=true` |
+| Tests project output | yes | a `Microsoft.NET.Test.Sdk` project is an `Exe`; native assets are copied and listed in its `deps.json` (already true today for RgbLib's native) |
+| plain class-library consumer | no | no project in this repo has that shape |
 
 `RgbVerifyNative`'s DllImport resolver (`Services/RgbVerifyNative.cs:17-53`) already searches
-`<baseDir>/runtimes/<rid>/native/<file>` — exactly where the package asset lands. **No resolver
-change is required**, and the flat-file fallback (`:35-38`) is retained untouched so a manually
-staged library still works for local experiments.
+`<baseDir>/runtimes/<rid>/native/<file>` — exactly where the asset lands. **No resolver change is
+required**; the flat fallback (`:35-38`) stays untouched.
 
-### 4.5 Startup self-check (new) — hard-fail
+### 4.5 Startup self-check — load-and-symbols only, hard-fail
 
-New file `Services/RgbNativeSelfCheck.cs`:
+New `Services/RgbNativeSelfCheck.cs`:
 
 ```
 internal static class RgbNativeSelfCheck
 {
-    internal static void Verify(Action probe);          // testable seam
-    public  static void Verify();                       // default probe = real native call
+    internal static void Verify(Func<string, IntPtr> load, Func<IntPtr, string, bool> hasExport);
+    public  static void Verify();     // defaults bound to NativeLibrary.TryLoad / TryGetExport
 }
 ```
 
-- **Probe:** call `RgbVerifyNative.DecodeInvoice("")`. A healthy native returns `Err` for an invalid
-  invoice, which the binding surfaces as `RgbIntentVerificationException`. So:
-  - `RgbIntentVerificationException` thrown, or the call returning normally ⇒ **healthy** (the
-    library loaded, the entry point resolved, the `CResultString` marshal/free path ran).
-  - Any other exception (`DllNotFoundException`, `EntryPointNotFoundException`,
-    `BadImageFormatException`, or anything else) ⇒ **unhealthy** ⇒ throw
-    `RgbNativeUnavailableException`.
-  This probes strictly more than "file exists": it covers the `EntryPointNotFound` failure mode the
-  finding names, and it exercises exactly one of the four exports at zero side-effect cost.
-- **Message content** (this is the "loud, actionable error" the audit demands): the expected library
-  filename for the current platform, `RuntimeInformation.RuntimeIdentifier`, the **full list of
-  candidate paths searched**, the package id+version expected to supply it, and the remediation
-  pointer (`scripts/pack-rgbverify.sh` for dev; "the published `.btcpay` is missing the gate native"
-  for prod). No secrets, no PII, no wallet data.
-- To produce that path list, extract the resolver's candidate enumeration in
-  `Services/RgbVerifyNative.cs` into `internal static IEnumerable<string> CandidatePaths(string baseDir)`
-  and have both `ResolveNative` and the self-check message use it. Pure function, directly testable,
-  no behaviour change to resolution order.
-- **Call site:** first statement of `RGBPlugin.Execute` that can throw, before any service
-  registration (`RGBPlugin.cs:28-35`, immediately after `LoadConfiguration`).
+**The probe loads the library and resolves the four exports. It does not call any of them.**
 
-**Operational consequence, explicitly accepted by the user.** Throwing from `Execute` causes
-`PluginManager` to log the error, queue `disable:BTCPayServer.Plugins.RgbUtexo`, and then throw
-`ConfigException` — **BTCPay restarts and the plugin comes back disabled**
+- For each candidate path (§4.5's shared `CandidatePaths`), `NativeLibrary.TryLoad`; on the first
+  success, require `NativeLibrary.TryGetExport` to succeed for all four of
+  `rgbverify_decode_invoice`, `rgbverify_validate`, `rgbverify_commitment_check`,
+  `rgbverify_string_free`. Any failure ⇒ throw `RgbNativeUnavailableException`.
+- **Why not invoke a function:** every exported call returns a `CResultString` by value, and the
+  binding then dereferences (`Marshal.PtrToStringUTF8`, `RgbVerifyNative.cs:90`) and frees
+  (`rgbverify_string_free`, `:99-100`) the returned pointer. Against an ABI-mismatched or corrupt
+  library that path can raise an uncatchable `AccessViolationException` or abort the process, which
+  would kill BTCPay *before* `PluginManager` can queue the disable command — turning a diagnostic
+  into an unbounded restart loop. `TryLoad` + `TryGetExport` prove exactly what the audit asks ("if
+  the gate native can't load") with no marshalling, no dereference, and no ABI assumption.
+- A healthy-native false-REJECT is likewise avoided: there is no JSON deserialization in the probe, so
+  a payload-shape change cannot disable the plugin.
+- **Message content** (the "loud, actionable error"): expected filename for the platform,
+  `RuntimeInformation.RuntimeIdentifier`, **every candidate path searched**, which symbol failed to
+  resolve when applicable, the expected package id+version, and remediation (`scripts/pack-rgbverify.sh`
+  for dev; "the published `.btcpay` is missing the gate native" for prod). No secrets, no PII, no
+  wallet data.
+- To build that path list, extract the resolver's candidate enumeration in
+  `Services/RgbVerifyNative.cs` into `internal static IEnumerable<string> CandidatePaths(string baseDir)`
+  used by both `ResolveNative` and the probe. Pure, directly testable, resolution order unchanged.
+- **Call site:** `RGBPlugin.Execute`, immediately **after** the `if (config == null) return;` early
+  return (`RGBPlugin.cs:32-33`), before any service registration. Placing it before that return would
+  hard-fail a host that has no RGB configuration at all and therefore can never sign.
+
+**Operational consequence, explicitly accepted by the user.** Throwing from `Execute` makes
+`PluginManager` log the error, queue `disable:BTCPayServer.Plugins.RgbUtexo`, and throw
+`ConfigException` — **BTCPay restarts and the plugin returns disabled**
 (`submodules/btcpayserver/BTCPayServer/Plugins/PluginManager.cs:302-325`). All plugin functionality is
-lost, not just sends, and an admin must re-enable the plugin (and remove
-`~/.btcpayserver/Plugins/commands`) after installing a good artifact. The user chose this over
-log-and-continue because a plugin whose trust core is missing cannot perform its core function, and a
-half-working install invites confusion about whether sends are safe. Documented in `CLAUDE.md` as
-part of this change.
+lost, not just sends, and an admin must re-enable the plugin (and clear
+`~/.btcpayserver/Plugins/commands`) after installing a good artifact. See §5.3 for the restart-loop
+edge and §5.4 for platform coverage.
 
 ### 4.6 CI
 
-**`.github/workflows/release.yml`** — the existing native build step stays (it is now the *input* to
-packing rather than a direct publish contributor):
+**`release.yml`** — the native build step stays (it is now the input to packing):
 
-1. after the native build + export check (`:96-106`), insert `bash scripts/pack-rgbverify.sh`
-   (pack-only mode; the native is already staged by the preceding step);
-2. restore, then publish, then keep the existing `publish-out` verification (`:136-140`) **unchanged**
-   — it already asserts the native's presence and is the direct check on the released artifact;
-3. add the clean-checkout assertion of §7.4 as its own step so the release is blocked if the
-   packaging ever regresses to depending on a staged `runtimes/` tree.
+1. after the existing native build + export check (`:96-106`), a **canonical-pack job set** for S2:
+   an `ubuntu-latest` job builds `linux-x64`, a `macos-14` job builds `osx-arm64`, each uploading its
+   native as an artifact; an assembling job downloads both and runs
+   `pack-rgbverify.sh --pack-only -p:RequireAllRids=true`, uploading the canonical nupkg for the org
+   to publish at S3. Both production and dev natives thereby have CI provenance — a Mac-container
+   cross-build is not the source of the production trust core.
+2. the restore/publish steps keep `--locked-mode` **unchanged** in the merged state (G6). During
+   development only, the interim steps of §4.3 are added and are removed at S4.
+3. keep the existing `publish-out` native check (`:136-140`) and **add** the §7.4 isolated gate plus
+   the deps.json provenance assertion of §7.1 T7 as release-blocking steps.
 
-**`.github/workflows/ci.yml`** — the test job must obtain the native through restore (G4). Add
-Rust toolchain + `bash scripts/pack-rgbverify.sh` (stage host RID = linux-x64, then pack) before the
-restore step, so `RgbVerifyBindingTests` runs against a real library instead of `DllNotFound`.
+**`ci.yml`** — the test job needs the native from restore (G4). In the merged state a plain restore
+suffices, because the package is on nuget.org. During development the interim steps of §4.3 apply
+(Rust toolchain + pack + `--source`/`--force-evaluate`), removed at S4.
 
 ### 4.7 Documentation
 
-- `CLAUDE.md`: replace the "Building Native Libraries for Production RIDs (manual)" `rgbverifycffi`
-  half with the `scripts/pack-rgbverify.sh` workflow, the mandatory bootstrap step for a fresh clone,
-  the hard-fail startup behaviour and its recovery, and the one manual org publish step. The
+- `CLAUDE.md`: replace the `rgbverifycffi` half of "Building Native Libraries for Production RIDs
+  (manual)" with the `scripts/pack-rgbverify.sh` workflow, the S1–S6 sequence, the hard-fail startup
+  behaviour and its recovery, and the load-bearing role of `CopyLocalLockFileAssemblies`. The
   `rgblibcffi` half is unrelated and stays.
-- `audit-july-22-conclusions.md` §A: record the fix, and record precisely what is **not** yet proven
-  — see §6.
-- `README`/`.github/README.md` supply-chain section: note the scoped, temporary lockfile exemption of
-  §5.2 and how to verify it.
+- `audit-july-22-conclusions.md` §A: per §6.
+- `.github/README.md` supply-chain section: note that the gate native now arrives as a pinned package
+  and that no lockfile exemption exists in the merged state.
 
 ---
 
 ## 5. Risks, edge cases, and decisions
 
-### 5.1 The Plugin Builder cannot build until the package is on nuget.org — accepted, with required sequencing
+### 5.1 Same version, differing content
 
-A `PackageReference` to a package absent from every reachable source makes `dotnet restore` fail
-(`NU1101`). The Plugin Builder cannot populate the local folder feed. Therefore, between merging this
-change and the org's nuget.org publish, **the Plugin Builder build fails outright**.
+Rust builds are not byte-reproducible (N4), so re-packing at a version already restored elsewhere
+triggers `NU1403`. Handled by: the distinct interim version string; the cache eviction in §4.2
+phase 3; `--force-evaluate` on interim restores; and, in the merged state, a single immutable
+nuget.org package so the hash never changes again.
 
-This is a deliberate trade: a hard restore failure is strictly better than today's silent production
-of an artifact whose trust core is missing. It is nevertheless a real regression in buildability, so
-release sequencing is **mandatory and ordered**:
+### 5.2 Why no lockfile exemption is needed any more
 
-1. merge this change;
-2. **org (Renat) publishes `RgbVerifyCffi 0.11.1-rc.10-native.1` to nuget.org** from the nupkg this
-   repo's script produces;
-3. re-tighten the lockfiles against nuget.org and restore strict `--locked-mode` (§5.2);
-4. tag the release (v1.0.11+) and **inspect the `.btcpay` the Plugin Builder produces** for
-   `runtimes/linux-x64/native/librgbverifycffi.so` — the check the audit explicitly asks for.
+The round-1 design relaxed CI's locked mode for the interim. That is now unnecessary, because the
+switch is merged only after the immutable package exists (§4.0). It was also unworkable as written:
+`NU1403` content-hash validation is active whenever a lockfile is present and is **not** disabled by
+`-p:RestoreLockedMode=false` (verified); and `RestoreLockedMode` is set inside the csproj whenever
+`ContinuousIntegrationBuild=true` (`BTCPayServer.Plugins.RgbUtexo.csproj:22`), which both workflows
+pass, so dropping the CLI flag would not have relaxed anything.
 
-Finding A is **not** closable before step 4. §6 states this in the status doc.
+### 5.3 Hard-fail restart loop
 
-### 5.2 Interim supply-chain pin — scoped exemption, not a blanket disable
+Hard-fail depends on `PluginManager.QueueCommands` persisting `disable:…` to the plugins directory. If
+that write fails (read-only or wrongly-permissioned plugins volume), the disable never sticks, every
+restart re-throws `ConfigException`, and a container with a restart policy loops. The loop is loud —
+BTCPay logs the actionable probe message each cycle — but it is a real availability consequence of the
+hard-fail choice the user made over log-and-continue. Documented in `CLAUDE.md` with the recovery
+(install a `.btcpay` containing the native, or remove the plugin). Flagged in §9 as a decision the
+user may wish to revisit if a production host has a read-only plugins volume.
 
-`CI` restores with `--locked-mode`, and `packages.lock.json` pins every package by SHA-512. A
-locally-built nupkg cannot satisfy that: Rust builds are not byte-reproducible across toolchains
-(N4), and the dev-built package legitimately contains two RIDs while the CI-built package contains
-only linux-x64 (ubuntu cannot build an osx-arm64 dylib) — same version string, different content, by
-design.
+### 5.4 Platform coverage
 
-So during the interim CI restores with `--force-evaluate` instead of `--locked-mode`, **plus** an
-explicit assertion that the exemption is scoped to this one package:
+The canonical package ships linux-x64 + osx-arm64 (§4.1). On any other platform the resolver finds
+nothing and the probe hard-fails at startup naming the missing RID — loud, not a first-send surprise.
+Consistent with N2; `CLAUDE.md` already records that a Windows deploy would lack the gate.
 
-1. copy both `packages.lock.json` files aside;
-2. restore with `--force-evaluate`;
-3. `diff` old vs new and **fail the build unless every changed line belongs to the `RgbVerifyCffi`
-   entry**.
-
-This keeps the pin's real security property — no third-party package may change without review —
-while permitting the one package that is built from in-repo source (and therefore carries no
-third-party supply-chain risk). Reverting to plain `--locked-mode` is step 3 of §5.1. Recorded in the
-supply-chain README section so it is auditable rather than invisible.
-
-**Decision to confirm:** this is the one place the spec knowingly trades strictness for the
-not-yet-published package. The alternative — committing the `.nupkg` to a tracked folder feed —
-closes the finding immediately and keeps `--locked-mode`, but commits a binary blob (user rejected).
-
-### 5.3 Version drift between the packaging project and the plugin's `PackageReference`
-
-Two files must agree on `0.11.1-rc.10-native.1`. Drift produces a confusing `NU1101`. Guard: a unit
-test parses `native/rgb-verify/packaging/RgbVerifyCffi.csproj` (`<Version>`) and
-`BTCPayServer.Plugins.RgbUtexo.csproj` (the `RgbVerifyCffi` `PackageReference` `Version`) and asserts
-equality (§7.1, T5).
-
-### 5.4 Non-linux-x64 / non-osx-arm64 host
-
-The package ships two RIDs. On any other platform (a win-x64 or linux-arm64 BTCPay host) the resolver
-finds nothing and the startup probe hard-fails: the plugin refuses to load with a message naming the
-missing RID. Loud, not silent, and consistent with N2. `CLAUDE.md` already records that a Windows
-deploy would lack the gate; this makes it a startup error instead of a first-send error.
-
-### 5.5 Stale extraction of a rebuilt package at the same version
-
-NuGet caches by id+version. Re-packing at the same version after a native rebuild would otherwise be
-served from `~/.nuget/packages/rgbverifycffi/<version>` — the exact trap `CLAUDE.md` documents for the
-`rgblib …-c8local` repack. Handled inside the pack script (§4.2 phase 2) plus a `--force-evaluate`
-restore to clear `NU1403`.
-
-### 5.6 Other enumerated edge cases
+### 5.5 Enumerated edge cases
 
 | Case | Behaviour |
 |---|---|
-| `runtimes/` staged but linux-x64 absent | `dotnet pack` **fails** (`RequireProdNative`, §4.1) |
-| linux-x64 library present but missing an export | pack script fails at the `nm` export check (§4.2) |
-| Package restored but native missing for the running RID | startup probe throws; plugin disabled; message names the RID and every searched path |
-| Native present but ABI-incompatible / corrupt | probe's real call throws something other than `RgbIntentVerificationException` ⇒ unhealthy ⇒ plugin disabled |
-| Concurrency | none introduced. The probe runs once, single-threaded, in `Execute` before any service exists |
-| Malicious input | none reachable. The probe's input is the hardcoded empty string |
-| Local feed empty (fresh clone) | `restore` fails `NU1101` with a documented bootstrap step (§4.3, §5.1) |
-| Someone re-adds a `<None Include=…runtimes…>` shortcut | the clean-checkout gate (§7.4) still passes (that is the point of the package), but the CI publish check would pass for the wrong reason — mitigated by T7 asserting the published native's *provenance* is the package (§7.1) |
+| `runtimes/` staged but linux-x64 absent | `dotnet pack` fails (`RequireProdNative`) |
+| canonical pack missing a RID | `dotnet pack` fails (`RequireAllRids`) |
+| native present but missing an export | pack-time `nm` check fails; at runtime the probe fails on `TryGetExport` |
+| native corrupt / ABI-mismatched | `TryLoad` fails, or an export is absent ⇒ probe throws. No call is made, so no `AccessViolation` and no process abort |
+| package restored but no native for the running RID | probe throws naming the RID and every searched path |
+| plugin has no RGB configuration | early `return` runs first; probe never executes |
+| warm NuGet cache masking a missing source | §7.4 runs with an isolated `NUGET_PACKAGES` |
+| stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
+| `CopyLocalLockFileAssemblies` removed later | T8 fails |
+| someone re-adds a `<None Include=…runtimes…>` shortcut | T7's deps.json provenance assertion fails (the native would no longer be a package asset) |
+| concurrency | none introduced; the probe runs once, single-threaded, before any service exists |
+| malicious input | none reachable; the probe takes no external input |
 
 ---
 
 ## 6. Status-doc wording (what may and may not be claimed)
 
-`audit-july-22-conclusions.md` §A must distinguish implementation from verified closure:
+`audit-july-22-conclusions.md` §A must separate implementation from verified closure:
 
-- **Implemented:** native delivered by `RgbVerifyCffi` NuGet; root-cause `<None Include>` packing
-  removed; startup hard-fail self-check added; clean-checkout publish gate in CI; CI test job gets the
-  native from restore.
-- **Not yet closed:** production closure requires (a) the org's manual nuget.org publish of
-  `RgbVerifyCffi 0.11.1-rc.10-native.1`, (b) restoration of strict `--locked-mode` with lockfiles
-  regenerated against nuget.org, and (c) inspection of the actual Plugin-Builder `.btcpay` for
-  `runtimes/linux-x64/native/librgbverifycffi.so`.
+- **Implemented:** native delivered by the `RgbVerifyCffi` package; root-cause `<None Include>`
+  packing removed; startup hard-fail probe; isolation-hardened publish gate + deps.json provenance
+  check in CI; CI test job gets the native from restore.
+- **Not closed until:** (a) the org publishes `RgbVerifyCffi 0.11.1-rc.10-native.1` to nuget.org
+  (S3), (b) S4's flip lands with lockfiles regenerated against nuget.org under strict pinning, (c)
+  the §7.4 isolated gate passes, and (d) the actual Plugin-Builder `.btcpay` is inspected and found to
+  contain `runtimes/linux-x64/native/librgbverifycffi.so` (S6).
 
-No "✅ FIXED" until (c) is done with evidence.
+No "✅ FIXED" before (d), with evidence recorded.
 
 ---
 
@@ -416,74 +430,124 @@ TDD: each test is written and observed failing before the corresponding change.
 
 | # | Test | Asserts | First fails because |
 |---|---|---|---|
-| T1 | `CandidatePaths_EnumeratesRidThenFlatFallback` | pure enumeration for a given baseDir yields `runtimes/<RuntimeIdentifier>/native/<file>`, then `runtimes/<os>-<arch>/native/<file>`, then the flat path, in that order, with the platform-correct filename | `CandidatePaths` does not exist |
-| T2 | `SelfCheck_HealthyProbe_DoesNotThrow` | `Verify(probe)` returns normally when the probe throws `RgbIntentVerificationException` (the healthy signal) and when it returns normally | `RgbNativeSelfCheck` does not exist |
-| T3 | `SelfCheck_DllNotFound_ThrowsWithActionableMessage` | injected `DllNotFoundException` ⇒ `RgbNativeUnavailableException` whose message contains the RID, the expected filename, every candidate path, and `RgbVerifyCffi` | same |
-| T4 | `SelfCheck_EntryPointNotFound_ThrowsWithActionableMessage` | injected `EntryPointNotFoundException` ⇒ same failure class (proves the second failure mode named in the finding is covered) | same |
-| T5 | `PackageVersion_MatchesPackagingProject` | the `RgbVerifyCffi` `PackageReference` version in the plugin csproj equals `<Version>` in the packaging csproj | versions/files do not exist yet |
-| T6 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host — i.e. the native genuinely arrived via the package into the test output | package not referenced yet |
-| T7 | `PackagedNative_ComesFromPackageAssets` | `runtimes/<hostRid>/native/<lib>` exists in the test output **and** the plugin csproj contains no `<None Include>` referencing `native/rgb-verify/runtimes` (guards §5.6's last row: the delivery mechanism, not just the outcome) | the `<None Include>` still exists |
+| T1 | `CandidatePaths_EnumeratesRidThenFlatFallback` | for a given baseDir: `runtimes/<RuntimeIdentifier>/native/<file>`, then `runtimes/<os>-<arch>/native/<file>`, then the flat path, in order, platform-correct filename | `CandidatePaths` does not exist |
+| T2 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected load+export fakes reporting success ⇒ no throw; asserts all four symbol names were queried | `RgbNativeSelfCheck` does not exist |
+| T3 | `SelfCheck_LoadFails_ThrowsWithActionableMessage` | load fails for every candidate ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every candidate path, and `RgbVerifyCffi` | same |
+| T4 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | load succeeds, one export missing ⇒ throws and the message names that symbol (covers the `EntryPointNotFound` mode) | same |
+| T5 | `SelfCheck_NeverInvokesNativeFunctions` | the injected fakes record that only load/export-resolution occurred — no call path is exercised (guards §4.5's ABI-safety property against regression) | same |
+| T6 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host — the native genuinely arrived via the package | package not referenced yet |
+| T7 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` lists `runtimes/<hostRid>/native/<lib>` under the `RgbVerifyCffi/<version>` target — provenance, not mere presence | native currently arrives as a copied `None` item, not a package asset |
+| T8 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | the plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing per §4.4) | passes at base; guards a future regression |
 
-T6/T7 are host-RID assertions and therefore pass on both the dev Mac (osx-arm64) and CI (linux-x64).
+Tests that must read repo files (T8) locate the repo root from an `AssemblyMetadata("RepoRoot", …)`
+attribute injected by the Tests csproj from `$(MSBuildThisFileDirectory)..`, so they work for
+out-of-tree test runs. T6/T7 assert against the host RID and therefore pass on both the dev Mac
+(osx-arm64) and CI (linux-x64).
 
 ### 7.2 Rust tests
 
-Unchanged (`cargo test --release --locked` in `native/rgb-verify`, currently 54 pass / 1 ignored). No
-Rust source changes; the run is a regression check that packing did not disturb the crate.
+Unchanged (`cargo test --release --locked` in `native/rgb-verify`: 54 pass / 1 ignored). No Rust
+source changes; the run is a regression check that packaging did not disturb the crate.
 
-### 7.3 Pack-script verification (manual, scripted, recorded in the plan)
+### 7.3 Pack verification (scripted, recorded in the plan)
 
-`bash scripts/pack-rgbverify.sh` on the dev Mac must produce
-`local-nuget-feed/RgbVerifyCffi.0.11.1-rc.10-native.1.nupkg` whose entry list is exactly the §4.1
-layout (`unzip -l`), including `lib/net8.0/_._`, and whose nuspec declares no dependencies. Then a
-`--force-evaluate` restore of the plugin and Tests projects must succeed — this is also the empirical
-proof that the SemVer2 version string is accepted by NuGet end to end.
+`bash scripts/pack-rgbverify.sh` must produce a nupkg whose entry list is exactly the §4.1 layout
+(`unzip -l`), including `lib/net8.0/_._`, whose nuspec declares **no** dependencies, and — for the
+canonical pack — containing both RIDs. Then a `--force-evaluate` restore of the plugin and Tests
+projects must succeed.
 
-### 7.4 The acceptance gate (the finding's own test)
+### 7.4 The acceptance gate — Plugin-Builder-equivalent, isolation-hardened
+
+Wrapped as `scripts/verify-publish-native.sh` and run in `release.yml`:
 
 ```bash
-git clean -dfx native/rgb-verify/runtimes        # Plugin-Builder-equivalent: no Rust build
-dotnet publish BTCPayServer.Plugins.RgbUtexo.csproj -c Release -o /tmp/pubA \
-  -p:StaticWebAssetsEnabled=false
-test -f /tmp/pubA/runtimes/linux-x64/native/librgbverifycffi.so
+set -euo pipefail
+git clean -dfx native/rgb-verify/runtimes          # kill staging-tree influence
+ISO=$(mktemp -d)                                    # kill global-packages-cache influence
+NUGET_PACKAGES="$ISO/pkgs" dotnet publish BTCPayServer.Plugins.RgbUtexo.csproj \
+  -c Release -o "$ISO/pub" -p:StaticWebAssetsEnabled=false   # committed nuget.config only: no local feed
+test -f "$ISO/pub/runtimes/linux-x64/native/librgbverifycffi.so"
+grep -q '"RgbVerifyCffi/' "$ISO/pub/BTCPayServer.Plugins.RgbUtexo.deps.json"   # provenance
 ```
 
-Must fail at HEAD `04c1781` and pass after the change. Wrapped as
-`scripts/verify-publish-native.sh` and run in `release.yml` (§4.6) so it cannot regress.
-Note the ordering hazard: the pack script stages `runtimes/`, so this gate must clean that tree
-*after* packing and *before* publishing, or it proves nothing — the plan must make that ordering
-explicit.
+All three machine-local influences named in §1 are neutralised: staging tree cleaned, NuGet cache
+isolated, no local source in play. **This gate cannot pass before S3** — which is the honest signal
+that the fix is not yet real, not a reason to weaken the gate. It must fail at base HEAD `04c1781`
+(no package reference at all) and pass after S4.
+
+Ordering hazard the plan must encode: because the pack script *stages* `runtimes/`, this gate must run
+after packing and after the clean, never against a tree the pack script just populated.
 
 ### 7.5 Live verification
 
-Not required for this finding (no runtime behaviour change on the send path). One local BTCPay
-startup must be observed to confirm the plugin loads normally with the packaged native (probe passes,
-no `disable:` command written), and one deliberate-removal run must be observed to confirm the
-hard-fail message and the auto-disable path, restoring the native afterwards.
+No runtime behaviour change on the send path, so no live send E2E is required. Two local BTCPay
+startups must be observed: (a) with the packaged native present — plugin loads, no `disable:` command
+written; (b) with the native deliberately removed — the actionable message appears and the plugin is
+auto-disabled; then the native is restored. Both on the existing signet setup, no wallet data touched.
 
 ---
 
 ## 8. Rollback
 
-The change is additive plus one deletion. To revert: restore the `<None Include>` block, drop the
-`PackageReference`, revert both lockfiles, revert the `nuget.config` source, and remove the
-self-check call. No data migration, no schema change, no persisted state, no wire-format change. The
-packaging project and script are inert if unreferenced.
+Additive plus one deletion. To revert: restore the `<None Include>` block, drop the
+`PackageReference`, revert both lockfiles, remove the probe call, revert the CI steps. No data
+migration, no schema change, no persisted state, no wire-format change. The packaging project and
+scripts are inert if unreferenced.
 
 ---
 
-## 9. Files touched
+## 9. Decisions to confirm
+
+1. **Merge is gated on an external party (S3).** Implementation proceeds now against the local feed,
+   but the change cannot merge until the org publishes. Confirm that is acceptable, and confirm who
+   owns S3 and by when.
+2. **Hard-fail restart-loop exposure** (§5.3) — confirm no target deployment has a read-only plugins
+   volume, or accept the loop as the diagnostic.
+3. **Canonical pack needs a `macos-14` CI job** (§4.6) to give the osx-arm64 asset CI provenance.
+   Confirm adding a macOS runner job is acceptable; the alternative is a locally built dylib in the
+   published package, which weakens provenance for the dev RID only.
+
+---
+
+## 10. What changed in revision 2 (spec-gate round 1)
+
+Round-1 reviewers found eight material issues each; the following were substantive and are all
+addressed above.
+
+| Issue | Resolution |
+|---|---|
+| §7.4 could pass from a warm NuGet cache — the original defect with the cache substituted for `runtimes/` | §7.4 now isolates `NUGET_PACKAGES` and uses no local source; §1 names all three machine-local states |
+| Probe's real native call could `AccessViolation`/abort before the disable is queued ⇒ restart loop | probe reduced to `TryLoad` + 4× `TryGetExport`; no call, no dereference, no free (§4.5); T5 guards it |
+| `-p:RestoreLockedMode=false` cannot relax anything (csproj:22 sets it under `ContinuousIntegrationBuild`); `NU1403` is active regardless | exemption deleted entirely; publish-before-merge removes the need (§4.0, §5.2) |
+| A committed local folder source breaks restore permanently (`NU1301` on cold cache; gitignored dir absent in a fresh clone) and would shadow the published package | local feed never enters the committed `nuget.config`; command-line sources only (§4.3) |
+| release.yml's `--locked-mode` restore was left unhandled | merged state keeps it; interim steps are branch-local and removed at S4 (§4.6) |
+| Publish-before-merge was not considered | adopted as the primary sequencing (§4.0) |
+| Canonical package's RID set was undefined (CI linux-only vs dev both) | canonical package must contain both RIDs, assembled from two CI jobs (§4.1, §4.6) |
+| T7 proved nothing about provenance | T7 now asserts the native is a `RgbVerifyCffi` package asset in `deps.json`; §7.4 repeats it against the publish output |
+| Probe placement straddled the `config == null` early return | probe moved after it (§4.5) |
+| Version rationale cited a nonexistent `rgb` crate | corrected to the pinned `rgb-ops`/`rgb-consensus`/`rgb-schemas`/`rgb-invoicing` family (§3) |
+| T5/T8 had no way to find repo files | `AssemblyMetadata("RepoRoot")` injected by the Tests csproj (§7.1) |
+| (author-found) package natives do not reach a library's build output without `CopyLocalLockFileAssemblies=true` | documented as load-bearing + T8 (§4.4) |
+
+Not adopted: the claim that `--locked-mode` and `--force-evaluate` conflict — verified that they
+coexist, `--force-evaluate` simply rewrites the hash.
+
+---
+
+## 11. Files touched
 
 **New:** `native/rgb-verify/packaging/RgbVerifyCffi.csproj`, `native/rgb-verify/packaging/_._`,
 `scripts/pack-rgbverify.sh`, `scripts/verify-publish-native.sh`, `Services/RgbNativeSelfCheck.cs`,
-tests file(s) for T1–T7.
+test file(s) for T1–T8.
 
-**Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (remove `:79-84`, add `PackageReference`),
-`Directory.Build.props` (`:10` exclusion), `nuget.config`, `.gitignore`,
-`Services/RgbVerifyNative.cs` (extract `CandidatePaths`), `RGBPlugin.cs` (`:28-35` probe call),
-`packages.lock.json` ×2, `.github/workflows/release.yml`, `.github/workflows/ci.yml`, `CLAUDE.md`,
+**Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (remove `:79-84`, add `PackageReference`, `WHY`
+comment on `:12`), `Directory.Build.props` (`:10` exclusion), `.gitignore`,
+`Services/RgbVerifyNative.cs` (extract `CandidatePaths`), `RGBPlugin.cs` (probe after `:33`),
+`BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata`), `packages.lock.json` ×2,
+`.github/workflows/release.yml`, `.github/workflows/ci.yml`, `CLAUDE.md`,
 `audit-july-22-conclusions.md`, `.github/README.md`.
 
-**Unchanged (explicitly):** `native/rgb-verify/src/**`, `Services/RgbIntentVerifier.cs`,
-`Services/RGBWalletService.cs`, `Services/MemoryWalletSigner.cs`, `Services/RgbPsbtInspector.cs`,
-`native/rgb-verify/build-native.sh`, `native/rgb-verify/.gitignore`.
+**Unchanged (explicitly):** `nuget.config`, `native/rgb-verify/src/**`,
+`native/rgb-verify/build-native.sh`, `native/rgb-verify/.gitignore`,
+`Services/RgbIntentVerifier.cs`, `Services/RGBWalletService.cs`, `Services/MemoryWalletSigner.cs`,
+`Services/RgbPsbtInspector.cs`.
