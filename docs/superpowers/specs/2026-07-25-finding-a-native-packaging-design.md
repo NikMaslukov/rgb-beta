@@ -807,8 +807,13 @@ Properties this encodes, each the fix to a defect a reviewer found:
 - provenance inspected via `targets[…].runtimeTargets`, not a `"RgbVerifyCffi/"` match that the
   `libraries` section also satisfies;
 - guards parse XML/JSON and cover every packing item type (`None`/`Content`/`EmbeddedResource`), both
-  `Include=` and `Update=`, backslash paths, and a namespaced csproj — all executed against fixtures,
-  along with lockfile-stale and csproj↔lockfile version-drift cases;
+  `Include=` and `Update=`, `Link=`/`PackagePath=` retargeting, masking items hidden in
+  `Directory.Build.props`/`.targets`, duplicate `RgbVerifyCffi` references, backslash paths, and a
+  namespaced csproj — all executed against fixtures, along with lockfile-stale and csproj↔lockfile
+  version-drift cases. Also run against the **real repo files**: at base HEAD the guard fails with the
+  correct reason (the masking `<None Include>` is present), and against a phase-2-shaped fixture (that
+  block removed, the `PackageReference` added, lockfiles agreeing) it passes silently — so it neither
+  crashes on the real inputs nor false-positives on the legitimate post-phase-2 csproj;
 - the restore runs `--locked-mode`, which cannot rewrite the lockfile, so no separate "did it mutate
   tracked files" check is needed (an earlier revision claimed a `git diff --quiet` that the script did
   not contain);
