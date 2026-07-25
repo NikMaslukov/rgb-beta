@@ -3,69 +3,21 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 23 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 24 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
-**Revision history**
-- **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
-- **rev 2** — corrected the false "a diagnostic and nothing else" claim (1a rewrites `ResolveNative`, the
-  live P/Invoke path); added T16 and a required live signet send; made the message operator-honest
-  (it must not name `pack-rgbverify.sh` or the unpublished package, nor promise a fixed build that does
-  not exist); T3 asserts properties rather than substrings; the publish check moved into a throwaway
-  worktree with an explicit project path.
-- **rev 3** — T16 reframed after a reviewer showed it could not fail first and duplicated the existing
-  smoke test; T3(g) specified ordinal + case-sensitive (the required filename contains `rgbverifycffi`, so
-  a case-insensitive absence check was unsatisfiable); `NativeFileName()` added to the extraction list.
-- **rev 4** — T16 narrowed again: the parity clause was measured **tautological** (post-refactor
-  `ResolveNative` *is* the shared loop) and **unimplementable** (it is private and returns an `IntPtr`,
-  not a path); operator remediation given a concrete reporting channel; rollback covers `CLAUDE.md`.
-- **rev 5** — `ci.yml` native staging made a required part of this phase (the existing smoke test fails
-  loudly unstaged); the claim that this had to wait for phase 1b
-  was false. The undefined "supported set" clause removed from the message; §3.1 run 2 now names a
-  non-destructive removal location.
-- **rev 6** — an implementer-view reviewer found the refactor's worst failure mode: the plugin assembly
-  declares **six** `[DllImport("rgblibcffi")]` (`Services/RgbLibService.cs:618-641`) and the resolver is
-  registered for the whole assembly, so the `libraryName != Library` early return is load-bearing and the
-  extraction list had omitted it — dropping it would hand rgb-lib calls an rgbverifycffi handle and break
-  the entire wallet path. Added that requirement and **T17**. Documentation moved from `CLAUDE.md`
-  (verified untracked at HEAD and holding live credentials) to the tracked `README.md`. The probe moved
-  ahead of `LoadConfiguration`, which catches only `JsonException`. T4 gained T3's operator-content
-  requirements; the live signet send gained a pass criterion.
-- **rev 7** — T17 made invocable: `ResolveNative` widened to `internal` (it is private, and reflection was
-  already rejected). `§5`'s stale "after `:33`" call site corrected to match §2.
-- **rev 8** — T17's second clause ("a real rgb-lib P/Invoke still binds") **dropped as unreachable** — the
-  six `rgblibcffi` imports are `private static extern`; §3.1's live signet send covers that path instead.
-  A staged-native precondition added, since unstaged the remaining clause passes for the wrong reason
-  (measured). A standing accessibility rule added to §3 after the fifth violation of it.
-- **rev 9** — that standing rule corrected: as first written it excluded the class-sketch members and so
-  invalidated T2/T3/T4/T12/T14. T16 gained its access route (the public `DecodeInvoice` wrapper); §5 now
-  lists the `ResolveNative` widening; the wrapped `§3 and N6` dangling reference finally removed.
-- **rev 10** — the diagnostic now distinguishes *absent* from *present-but-unloadable*: a dry-run reviewer
-  showed the message asserted "known packaging defect" unconditionally, though `TryLoadFromCandidates`
-  returns false for both and an operator with a wrong-architecture or glibc-incompatible native would be
-  misdiagnosed — the glibc case being the very failure the parent spec calls the most likely real-world
-  trigger. Added `existedButFailed` and T3 clause (h).
-- **rev 11** — that change was only half-propagated: `NativeProbe`, `DefaultProbe` and the binding lambda
-  were not widened, so the new list could never reach the formatter (T3(h) unsatisfiable) and the lambda
-  passed three arguments to a four-out-parameter method (measured: `CS7036`). Widened the whole channel,
-  and added the standing rule that a signature change moves as a unit.
-- **rev 13** — a **cold** reviewer (given no list of prior measurements, deliberately) found three majors
-  eight primed rounds had missed: the `DefaultProbe`/`DefaultHasExport` bodies did not compile as written
-  (lambda parameters shadowing the enclosing ones, CS0136, and out parameters never assigned, CS0177 — the
-  CS0123 rationale was vestigial from an abandoned field design); the proposed T16, after three successive
-  narrowings, had become a **literal duplicate** of the existing `RgbVerifyBindingTests` case and was
-  dropped; and `TryLoadFromCandidates` performs the `dlopen`, so a native whose *initializer* aborts now
-  does so at plugin load rather than first send — uncatchable, and a real change in blast radius, now
-  stated. Also corrected: `ci.yml` already fails on `main`, so the staging step fixes a pre-existing
-  breakage rather than one 1a introduces.
-- **rev 12** — the propagation had still missed the one **normative** surface: §2's "Message content"
-  item 3 continued to assert the packaging defect unconditionally, so an implementer following it would
-  have built exactly the misdiagnosis rev 10 existed to prevent, with T3(h) asserting the opposite. Item 3
-  now branches explicitly. Also resolved a real contradiction: the binding comment said the real bindings
-  "MUST be lambdas, not method groups" while `DefaultProbe`/`DefaultHasExport` are static methods used as
-  method groups at `probe ?? DefaultProbe` — both true, of different things, now stated as such.
-
-> **Precondition: none. Mergeable on its own, and it closes an audit clause on its own.**
-
+**Revision history (condensed).** rev 1 split from the phase-1 spec. rev 2–4 corrected the false
+"diagnostic only" claim (this phase rewrites the live `ResolveNative` path), made the message
+operator-honest, and reworked the call-site guard. rev 5–8 made `ci.yml` native staging part of this phase,
+added the resolver-hijack guard T17 after finding six `rgblibcffi` imports share the assembly, and added the
+standing accessibility rule. rev 9–13 moved documentation to the tracked `README.md`, dropped a T16 that had
+been narrowed into a duplicate of an existing test, and admitted the `dlopen`-initializer blast-radius
+change. rev 14–17 added `existedButFailed` and the three-state branch after a reviewer showed the message
+misdiagnosed a glibc failure as a packaging defect, then propagated `winningPath` through the channel.
+rev 18–20 bound the token table to what `VerifyOrLog` *emits* — the phase's actual deliverable had been
+pinned only by the thrown exception — added the probe-threw state, and made the openings state-appropriate.
+rev 21–24 replaced un-buildable native fixtures with an injectable `load` seam, re-anchored the ordering
+clause on detail tokens after the state-appropriate openings broke it, and scoped `Verify`/`VerifyOrLog`
+coverage to the states each can actually reach.
 ---
 
 ## 1. Scope
@@ -99,8 +51,8 @@ enough that this spec carries two obligations it would not otherwise need:
 - **§3.1's live signet send is the refactor's only true end-to-end cover**, and is required before merge.
 - **`ci.yml` must stage the native — and this is required for 1a, not optional.** `ci.yml`'s test job **already fails on `main`** — the binding test is an ungated `[Fact]`, `runtimes/` is
   gitignored, and nothing supplies the native — so this is a pre-existing breakage this phase fixes, not
-  one 1a introduces. **T17 behaves differently and worse:** unstaged it does not fail, it passes
-  *vacuously*, because `ResolveNative("rgblibcffi", …)` returns `IntPtr.Zero` whether or not the guard
+  one 1a introduces. **T17 needs the staged native for a different reason:** its in-body precondition (§3) fails loudly when the
+  native is absent; without that precondition the assertion would pass *vacuously*, because `ResolveNative("rgblibcffi", …)` returns `IntPtr.Zero` whether or not the guard
   exists. The spec's most important regression guard is silently green on a nativeless box, which is
   exactly why its staged-native precondition is mandatory and why the `ci.yml` staging step is part of
   this phase rather than an optional extra. No package is needed: `release.yml:96-108` already does exactly
@@ -391,8 +343,9 @@ run, and never said what breaks. Required order:
      when `existedButFailed` is non-empty from an earlier candidate. Branching on `existedButFailed`
      before the export check emits the wrong message for state 3.
 
-     **(4) Load succeeded and all exports resolved, but `existedButFailed` is non-empty** — reachable by
-     composing T18(b) and T18(c) (a corrupt earlier candidate, a good later one). This is a **success**
+     **(4) Load succeeded and all exports resolved, but `existedButFailed` is non-empty** — reachable with a
+     **non-loadable file at the first candidate and a loadable one at the second** — note this is *not*
+     T18(c), which plants two loadable candidates and so leaves `existedButFailed` empty. This is a **success**
      state: the probe returns healthy and **emits nothing to either sink**. The earlier failure is
      informational only and must not be surfaced, or an operator on a perfectly working install sees
      unloadable-native text that T4 forbids in that state. `existedButFailed` never by itself makes a
@@ -435,12 +388,13 @@ exact substrings are normative:
 | `is absent from this build` + `known packaging defect` | absent state only |
 | `exists but could not be loaded` | present-but-unloadable only |
 | `is the wrong version` + `expected symbol` | missing-export only |
+| `self-check failed` + the exception type name | state 5 (probe threw) only |
 | `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` | every failure state |
 | `build-native.sh` | states 1–3 (omitted in state 5, where no path was searched) |
 
 Each state-specific token must be **absent** from the other three failure states — that mutual exclusion is what
 makes the branch assertions non-vacuous, and every test that asserts a state must assert both the tokens
-that belong to it **and** the absence of the other two states' state-specific tokens.
+that belong to it **and** the absence of every other failure state's state-specific tokens.
 
 ⚠ **The table binds what `VerifyOrLog` EMITS, not only what `Verify` throws.** Phase 1a's call site is
 `VerifyOrLog`, which never throws — so binding the tokens solely to `RgbNativeUnavailableException.Message`
@@ -552,7 +506,7 @@ none of them apply here.
 ## 3. Test plan
 
 Behavioural tests (T1–T4, T12, T14, T15, T18) are written and observed failing before the corresponding
-change; T14 additionally requires the intra-phase ordering in its row. **T17 is a regression guard**. **T19 is behavioural and fails first** — `ResolveNative`'s inline loop exists today, so the delegation assertion fails until the rewrite lands: it
+change; T14 additionally requires the intra-phase ordering in its row. **T17 is a regression guard**. **T19 and T20 are behavioural and fail first** — `ResolveNative`'s inline loop exists today, so the delegation assertion fails until the rewrite lands: it
 passes on the commit that introduces it, and exists to fail later if resolver/probe parity breaks.
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
@@ -562,7 +516,7 @@ and not to the delegate, default, or call sites that carry it — rev 5's option
 `existedButFailed`, the latter caught only because a reviewer compiled the sketch and hit `CS7036`. When
 any signature in §2 changes, every surface in the chain changes in the same edit: the producer
 (`TryLoadFromCandidates`), the `NativeProbe` delegate, `DefaultProbe`/`DefaultHasExport` (**forwarding
-methods since rev 13, not lambdas**), both convenience overloads, the two documented binding comments, and
+methods since rev 13, not lambdas**), both convenience overloads, the two documented binding comments (forwarding methods since rev 13, not lambdas), and
 any test clause that consumes the new value. The current channel carries `handle`, **`winningPath`**,
 `searched` and `existedButFailed` — this list was itself left stale by rev 17, i.e. the anti-partial-
 widening rule was partially widened, which is precisely the failure it exists to prevent. A partial widening is not a smaller
@@ -592,7 +546,7 @@ it touches and confirm its accessibility before it is added.
 | T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, enforced in the test body — not a prose note:** the first statement asserts `File.Exists` at `Path.Combine(AppContext.BaseDirectory, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", RgbVerifyNative.NativeFileName())` — the path the Tests project's own output uses — and **fails with "unverified: gate native not staged"** if it does not. The mechanism is specified because "staged for the host RID" would otherwise be invented per-implementer. Measured: unstaged, the resolver returns Zero whether or not the guard exists, so an ungated `[Fact]` would pass vacuously — exactly the silent-green failure §1 warns about. A precondition that is only documented is not a precondition. An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-641`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
 | T18 | `TryLoadFromCandidates_RealLoop_DistinguishesStates` | drives the **real** `TryLoadFromCandidates` against a temp `baseDir`, passing a **fake `load`** (the seam in §2) that records every path it is asked for — no real native libraries are built, so this is deterministic and needs no compiler. Nothing else calls the real loop: T3/T4/T12/T14 all inject a fake `NativeProbe`. Cases: **(a)** empty dir ⇒ `false`, `searched` equals `CandidatePaths(baseDir)` **exactly and in order** (pinning that the live loop enumerates the extracted helper rather than its own list), `existedButFailed` empty; **(b)** a file planted at the first candidate with the fake returning `IntPtr.Zero` for it ⇒ `false`, `existedButFailed` contains exactly that path; **(c)** files planted at the **first two** candidates with the fake returning distinct non-zero handles ⇒ `true`, `handle`/`winningPath` are the **first** candidate's, and the fake's recorded list contains **only** the first path — that recorded-call assertion is what distinguishes first-wins from an exhaustive-load-return-first loop, which would `dlopen` every present candidate and widen the initializer-abort radius §2 argues against | `TryLoadFromCandidates` does not exist |
 | T19 | `ResolveNative_DelegatesToSharedCandidateLoop` | **Roslyn-parsed**: `ResolveNative`'s body passes **no** `load` argument (so production always uses the real `NativeLibrary.TryLoad` default — otherwise a broken default is invisible to every test while §2 claims parity is structural), contains an `InvocationExpression` naming `TryLoadFromCandidates`, contains **no** loop construct (`ForEachStatement`/`ForStatement`/`WhileStatement`) of its own, **and passes `ResolveBaseDir(assembly)` as its first argument — not `AppContext.BaseDirectory` and not `ResolveBaseDir` of anything else**. The last clause matters because the two are indistinguishable in the test host but differ under the plugin host, where `AppContext.BaseDirectory` is BTCPay's directory rather than the plugin's. Without it, an implementer can extract the helpers and leave `ResolveNative`'s inline loop untouched: T1, T17, T18 and the binding test all still pass, and §2's "parity is structural, not an assumption" becomes false while every test is green | `ResolveNative` still has its inline loop |
-| T20 | `SelfCheck_ProbeThrew_ReportsSelfCheckFailure` | probe throws ⇒ `VerifyOrLog` returns `false` and `Verify` throws `RgbNativeUnavailableException`; both emit the state-5 tokens (the two universal lines, `self-check failed`, the exception type name, the reporting channel) and **none** of states 1–3's state-specific tokens. State 5 is unreachable from T3 (which needs the probe to return `false`) and from T4 (which needs it to return `true`), so without T20 the only state whose diagnosis cannot be derived from probe outputs is untested | no state-5 branch exists |Tests reading repo files (T15, T19) locate the repo root from an `AssemblyMetadata("RepoRoot", …)` attribute
+| T20 | `ProbeThrew_VerifyOrLogReportsSelfCheckFailure` | probe throws ⇒ **`VerifyOrLog`** returns `false` and emits the state-5 tokens to both sinks (the two universal lines, `self-check failed`, the exception type name, the reporting channel) and **none** of states 1–3's state-specific tokens. **`Verify` is deliberately out of scope here**: §2 gives the catch-all to `VerifyOrLog` alone, so a throwing probe propagates its *own* exception out of `Verify` with nothing logged — the intended hard-fail behaviour, and why T14 covers states 1–3 only. An earlier draft required `Verify` to throw `RgbNativeUnavailableException` here, contradicting both. State 5 is unreachable from T3 (needs the probe to return `false`) and T4 (needs `true`), so without T20 the one state whose diagnosis cannot be derived from probe outputs is untested | no state-5 branch exists |
 injected by the Tests csproj from `$(MSBuildThisFileDirectory)..`.
 
 ### 3.1 Live verification
@@ -669,7 +623,7 @@ schema change, no persisted state, no wire-format change.
 ## 5. Files touched
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
-T1–T4, T12, T14, T15, T17, T18, T19.
+T1–T4, T12, T14, T15, T17–T20.
 
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
 (deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` **and `ResolveNative`** to `internal` (T17 invokes the latter directly);
