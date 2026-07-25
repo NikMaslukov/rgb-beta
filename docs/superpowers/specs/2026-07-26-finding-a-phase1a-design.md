@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 20 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 21 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history**
 - **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
@@ -266,12 +266,23 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   **dedupe while preserving order**: on .NET 8+ `RuntimeInformation.RuntimeIdentifier` already equals
   `<os>-<arch>` for the RIDs we ship, so `RuntimeIdentifiers()` (`:42-53`) yields the same RID twice and
   would otherwise emit duplicate candidates.
-- `internal static bool TryLoadFromCandidates(string baseDir, out IntPtr handle, out string? winningPath, out IReadOnlyList<string> searched, out IReadOnlyList<string> existedButFailed)`
+- `internal static bool TryLoadFromCandidates(string baseDir, out IntPtr handle, out string? winningPath, out IReadOnlyList<string> searched, out IReadOnlyList<string> existedButFailed, Func<string, IntPtr>? load = null)`
   — **enumerates exactly `CandidatePaths(baseDir)`, in order** (stated because nothing else pins it: T1
   could otherwise be green against a `CandidatePaths` the live loop never calls, reintroducing the drift
   the extraction exists to prevent). For each: `File.Exists` (also extracted; it is the sole source of the existed-vs-absent
   distinction) then `NativeLibrary.TryLoad(<absolute path>, out handle)`, returning both the paths it tried
   **and** those that existed on disk yet failed to load.
+
+  **Injectable loader.** The optional `load` parameter defaults to
+  `p => NativeLibrary.TryLoad(p, out var h) ? h : IntPtr.Zero`. Production never passes it. It exists so
+  the ordering and state tests are deterministic and cross-platform: an earlier draft required T18 to
+  build **two distinguishable real native libraries, one with a marker-file initializer**, which is not
+  implementable from this document — no fixture, compiler step or platform strategy was specified, and
+  engineers would each invent one (skip the case, reuse the staged native, shell out to `cc`). With the
+  seam, a fake loader records the paths it is asked for and returns handles on demand, so "stopped at the
+  first success" is asserted by **inspecting the recorded call list** rather than by observing a side
+  effect of a real `dlopen`. `File.Exists` is still real, driven by files planted in a temp directory —
+  those need no compiler.
 
   **Semantics, stated because the prose alone does not pin them.** The loop returns the **first**
   successful load and **stops there** — it must not enumerate all candidates and return the last handle.
@@ -438,7 +449,7 @@ that belong to it **and** the absence of the other two states' state-specific to
 would leave this phase's *sole deliverable* unpinned: an implementation could log
 `LogError(ex, "RGB native self-check failed")` plus a one-line summary and satisfy every clause while the
 operator learns nothing. **T12 and T14 must assert this table against the text written to the `ILogger`
-and to the `TextWriter`**, in every failure state, exactly as T3/T4 assert it against the thrown message.
+and to the `TextWriter`** — specifically against the **formatted/rendered** message in both cases. The required tokens must appear in the rendered text, not only as structured template arguments: an implementation logging `LogError("…{Rid}…{Paths}", rid, paths)` would otherwise pass or fail purely on the test's capture technique. Structured arguments are welcome in addition, never instead, in every failure state, exactly as T3/T4 assert it against the thrown message.
 
 **Call site.** `RGBPlugin.Execute`, immediately after the `ctx` cast at `RGBPlugin.cs:30` and **before**
 `LoadConfiguration` — not after the `config` check as an earlier draft said. `LoadConfiguration` catches
@@ -543,7 +554,7 @@ none of them apply here.
 ## 3. Test plan
 
 Behavioural tests (T1–T4, T12, T14, T15, T18) are written and observed failing before the corresponding
-change; T14 additionally requires the intra-phase ordering in its row. **T17 is a regression guard**; T19 fails first (the inline loop exists today): it
+change; T14 additionally requires the intra-phase ordering in its row. **T17 is a regression guard**. **T19 is behavioural and fails first** — `ResolveNative`'s inline loop exists today, so the delegation assertion fails until the rewrite lands: it
 passes on the commit that introduces it, and exists to fail later if resolver/probe parity breaks.
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
@@ -580,7 +591,7 @@ it touches and confirm its accessibility before it is added.
 | T15 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`; **and its statement index is lower than that of the `LoadConfiguration` invocation**. The ordering clause is required: `if (config == null) return;` is *conditional*, so a call site placed after `LoadConfiguration` satisfies every other clause while losing the property §2 places it there for — that `LoadConfiguration`'s uncaught failures cannot skip the diagnostic. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
 
-| T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, enforced in the test body — not a prose note:** the first statement asserts the staged native exists for the host RID and **fails with "unverified: gate native not staged"** if it does not. Measured: unstaged, the resolver returns Zero whether or not the guard exists, so an ungated `[Fact]` would pass vacuously — exactly the silent-green failure §1 warns about. A precondition that is only documented is not a precondition. An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-641`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
+| T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, enforced in the test body — not a prose note:** the first statement asserts `File.Exists` at `Path.Combine(AppContext.BaseDirectory, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", RgbVerifyNative.NativeFileName())` — the path the Tests project's own output uses — and **fails with "unverified: gate native not staged"** if it does not. The mechanism is specified because "staged for the host RID" would otherwise be invented per-implementer. Measured: unstaged, the resolver returns Zero whether or not the guard exists, so an ungated `[Fact]` would pass vacuously — exactly the silent-green failure §1 warns about. A precondition that is only documented is not a precondition. An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-641`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
 | T18 | `TryLoadFromCandidates_RealLoop_DistinguishesAbsentFromUnloadable` | drives the **real** `TryLoadFromCandidates` against a temp `baseDir` — no test currently calls it, `DefaultProbe` or `ResolveBaseDir` at all, since T3(h) injects a fake `NativeProbe`. Three cases: **(a)** empty dir ⇒ `false`, `searched` equals `CandidatePaths(baseDir)` **exactly and in order** (pinning that the live loop enumerates the extracted helper rather than its own list), `existedButFailed` **empty**; **(b)** a corrupt file planted at the first candidate path ⇒ `false`, `existedButFailed` contains exactly that path; **(c)** **two loadable but distinguishable** libraries, one at each of the first two candidate paths (different exported symbol names, so the handle can be identified) ⇒ `true` and the handle is the **first** candidate's. To make "the second was never loaded" *observable* rather than asserted, the second library's **initializer must have a detectable side effect** (e.g. it creates a marker file next to itself on load); the test asserts that marker is absent. Handle identity alone cannot distinguish an exhaustive-load-return-first loop, which would still `dlopen` every present candidate and widen the initializer-abort radius §2 argues against. A corrupt-first/loadable-second fixture cannot detect this: the loadable one is then the only success, so first-wins and last-wins are indistinguishable and an exhaustive-and-return-last loop passes. Without (a)/(b) an implementation that always returns an empty `existedButFailed` passes every other test and silently restores the glibc misdiagnosis the field exists to prevent; without (c) the first-vs-last-load semantics are untested | `TryLoadFromCandidates` does not exist |
 | T19 | `ResolveNative_DelegatesToSharedCandidateLoop` | **Roslyn-parsed**: `ResolveNative`'s body contains an `InvocationExpression` naming `TryLoadFromCandidates`, contains **no** loop construct (`ForEachStatement`/`ForStatement`/`WhileStatement`) of its own, **and passes `ResolveBaseDir(assembly)` as its first argument — not `AppContext.BaseDirectory` and not `ResolveBaseDir` of anything else**. The last clause matters because the two are indistinguishable in the test host but differ under the plugin host, where `AppContext.BaseDirectory` is BTCPay's directory rather than the plugin's. Without it, an implementer can extract the helpers and leave `ResolveNative`'s inline loop untouched: T1, T17, T18 and the binding test all still pass, and §2's "parity is structural, not an assumption" becomes false while every test is green | `ResolveNative` still has its inline loop |
 Tests reading repo files (T15, T19) locate the repo root from an `AssemblyMetadata("RepoRoot", …)` attribute
@@ -600,7 +611,10 @@ plausible probe can pass every unit test and still fail inside BTCPay.
    the host RID, and the container-built `linux-x64` artifact would be irrecoverable without another
    container run. The message must be logged with the consequence, the RID and every searched path, and
    the plugin **still loads**. Then restore the name but truncate the file to a few bytes of text and repeat:
-   the message must now name that path and **not** claim a packaging defect.
+   the message must now name that path and **not** claim a packaging defect. **Restore the real native
+   before run 3** — copy it back from `native/rgb-verify/runtimes/<rid>/native/`, do not rely on a rebuild:
+   the csproj copies with `PreserveNewest`, and the truncated output file is *newer* than the source, so a
+   plain rebuild will not overwrite it and the live signet send would run against a corrupt library.
 
 3. **A live signet send**, because §1's refactor touches the live P/Invoke resolution path. Unit tests
    cover the probe; only a real send proves `ResolveNative` still binds the native for an actual
