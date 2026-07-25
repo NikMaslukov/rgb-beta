@@ -206,14 +206,16 @@ internal static class RgbNativeSelfCheck
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static void Verify(IServiceProvider? bootstrapServices,
                                 NativeProbe? probe = null,
-                                Func<IntPtr, string, bool>? hasExport = null);
+                                Func<IntPtr, string, bool>? hasExport = null,
+                                TextWriter? sink = null);
 
     // catches EVERY exception, reports to BOTH sinks, returns false — the phase-1 entry point
     internal static bool VerifyOrLog(ILoggerFactory? factory, TextWriter sink,
                                      NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static bool VerifyOrLog(IServiceProvider? bootstrapServices,
                                      NativeProbe? probe = null,
-                                     Func<IntPtr, string, bool>? hasExport = null);
+                                     Func<IntPtr, string, bool>? hasExport = null,
+                                     TextWriter? sink = null);
 
     // real bindings, declared as static METHODS (not static readonly fields): a field's type
     // initializer would run on first touch of the class — i.e. before the method body, outside
@@ -316,8 +318,9 @@ handle and requires `TryGetExport` for all four of `rgbverify_decode_invoice`, `
 
 **Message content** (the "loud, actionable error"): expected filename for the platform,
 `RuntimeInformation.RuntimeIdentifier`, **every candidate path searched**, which symbol failed to
-resolve when applicable, where the native is expected to come from — a locally staged build (`scripts/pack-rgbverify.sh`) in this
-phase, the `RgbVerifyCffi` package once phase 2 lands — and the matching remediation. No secrets, no PII, no wallet data.
+resolve when applicable, the expected source — the message always names `RgbVerifyCffi` (the package that will supply it from phase 2
+on) **and** the locally staged build (`scripts/pack-rgbverify.sh`) that supplies it today — plus the
+matching remediation. T3 asserts the `RgbVerifyCffi` string, so naming it is mandatory in both phases. No secrets, no PII, no wallet data.
 
 **Call site.** `RGBPlugin.Execute`, after the `config` check at `RGBPlugin.cs:32-33`, before any service
 registration.
@@ -357,13 +360,16 @@ triggers the `disable:` + restart cascade. Required shape:
 
 ```
 internal static bool VerifyOrLog(IServiceProvider? sp, NativeProbe? probe = null,
-                                 Func<IntPtr, string, bool>? hasExport = null)
+                                 Func<IntPtr, string, bool>? hasExport = null,
+                                 TextWriter? sink = null)
 {
+    // SEPARATE guards, sink first. Sharing one try lets a throwing provider abort before the sink is
+    // assigned, so the diagnostic lands in TextWriter.Null — measured: emitted nowhere at all.
+    TextWriter writer = TextWriter.Null;
+    try { writer = sink ?? Console.Error; } catch { /* keep TextWriter.Null */ }
     ILoggerFactory? factory = null;
-    TextWriter sink = TextWriter.Null;          // safe default; Console.Error is acquired inside the try
-    try { factory = sp?.GetService<ILoggerFactory>(); sink = Console.Error; }
-    catch { /* diagnostics must never break startup */ }
-    return VerifyOrLog(factory, sink, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);
+    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* diagnostics must never break startup */ }
+    return VerifyOrLog(factory, writer, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);
 }
 ```
 
@@ -374,13 +380,14 @@ actionable `RgbNativeUnavailableException` T14 promises. Required shape:
 
 ```
 internal static void Verify(IServiceProvider? sp, NativeProbe? probe = null,
-                            Func<IntPtr, string, bool>? hasExport = null)
+                            Func<IntPtr, string, bool>? hasExport = null,
+                            TextWriter? sink = null)
 {
+    TextWriter writer = TextWriter.Null;
+    try { writer = sink ?? Console.Error; } catch { /* keep TextWriter.Null */ }
     ILoggerFactory? factory = null;
-    TextWriter sink = TextWriter.Null;
-    try { factory = sp?.GetService<ILoggerFactory>(); sink = Console.Error; }
-    catch { /* diagnostics must not mask the finding */ }
-    Verify(factory, sink, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);   // rethrows by design
+    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* must not mask the finding */ }
+    Verify(factory, writer, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);  // rethrows by design
 }
 ```
 
@@ -402,8 +409,8 @@ factory that hands back `NullLogger.Instance` (`Startup.cs:76`'s
 So `VerifyOrLog` writes the diagnostic to **both** sinks unconditionally: the `ILogger` when one is
 available, and a `TextWriter` sink defaulting to `Console.Error`. Duplicated output in normal operation
 is a cheap price for an audit-mandated error that cannot vanish into a null logger. The sink is a parameter on the 4-arg overload, so T12 observes its content there without
-`Console.SetError` and without xunit parallelism ordering hazards; the 1-arg overload's hardcoded
-`Console.Error` is never asserted on for content.
+`Console.SetError` and without xunit parallelism ordering hazards; the convenience overloads take an optional `sink`, so their content is
+observable in tests without touching global `Console` state.
 
 The hard-fail wiring's operational consequences — plugin auto-disable, the fleet-wide blast radius, and
 the restart-loop exposure — belong to phase 2 and are specified there. Phase 1 logs and continues, so
@@ -524,7 +531,7 @@ written before phase-2's changes.
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — **never** the provider's exception. That clause asserts the thrown type only: the provider throws on the first statement inside the guard, so `sink` never advances past `TextWriter.Null` and `factory` stays null, and the 1-arg overload exposes neither for inspection. Asserting sink or logger content there would be unsatisfiable by construction — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — never the provider's exception — **and the injected sink still receives the message**. Not "both sinks": a throwing provider leaves `factory` null, so the logger cannot. This clause is why the sink is acquired under its own guard *before* the factory — measured, sharing one guard sent the diagnostic to `TextWriter.Null`, i.e. nowhere, at the exact moment phase 2 auto-disables the plugin — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
 | T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
 Tests reading repo files (T8, T9, T10, T15) locate the repo root from an
