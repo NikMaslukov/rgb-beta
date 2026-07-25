@@ -137,8 +137,11 @@ internal static class RgbNativeSelfCheck
 // the factory must happen inside the callee's guard (see "Logging sink" below), and it keeps the two
 // call sites — phase 1's VerifyOrLog(ctx.BootstrapServices) and phase 2's Verify(ctx.BootstrapServices)
 // — a one-identifier diff, which is exactly what T13 and T15 key on.
-// real bindings — both MUST be lambdas, not method groups (a method group conversion fails
-// CS0123 for either: TryLoadFromCandidates takes an extra baseDir, TryGetExport has an out param):
+// Bodies of DefaultProbe / DefaultHasExport. Each must WRAP its target in a lambda rather than
+// referencing it directly: neither target converts to the delegate as a method group (CS0123) —
+// TryLoadFromCandidates takes an extra baseDir, TryGetExport has an out param. Note this is about
+// the *targets*; DefaultProbe and DefaultHasExport are themselves static methods and ARE used as
+// method groups at the `probe ?? DefaultProbe` call sites, which binds by target typing:
 //   probe     = (out IntPtr h, out IReadOnlyList<string> s, out IReadOnlyList<string> f) =>
 //                   RgbVerifyNative.TryLoadFromCandidates(
 //                       RgbVerifyNative.ResolveBaseDir(typeof(RgbVerifyNative).Assembly),
@@ -289,16 +292,26 @@ run, and never said what breaks. Required order:
    plugin are unaffected. (An operator who reads nothing else must still learn this.)
 2. **What is missing, concretely:** the expected filename for this platform and
    `RuntimeInformation.RuntimeIdentifier`, plus every candidate path searched.
-3. **Operator remediation — honest about what they can actually do.** Until the packaging fix ships,
-   a Plugin-Builder install has **no** build that contains the native, so "install a fixed build" would
-   be false advice. The message says: this is a known packaging defect in the plugin distribution, and give the **concrete reporting channel** —
-   the plugin's issue tracker at `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` — asking the
-   operator to quote this message. "Contact the vendor" without naming where is a dead end, which is the
-   one step an operator can actually take. Phase 1a deliberately makes **no** claim about which
-   platforms are "supported": delivery is still whatever `build-native.sh` staged, and the shipped RID set
-   is a phase-1b/parent decision that is not yet settled. An implementer must not invent one — a wrong
-   "your platform is unsupported" line would send an operator down the wrong path. Naming the RID and the
-   searched paths (item 2) is sufficient and is what T3 enforces.
+3. **Operator remediation — honest, and branching on what was actually observed.** The probe cannot
+   distinguish "absent" from "present but unloadable" without `existedButFailed`, so the message must not
+   assert one diagnosis for both:
+   - **No candidate path existed** → the native is absent from this build. Until the packaging fix ships a
+     Plugin-Builder install has **no** build containing it, so "install a fixed build" would be false
+     advice; say this is a known packaging defect in the plugin distribution.
+   - **A candidate existed but would not load** → name those paths and say the file is present but could
+     not be loaded, which points at an architecture mismatch, a corrupt file, or incompatible system
+     libraries (for example a glibc floor newer than the host). **Do not claim a packaging defect here** —
+     it is a different problem with a different fix, and the glibc case is the one the parent spec calls
+     the most likely real-world trigger.
+
+   Both branches give the **concrete reporting channel** — the plugin's issue tracker at
+   `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` — and ask the operator to quote the
+   message; "contact the vendor" without naming where is a dead end, and this is the one step an operator
+   can actually take. Phase 1a deliberately makes **no** claim about which platforms are "supported":
+   delivery is still whatever `build-native.sh` staged, and the shipped RID set is a phase-1b/parent
+   decision that is not yet settled. An implementer must not invent one — a wrong "your platform is
+   unsupported" line would send an operator down the wrong path. Naming the RID and the searched paths
+   (item 2) is sufficient, and T3(h) asserts the branch.
 4. **Developer remediation, last, and only naming things that exist:** `native/rgb-verify/build-native.sh`
    builds and stages the native for the host RID. The message must **not** name
    `scripts/pack-rgbverify.sh` or the `RgbVerifyCffi` package — neither exists after phase 1a, and citing
