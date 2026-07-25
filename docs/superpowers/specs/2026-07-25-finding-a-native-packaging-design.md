@@ -4,7 +4,7 @@
 **Code base HEAD:** `04c1781` (spec commits sit on top; all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 7 — after spec-gate round 6 (changelogs for rounds 1–6 in §10)
+**Revision:** 8 — after spec-gate round 7 (changelogs for rounds 1–7 in §10)
 
 ---
 
@@ -379,8 +379,12 @@ internal static class RgbNativeSelfCheck
                                      NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static bool VerifyOrLog(ILogger? logger);   // sink defaults to Console.Error
 }
-// real bindings: probe     = RgbVerifyNative.TryLoadFromCandidates
-//                hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
+// real bindings — both MUST be lambdas, not method groups (a method group conversion fails
+// CS0123 for either: TryLoadFromCandidates takes an extra baseDir, TryGetExport has an out param):
+//   probe     = (out IntPtr h, out IReadOnlyList<string> s) =>
+//                   RgbVerifyNative.TryLoadFromCandidates(
+//                       RgbVerifyNative.ResolveBaseDir(typeof(RgbVerifyNative).Assembly), out h, out s)
+//   hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
 ```
 
 There is **no mode flag**. The two phases differ by which entry point `RGBPlugin.Execute` calls — one
@@ -642,6 +646,12 @@ Finding A stays an open blocker until (d). No "✅ FIXED" before then, with that
 
 ## 7. Test plan
 
+**Phase-2 TDD ordering is load-bearing and the plan must encode it.** T6, T7, T11 and T13 only fail first
+if they are written and observed failing *before* phase-2 steps 1 and 3 (the `PackageReference`, the
+`<None Include>` removal, the call-site flip), against a tree whose `native/rgb-verify/runtimes` has been
+cleaned. Written after those steps they all pass at introduction and prove nothing. The implementation
+plan owns enforcing this order — no test or CI check can.
+
 Behavioural tests (T1–T4, T6, T7, T12, T13) are written and observed failing before the corresponding
 change. T8 and T9 are **regression guards**: they encode an invariant that already holds and are expected to
 pass on the commit that introduces them (T10, T11 and T13 do fail first — they encode changes) — their value is failing later,
@@ -656,14 +666,14 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 | T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected probe+export fakes reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
 | T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every searched candidate path, and `RgbVerifyCffi` | same |
 | T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
-| T12 | 1 | `VerifyOrLog_FailingProbe_LogsAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` and writes the actionable message; asserted for **both** sinks (an injected `ILogger` capturing at error level, and the `Console.Error` fallback when `logger` is `null`); and with a probe that throws an arbitrary exception type it still returns `false` — the catch-all that stops phase 1 self-DoSing. Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path on a host where the native is present | `VerifyOrLog` does not exist |
+| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §4.5 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; and a probe throwing an arbitrary exception type still returns `false` (the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, §4.4) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards §4.0 |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host. **Precondition, mandatory:** written only after `git clean -dfx native/rgb-verify/runtimes` and the removal of the `<None Include>` — otherwise it passes before the change, because the Tests output already contains both natives today via the old copy path (verified). Weaker evidence than T7; see the note below | without that precondition it does not fail first — the machine-local-state trap §1 warns about |
+| T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host. **Precondition, mandatory:** written and observed failing against a tree where `native/rgb-verify/runtimes` is cleaned, the `<None Include>` is still present-or-removed, **and the `PackageReference` is not yet added** — a clean staging tree alone is not enough, because once phase-2 step 1 lands the package itself supplies the native and the test passes at introduction. The Tests output also already contains both natives today via the old copy path (verified). Weaker evidence than T7; see the note below | without that precondition it does not fail first — the machine-local-state trap §1 warns about |
 | T7 | 2 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` has, under `targets[*]["RgbVerifyCffi/<version>"].runtimeTargets`, an entry with `assetType == "native"` for the host RID — provenance, not presence, and not a `libraries`-section match | native currently arrives as a copied `None` item |
 | T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes` — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
-| T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | parses `RGBPlugin.cs` and asserts the startup check calls the throwing entry point and **no longer** calls `VerifyOrLog` — the flip's only automated guard. (A behavioural `Verify_FailingProbe_Throws` would duplicate T3 and could not fail first, since `Verify` and its throw contract both land in phase 1.) | phase 1's call site uses `VerifyOrLog`, so it fails until the flip lands |
+| T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | **Roslyn-parsed**, not text-matched: parse `RGBPlugin.cs` with `Microsoft.CodeAnalysis.CSharp` (already a plugin dependency, csproj:69), locate the `Execute` method declaration, and assert its body contains an `InvocationExpression` naming the throwing entry point and **no** invocation naming `VerifyOrLog`. A syntax-tree rule is required because a plain source-text match would be satisfied by a commented-out or `#if`-disabled call — as the flip's only automated guard that would be worthless. (A behavioural `Verify_FailingProbe_Throws` would instead duplicate T3 and could not fail first, since `Verify` and its throw contract both land in phase 1.) | phase 1's call site invokes `VerifyOrLog`, so it fails until the flip lands |
 
 Tests reading repo files (T8, T9, T10, T11) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
@@ -901,6 +911,20 @@ scripts are inert if unreferenced.
 
 ## 10. Revision history
 
+### Revision 8 — after spec-gate round 7
+
+Round 7 independently reproduced the guard's behaviour against the real repo files (fires today for the
+right reason; no false positive on a phase-2-shaped csproj; argv split correct; `InternalsVisibleTo`
+reaches all widened members; spot-checked line refs all correct). Remaining defects, all fixed:
+
+| Issue | Resolution |
+|---|---|
+| `probe = RgbVerifyNative.TryLoadFromCandidates` cannot compile — `NativeProbe` is `(out, out)` but the method takes `(baseDir, out, out)` (CS0123, the same defect already noted for `hasExport`) | both real bindings spelled out as explicit lambdas, including the `ResolveBaseDir(typeof(RgbVerifyNative).Assembly)` argument (§4.5) |
+| T12 asserted a `Console.Error` fallback "when the logger is null" — the conditional design revision 7 explicitly rejected — so an implementation that skips the sink whenever a logger exists would pass while the message could still vanish into a `NullLogger` | T12 now asserts the sink receives the message **with a non-null logger present**, and specifically with `NullLogger.Instance` (§7.1 T12) |
+| T6's precondition was insufficient: once phase-2 step 1 lands, the package supplies the native, so a clean staging tree alone still lets T6 pass at introduction. T7/T11/T13 shared the same unstated ordering assumption, and nothing named an enforcer | T6's precondition extended to "`PackageReference` not yet added"; a new paragraph makes the phase-2 TDD ordering explicit and assigns enforcement to the implementation plan (§7.1) |
+| T13 had no match rule, so a commented-out or `#if`-disabled call would satisfy it — worthless as the flip's only automated guard | T13 specified as a Roslyn syntax-tree assertion over `Execute`'s body using `Microsoft.CodeAnalysis.CSharp` (already a plugin dependency, csproj:69) (§7.1 T13) |
+| §11 doc rows omitted `CLAUDE.md:328` and `README.md:300-306` though §4.7 and the revision-7 changelog claimed them | added to the §11 rows |
+
 ### Revision 7 — after spec-gate round 6
 
 Round 6 independently reproduced the §7.4 command sequence against a cold cache (matching the author's
@@ -1051,7 +1075,7 @@ Not adopted: that `--locked-mode` and `--force-evaluate` conflict — verified t
 | `BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` | `AssemblyMetadata("RepoRoot", …)` | 1 |
 | `CLAUDE.md` | pack workflow, glibc floor, log-only check, phase sequence | 1 |
 | " | package delivery + hard-fail + recovery; correct `:310` and `:360` | 2 |
-| `README.md` | correct `:224`, `:242`, `:264` | 2 |
+| `README.md` | correct `:224`, `:242`, `:264`, and `:300-306` (Platform Support) | 2 |
 | `.github/README.md` | supply-chain note | 2 |
 | `btcpay.plugin.json` | version bump `:6` | 2 |
 | `packages.lock.json` ×2 | regenerated against nuget.org | 2 |
