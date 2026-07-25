@@ -116,6 +116,11 @@ being dead). The same image would abort at first send today, so this changes *wh
 for that one case "the same, plus a startup error" is not accurate, and it is why the probe never invokes
 an exported function beyond the load itself.
 
+Relatedly, the probe is the **first touch of `RgbVerifyNative`** in the process, so its static constructor
+— which registers the `DllImportResolver` (`:14`) — also moves from first-send to plugin load. Benign
+here, but phase 2 must know it: if that constructor throws, `Verify` surfaces a
+`TypeInitializationException`, not the `RgbNativeUnavailableException` its contract promises.
+
 **Log-only, never throwing.** A hard-failing probe here would auto-disable the plugin on every production
 BTCPay, since the artifact still lacks the native. The hard-fail flip belongs to phase 2.
 
@@ -252,8 +257,17 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   `<os>-<arch>` for the RIDs we ship, so `RuntimeIdentifiers()` (`:42-53`) yields the same RID twice and
   would otherwise emit duplicate candidates.
 - `internal static bool TryLoadFromCandidates(string baseDir, out IntPtr handle, out IReadOnlyList<string> searched, out IReadOnlyList<string> existedButFailed)`
-  — the candidate loop over `NativeLibrary.TryLoad(<absolute path>, out handle)`, returning both the paths
-  it tried **and** those that existed on disk yet failed to load. The second list is what lets the message
+  — the candidate loop over `File.Exists` (also extracted; it is the sole source of the existed-vs-absent
+  distinction) then `NativeLibrary.TryLoad(<absolute path>, out handle)`, returning both the paths it tried
+  **and** those that existed on disk yet failed to load.
+
+  **Semantics, stated because the prose alone does not pin them.** The loop returns the **first**
+  successful load and **stops there** — it must not enumerate all candidates and return the last handle.
+  Today's `ResolveNative` (`:28-38`) returns the first, and "returning the paths it tried" is satisfiable
+  by an exhaustive implementation that returns the last: on a non-portable host RID such as
+  `linux-musl-x64` — the very case T1 cites — that loads a *different* build than today and breaks sends
+  that currently work. Exhaustive loading would also `dlopen` every present candidate, widening the
+  initializer-abort radius described in §1. The second list is what lets the message
   tell two very different failures apart: a file that is missing (a packaging defect) versus one that is
   present but unloadable (wrong architecture, corrupt, or incompatible system libraries — e.g. a glibc
   floor newer than the host). Without it the diagnostic must guess, and would tell an operator with a
@@ -485,6 +499,7 @@ it touches and confirm its accessibility before it is added.
 
 
 | T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, mandatory:** the gate native must be staged for the host RID, or the assertion passes for the wrong reason (measured: unstaged, the resolver returns Zero regardless and the guard's loss is undetectable). An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-641`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
+| T18 | `TryLoadFromCandidates_RealLoop_DistinguishesAbsentFromUnloadable` | drives the **real** `TryLoadFromCandidates` against a temp `baseDir` — no test currently calls it, `DefaultProbe` or `ResolveBaseDir` at all, since T3(h) injects a fake `NativeProbe`. Three cases: **(a)** empty dir ⇒ `false`, `searched` lists every candidate, `existedButFailed` **empty**; **(b)** a corrupt file planted at the first candidate path ⇒ `false`, `existedButFailed` contains exactly that path; **(c)** a loadable library at the second candidate with a corrupt one at the first ⇒ `true`, and the handle is the one from the **first successful** candidate. Without (a)/(b) an implementation that always returns an empty `existedButFailed` passes every other test and silently restores the glibc misdiagnosis the field exists to prevent; without (c) the first-vs-last-load semantics are untested | `TryLoadFromCandidates` does not exist |
 Tests reading repo files (T15) locate the repo root from an `AssemblyMetadata("RepoRoot", …)` attribute
 injected by the Tests csproj from `$(MSBuildThisFileDirectory)..`.
 
@@ -495,12 +510,14 @@ exercising native resolution for a plugin-loaded assembly, and measured runtime 
 plausible probe can pass every unit test and still fail inside BTCPay.
 
 1. **native present** — plugin loads, no error logged, no `disable:` command written;
-2. **native removed** — rename it inside the plugin's **build output**
+2. **native removed, then corrupted** — two sub-runs, because renaming exercises only the *absent* branch
+   and the present-but-unloadable branch is the one that misdiagnoses. First rename it inside the plugin's **build output**
    (`bin/Debug/net10.0/runtimes/<rid>/native/`), restoring it afterwards. Do **not** clean
    `native/rgb-verify/runtimes` for this: that is the source staging tree, `build-native.sh` rebuilds only
    the host RID, and the container-built `linux-x64` artifact would be irrecoverable without another
    container run. The message must be logged with the consequence, the RID and every searched path, and
-   the plugin **still loads**.
+   the plugin **still loads**. Then restore the name but truncate the file to a few bytes of text and repeat:
+   the message must now name that path and **not** claim a packaging defect.
 
 3. **A live signet send**, because §1's refactor touches the live P/Invoke resolution path. Unit tests
    cover the probe; only a real send proves `ResolveNative` still binds the native for an actual
@@ -556,7 +573,7 @@ schema change, no persisted state, no wire-format change.
 ## 5. Files touched
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
-T1–T4, T12, T14, T15, T17.
+T1–T4, T12, T14, T15, T17, T18.
 
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
 (deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` **and `ResolveNative`** to `internal` (T17 invokes the latter directly);
