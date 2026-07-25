@@ -781,6 +781,14 @@ Properties this encodes, each the fix to a defect a reviewer found:
   `ProjectReference` is `Condition="Exists(…)"` (`csproj:61-62`), so a plain checkout silently drops it
   and the job would fail on compile errors instead of the native assertion.
 
+**The command sequence is verified**, not assumed: run against a stub native-only package from a folder
+feed with a committed lockfile and `NUGET_PACKAGES` pointed at an **empty** directory,
+`dotnet restore --locked-mode -p:Configuration=Release -p:ContinuousIntegrationBuild=true
+-p:StaticWebAssetsEnabled=false` exits 0 (locked mode is satisfied by a cold cache — it re-extracts and
+validates hashes), the subsequent `dotnet publish --no-restore -c Release <same properties>` exits 0 with
+no conflict from the doubled configuration, the natives appear at `runtimes/<rid>/native/` in the
+isolated publish output, and the tracked lockfile is left byte-identical.
+
 **This gate cannot pass before S3** — the honest signal that the fix is not yet real, not a reason to
 weaken the gate. It must fail at base HEAD `04c1781` and pass after phase 2.
 
