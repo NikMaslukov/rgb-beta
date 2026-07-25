@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 8 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 9 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history**
 - **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
@@ -30,14 +30,15 @@
   (verified untracked at HEAD and holding live credentials) to the tracked `README.md`. The probe moved
   ahead of `LoadConfiguration`, which catches only `JsonException`. T4 gained T3's operator-content
   requirements; the live signet send gained a pass criterion.
-- **rev 8** — T17(b) dropped as unreachable (the six rgb-lib imports are `private static extern`; the live
-  signet send covers that path instead) and a staged-native precondition added, since unstaged the clause
-  passes for the wrong reason. A standing accessibility rule added to §3 after the fifth violation. The
-  hijack consequence is now recorded as measured, independently twice.
-- **rev 7** — T17 made implementable and non-vacuous: `ResolveNative` widened to `internal` (it is private,
-  and reflection was already rejected), and clause (b) must force the static constructor first or rg-lib
-  binds by default probing and the guard's loss goes undetected. `§5`'s stale "after `:33`" call site
-  corrected to match §2.
+- **rev 7** — T17 made invocable: `ResolveNative` widened to `internal` (it is private, and reflection was
+  already rejected). `§5`'s stale "after `:33`" call site corrected to match §2.
+- **rev 8** — T17's second clause ("a real rgb-lib P/Invoke still binds") **dropped as unreachable** — the
+  six `rgblibcffi` imports are `private static extern`; §3.1's live signet send covers that path instead.
+  A staged-native precondition added, since unstaged the remaining clause passes for the wrong reason
+  (measured). A standing accessibility rule added to §3 after the fifth violation of it.
+- **rev 9** — that standing rule corrected: as first written it excluded the class-sketch members and so
+  invalidated T2/T3/T4/T12/T14. T16 gained its access route (the public `DecodeInvoice` wrapper); §5 now
+  lists the `ResolveNative` widening; the wrapped `§3 and N6` dangling reference finally removed.
 
 > **Precondition: none. Mergeable on its own, and it closes an audit clause on its own.**
 
@@ -241,8 +242,7 @@ binding then dereferences (`Marshal.PtrToStringUTF8`, `:90`) and frees (`rgbveri
 `AccessViolationException` or abort the process, killing BTCPay *before* `PluginManager` can queue the
 disable command — converting a diagnostic into an unbounded restart loop. So the probe resolves the
 handle and requires `TryGetExport` for all four of `rgbverify_decode_invoice`, `rgbverify_validate`,
-`rgbverify_commitment_check`, `rgbverify_string_free`. Its blind spot (ABI/contract drift) is stated in
-§3 and N6, not papered over.
+`rgbverify_commitment_check`, `rgbverify_string_free`. Its blind spot (ABI/contract drift) is stated in the parent spec's threat model and its non-goal N6, not papered over.
 
 **Message content — written for a BTCPay operator, not for this repo's developers.** A reviewer judged the
 earlier wording developer-facing: it named an unpublished package and a repo script an operator cannot
@@ -378,9 +378,12 @@ passes on the commit that introduces it, and exists to fail later if resolver/pr
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
 
-**Standing rule for every test clause in this spec — five separate clauses have violated it.** A clause may
-only assert against a member that is reachable from the Tests assembly: `public`, or `internal` *and*
-listed in §2's extraction list (`InternalsVisibleTo` at `csproj:88` reaches internals, **not** privates).
+**Standing rule for every test clause in this spec — five separate clauses have violated it.** A clause may only
+assert against a member reachable from the Tests assembly: `public`, or `internal` **and declared anywhere
+in §2** — the class sketch and the extraction list both count (`InternalsVisibleTo` at `csproj:88` reaches
+internals, **not** privates). An earlier wording said "internal *and in the extraction list*", which taken
+literally invalidated T2/T3/T4/T12/T14 — their targets (`RgbNativeSelfCheck`, `Verify`, `VerifyOrLog`,
+`RgbNativeUnavailableException`) are internal but declared in the class sketch.
 Reflection is not an acceptable substitute. T1, two drafts of T16, and both clauses of T17 were each
 written against a private member and had to be rewritten or dropped. Any new clause must name the member
 it touches and confirm its accessibility before it is added.
@@ -394,7 +397,7 @@ it touches and confirm its accessibility before it is added.
 | T12 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the `IServiceProvider` overload specifically, with a failing probe injected via its optional parameter — a provider whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
 | T14 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, and separately, given a failing probe plus a provider whose `GetService` throws, it still throws `RgbNativeUnavailableException` — never the provider's exception — **and the injected sink still receives the message**. Not "both sinks": a throwing provider leaves `factory` null, so the logger cannot. This clause is why the sink is acquired under its own guard *before* the factory — measured, sharing one guard sent the diagnostic to `TextWriter.Null`, i.e. nowhere, at the exact moment phase 2 auto-disables the plugin — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
 | T15 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
-| T16 | `RealDllImport_StillBindsAfterResolverRefactor` | **regression guard, not behavioural.** With the native staged for the host RID, a real `DllImport` through `RgbVerifyNative` still binds after `ResolveNative` is rewritten onto the shared candidate loop — measured: passes staged, **fails** (not skips) unstaged, and genuinely exercises the P/Invoke path rather than the probe. Two clauses were removed after measurement: comparing "the path `ResolveNative` binds" against `CandidatePaths` is **tautological** post-refactor (`ResolveNative` *is* that loop, so it compares a path to itself) and is **unimplementable as stated** — `ResolveNative` is private and returns an `IntPtr`, never a path, so it would need reflection plus dlopen-handle identity, a mechanism this spec does not specify and does not need. The inducible failure that matters — a resolver returning `IntPtr.Zero` — is caught by the DllImport clause alone (measured) | passes at introduction; exists to fail if the refactor later stops binding |
+| T16 | `RealDllImport_StillBindsAfterResolverRefactor` | **regression guard, not behavioural.** With the native staged for the host RID, a real `DllImport` through `RgbVerifyNative` still binds after `ResolveNative` is rewritten onto the shared candidate loop. **Route, per §3's accessibility rule:** the four `rgbverify_*` `DllImport`s are `private static extern`, so the test must go through a public wrapper — `RgbVerifyNative.DecodeInvoice`, exactly as `RgbVerifyBindingTests.cs:68-72` already does. Naming the route matters: leaving it unstated is how T17(b) came to be written against unreachable members — measured: passes staged, **fails** (not skips) unstaged, and genuinely exercises the P/Invoke path rather than the probe. Two clauses were removed after measurement: comparing "the path `ResolveNative` binds" against `CandidatePaths` is **tautological** post-refactor (`ResolveNative` *is* that loop, so it compares a path to itself) and is **unimplementable as stated** — `ResolveNative` is private and returns an `IntPtr`, never a path, so it would need reflection plus dlopen-handle identity, a mechanism this spec does not specify and does not need. The inducible failure that matters — a resolver returning `IntPtr.Zero` — is caught by the DllImport clause alone (measured) | passes at introduction; exists to fail if the refactor later stops binding |
 
 | T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, mandatory:** the gate native must be staged for the host RID, or the assertion passes for the wrong reason (measured: unstaged, the resolver returns Zero regardless and the guard's loss is undetectable). An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-640`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
 Tests reading repo files (T15) locate the repo root from an `AssemblyMetadata("RepoRoot", …)` attribute
@@ -471,8 +474,8 @@ schema change, no persisted state, no wire-format change.
 T1–T4, T12, T14, T15, T16, T17.
 
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
-(deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` to `internal`; rewrite
-`ResolveNative` to use them — measured behaviour-preserving), `RGBPlugin.cs` (probe call site immediately after the `ctx` cast at `:30`, before
+(deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` **and `ResolveNative`** to `internal` (T17 invokes the latter directly);
+rewrite `ResolveNative` to use them — measured behaviour-preserving), `RGBPlugin.cs` (probe call site immediately after the `ctx` cast at `:30`, before
 `LoadConfiguration`; log-only), `BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata("RepoRoot", …)`),
 `.github/workflows/ci.yml` (Rust toolchain + `build-native.sh` staging in the test job, mirroring
 `release.yml:96-108`), and **`README.md`** — a new `### "RGB pre-sign verification library could not be loaded"` entry under the
