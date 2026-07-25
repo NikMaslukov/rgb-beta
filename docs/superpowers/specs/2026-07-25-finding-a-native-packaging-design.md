@@ -4,7 +4,7 @@
 **Code base HEAD:** `04c1781` (spec commits sit on top; all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 6 — after spec-gate round 5 (changelogs for rounds 1–5 in §10)
+**Revision:** 7 — after spec-gate round 6 (changelogs for rounds 1–6 in §10)
 
 ---
 
@@ -143,7 +143,7 @@ forced true whenever `ContinuousIntegrationBuild=true`
 (`BTCPayServer.Plugins.RgbUtexo.csproj:22`, passed by both workflows), so committing a
 `PackageReference` to a locally built package would commit a lockfile hash no other consumer — the
 Plugin Builder included — could satisfy. And `release.yml` is `workflow_dispatch` on **any ref**
-(`:23-31`) and tags + publishes a GitHub Release (`:168-186`), so any half-state on the branch is
+(`:23-31`) and tags (`:168`) and publishes a GitHub Release (`:186`), so any half-state on the branch is
 releasable by a mis-click.
 
 **Phase 1 — committable immediately, CI stays green, `<None Include>` retained.** No functional
@@ -374,9 +374,10 @@ internal static class RgbNativeSelfCheck
     internal static void Verify(NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static void Verify();          // bound to the real probe (below)
 
-    // catches EVERY exception, reports it, returns false — the phase-1 (log-only) entry point
-    internal static bool VerifyOrLog(ILogger? logger, NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static bool VerifyOrLog(ILogger? logger);
+    // catches EVERY exception, reports it to BOTH sinks, returns false — the phase-1 entry point
+    internal static bool VerifyOrLog(ILogger? logger, TextWriter sink,
+                                     NativeProbe probe, Func<IntPtr, string, bool> hasExport);
+    internal static bool VerifyOrLog(ILogger? logger);   // sink defaults to Console.Error
 }
 // real bindings: probe     = RgbVerifyNative.TryLoadFromCandidates
 //                hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
@@ -414,16 +415,23 @@ production install. This is also why the custom resolver exists at all: default 
 The probe therefore shares the resolver's own path-resolution code. Extract from
 `Services/RgbVerifyNative.cs` (pure refactors; resolution order unchanged apart from the dedup below):
 
-- `internal static string ResolveBaseDir()` — the existing `Path.GetDirectoryName(assembly.Location)`
-  with `AppContext.BaseDirectory` fallback (`:21-22`). Specifying `baseDir` explicitly matters: a probe
-  built on `AppContext.BaseDirectory` would inspect BTCPay's directory rather than the plugin's.
+- `internal static string ResolveBaseDir(Assembly assembly)` — the existing
+  `Path.GetDirectoryName(assembly.Location)` with `AppContext.BaseDirectory` fallback (`:21-22`). It takes
+  the assembly rather than reading `AppContext.BaseDirectory` directly, so `ResolveNative` keeps using the
+  assembly the runtime hands it and the probe passes `typeof(RgbVerifyNative).Assembly`. A probe built on
+  `AppContext.BaseDirectory` would inspect BTCPay's directory rather than the plugin's.
+- `internal static IEnumerable<string> RuntimeIdentifiers()` — currently **private** (`:42`, no access
+  modifier), which is why T1 cannot see it; widen to `internal` so the test derives its expectations from
+  the same source the resolver uses instead of hardcoding a candidate count.
 - `internal static IEnumerable<string> CandidatePaths(string baseDir)` — from `:28-38`. It must
   **dedupe while preserving order**: on .NET 8+ `RuntimeInformation.RuntimeIdentifier` already equals
   `<os>-<arch>` for the RIDs we ship, so `RuntimeIdentifiers()` (`:42-53`) yields the same RID twice and
   would otherwise emit duplicate candidates.
-- `internal static bool TryLoadFromCandidates(out IntPtr handle, out IReadOnlyList<string> searched)` —
-  the candidate loop over `NativeLibrary.TryLoad(<absolute path>, out handle)`, returning the paths it
-  tried for the diagnostics message.
+- `internal static bool TryLoadFromCandidates(string baseDir, out IntPtr handle, out IReadOnlyList<string> searched)`
+  — the candidate loop over `NativeLibrary.TryLoad(<absolute path>, out handle)`, returning the paths it
+  tried for the diagnostics message. It takes `baseDir` explicitly so `ResolveNative` can pass
+  `ResolveBaseDir(assembly)` (honouring its own `assembly` parameter) and the probe can pass the plugin
+  assembly's directory — neither silently substitutes a different base.
 
 `ResolveNative` (`:17-40`) is then rewritten to call `TryLoadFromCandidates`, so probe and real
 resolution execute **literally the same code**. Parity is structural, not an assumption about runtime
@@ -478,11 +486,21 @@ the probe" — was false and is withdrawn.
 - **phase 2 — hard-fail:** `RgbNativeSelfCheck.Verify()`. T12/T13 assert the two behaviours, so the flip
   cannot be made silently or forgotten.
 
-**Logging sink.** The logger is obtained as `LoadConfiguration` already does at `RGBPlugin.cs:89`:
-`ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`. That is `GetService`, so
-it can return `null` — and an audit-mandated error that silently disappears is worse than useless.
-`VerifyOrLog` therefore falls back to `Console.Error` when `logger` is `null`, so the message always
-reaches the operator's output. T12 covers both sinks.
+**Logging sink — emit to both, always.** The logger is obtained as `LoadConfiguration` already does at
+`RGBPlugin.cs:89`: `ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`.
+
+A null-only fallback would be the wrong design here, for a reason worth stating because it inverts the
+earlier rationale: BTCPay *does* register a real factory on the plugin-load path
+(`Hosting/Startup.cs:64-67` swaps the `NullLoggerFactory` for the DI one), so `GetService` returning
+`null` is essentially unreachable — while the case that actually swallows the message is a **non-null**
+factory that hands back `NullLogger.Instance` (`Startup.cs:76`'s
+`FuncLoggerFactory(n => NullLogger.Instance)`). A null check therefore guards the wrong branch.
+
+So `VerifyOrLog` writes the diagnostic to **both** sinks unconditionally: the `ILogger` when one is
+available, and a `TextWriter` sink defaulting to `Console.Error`. Duplicated output in normal operation
+is a cheap price for an audit-mandated error that cannot vanish into a null logger. The sink is a
+parameter, not global `Console` state, so T12 observes it without `Console.SetError` and without
+xunit parallelism ordering hazards.
 
 **Operational consequence, explicitly accepted by the user.** Throwing from `Execute` makes
 `PluginManager` log the error, queue `disable:BTCPayServer.Plugins.RgbUtexo`, and throw
@@ -494,8 +512,8 @@ lost, not just sends, and an admin must re-enable the plugin (and clear
 ### 4.6 CI
 
 **New `pack-native.yml`** (`workflow_dispatch`, **artifact-only — no `git tag`, no `gh release`**). This
-is why S2 cannot live in `release.yml`: that workflow is dispatchable on any ref and tags + publishes a
-Release (`:168-186`), so using it pre-merge would tag unmerged code.
+is why S2 cannot live in `release.yml`: that workflow is dispatchable on any ref and tags (`:168`) and publishes a
+Release (`:186`), so using it pre-merge would tag unmerged code.
 
 - job `linux-x64`: build in a `rust:1-bookworm` container (G7), ELF export check, upload artifact;
 - job `linux-arm64`: same, `--platform linux/arm64`;
@@ -526,12 +544,15 @@ package delivery and hard-fail, and adds the recovery procedure.
   (manual)" with the `scripts/pack-rgbverify.sh` workflow, the phase-1/S3/phase-2 sequence, the startup
   check's mode per phase and its recovery, the glibc-floor requirement, and the load-bearing role of
   `CopyLocalLockFileAssemblies`. Two further statements there become false in phase 2 and must be
-  corrected then:
+  corrected then, along with `:328` ("`runtimes/**` is gitignored (build artifact packaged into the
+  `.btcpay`)") which stops being true once the package supplies it:
   `:310` ("Ships in the `.btcpay` via `runtimes/**`" — now via the package) and `:360` ("Not covered:
   win-x64 and linux-arm64 … prod = linux-x64 only" — linux-arm64 is now shipped). The `rgblibcffi` half
   is unrelated and stays.
 - Root `README.md` (`:224`, `:242`, `:264`) describes the native build/packaging and is also the
-  `PackageReadmeFile`; update those passages.
+  `PackageReadmeFile`; update those passages. Also `:300-306` ("Platform Support"), which after phase 2 is
+  wrong twice over: `linux-arm64` becomes supported, and an unsupported platform now loses the whole
+  plugin at startup rather than only sends.
 - `audit-july-22-conclusions.md` §A: per §6.
 - `.github/README.md` supply-chain section: the gate native now arrives as a pinned package; no lockfile
   exemption exists in the merged state.
@@ -622,8 +643,8 @@ Finding A stays an open blocker until (d). No "✅ FIXED" before then, with that
 ## 7. Test plan
 
 Behavioural tests (T1–T4, T6, T7, T12, T13) are written and observed failing before the corresponding
-change. T8–T11 are **regression guards**: they encode an invariant that already holds (or that phase 2
-establishes) and are expected to pass on the commit that introduces them — their value is failing later,
+change. T8 and T9 are **regression guards**: they encode an invariant that already holds and are expected to
+pass on the commit that introduces them (T10, T11 and T13 do fail first — they encode changes) — their value is failing later,
 if someone removes the property, the glob exclusion, or reintroduces the masking mechanism. The table's
 "first fails because" column states which of the two each is.
 
@@ -631,7 +652,7 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 
 | # | Phase | Test | Asserts | First fails because |
 |---|---|---|---|---|
-| T1 | 1 | `CandidatePaths_DedupesAndPreservesProbeOrder` | expectations **derived from `RuntimeIdentifiers()`**, not hardcoded to two entries: candidates are `runtimes/<rid>/native/<file>` for each distinct RID in order, then the flat path; no duplicates; platform-correct filename. (A non-portable host RID such as `linux-musl-x64` legitimately yields three candidates, so a fixed-length expectation would be wrong.) | `CandidatePaths` does not exist |
+| T1 | 1 | `CandidatePaths_DedupesAndPreservesProbeOrder` | expectations **derived from `RuntimeIdentifiers()`** (widened to `internal` for this reason — it is private today, so the test could not otherwise see it), not hardcoded to two entries: candidates are `runtimes/<rid>/native/<file>` for each distinct RID in order, then the flat path; no duplicates; platform-correct filename. (A non-portable host RID such as `linux-musl-x64` legitimately yields three candidates, so a fixed-length expectation would be wrong.) | `CandidatePaths` does not exist |
 | T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected probe+export fakes reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
 | T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every searched candidate path, and `RgbVerifyCffi` | same |
 | T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
@@ -639,10 +660,10 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, §4.4) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards §4.0 |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host — the native genuinely arrived via the package | package not referenced yet |
+| T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host. **Precondition, mandatory:** written only after `git clean -dfx native/rgb-verify/runtimes` and the removal of the `<None Include>` — otherwise it passes before the change, because the Tests output already contains both natives today via the old copy path (verified). Weaker evidence than T7; see the note below | without that precondition it does not fail first — the machine-local-state trap §1 warns about |
 | T7 | 2 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` has, under `targets[*]["RgbVerifyCffi/<version>"].runtimeTargets`, an entry with `assetType == "native"` for the host RID — provenance, not presence, and not a `libraries`-section match | native currently arrives as a copied `None` item |
 | T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes` — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
-| T13 | 2 | `Verify_FailingProbe_Throws` | `Verify` with a failing injected probe throws `RgbNativeUnavailableException` (contrast with T12), pinning the semantic difference the phase-2 call-site flip relies on. The flip itself — which entry point `Execute` calls — is evidenced by §7.5's live runs | asserts the phase-2 entry point's contract |
+| T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | parses `RGBPlugin.cs` and asserts the startup check calls the throwing entry point and **no longer** calls `VerifyOrLog` — the flip's only automated guard. (A behavioural `Verify_FailingProbe_Throws` would duplicate T3 and could not fail first, since `Verify` and its throw contract both land in phase 1.) | phase 1's call site uses `VerifyOrLog`, so it fails until the flip lands |
 
 Tests reading repo files (T8, T9, T10, T11) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
@@ -693,27 +714,41 @@ set -euo pipefail
 PROJ=BTCPayServer.Plugins.RgbUtexo.csproj
 LOCKS=(packages.lock.json BTCPayServer.Plugins.RgbUtexo.Tests/packages.lock.json)
 
-python3 - "$PROJ" "${LOCKS[@]}" <<'PY'
+python3 - "$PROJ" Directory.Build.props Directory.Build.targets -- "${LOCKS[@]}" <<'PY'
 import json, sys, xml.etree.ElementTree as ET
-proj, locks = sys.argv[1], sys.argv[2:]
+args = sys.argv[1:]; split = args.index("--")
+projects, locks = args[:split], args[split+1:]
 def die(m): sys.exit(f"::error::{m}")
-root = ET.parse(proj).getroot()                      # missing/!well-formed file => nonzero exit
 def attr(e, n): return (e.get(n) or "")
-# 1. The masking mechanism must be gone: re-adding it keeps every presence/provenance
-#    assertion green while restoring finding A's root cause. Any item type and either
-#    Include= or Update= can repack the tree, so check all of them.
+def tag(e): return e.tag.rsplit('}', 1)[-1]
 PACKING = ("None", "Content", "EmbeddedResource")
-for e in root.iter():
-    if not e.tag.rsplit('}', 1)[-1] in PACKING: continue
-    path = (attr(e, "Include") + " " + attr(e, "Update")).replace("\\", "/")
-    if "native/rgb-verify/runtimes" in path:
-        die("plugin csproj still packs native/rgb-verify/runtimes — finding A's root cause")
-# 2. RgbVerifyCffi must be referenced, at a published (non -local) version, and both
-#    lockfiles must pin that same version.
-refs = [e for e in root.iter() if e.tag.rsplit('}', 1)[-1] == "PackageReference"
-        and attr(e, "Include") == "RgbVerifyCffi"]
+# 1. The masking mechanism must be gone: re-adding it keeps every presence/provenance
+#    assertion green while restoring finding A's root cause. It can hide in any packing
+#    item type, via Include= or Update=, in the csproj OR in Directory.Build.*, and can
+#    name an unrelated source while retargeting output through Link=/PackagePath=.
+for p in projects:
+    try: root = ET.parse(p).getroot()
+    except FileNotFoundError:
+        if p == projects[0]: die(f"{p} not found")     # the csproj must exist
+        continue                                       # Directory.Build.* are optional
+    for e in root.iter():
+        if tag(e) not in PACKING: continue
+        src = (attr(e, "Include") + " " + attr(e, "Update")).replace("\\", "/")
+        dst = (attr(e, "Link") + " " + attr(e, "PackagePath") + " " +
+               " ".join((c.text or "") for c in e)).replace("\\", "/")
+        if "native/rgb-verify/runtimes" in src or "rgbverifycffi" in (src + dst).lower():
+            die(f"{p} still packs the gate native by hand — finding A's root cause")
+        if "runtimes/" in dst and "native" in dst:
+            die(f"{p} retargets an item into runtimes/**/native — possible masking path")
+root = ET.parse(projects[0]).getroot()
+# 2. Exactly one RgbVerifyCffi reference, at a published (non -local) version, and both
+#    lockfiles must pin that same version. Checking only the first reference would let a
+#    second, differently-versioned one through.
+refs = [e for e in root.iter() if tag(e) == "PackageReference" and attr(e, "Include") == "RgbVerifyCffi"]
 if not refs: die("no RgbVerifyCffi PackageReference — the gate native would be absent")
+if len(refs) > 1: die(f"{len(refs)} RgbVerifyCffi PackageReferences — ambiguous version")
 want = attr(refs[0], "Version")
+if not want: die("RgbVerifyCffi PackageReference has no Version")
 if "-local" in want: die("RgbVerifyCffi pinned to a -local build")
 for lf in locks:
     d = json.load(open(lf))
@@ -844,7 +879,13 @@ scripts are inert if unreferenced.
    BTCPay, whereas a log-only probe needs no package and satisfies the audit's clause as literally
    written ("logs a loud, actionable error") immediately. Confirm the two-step, or say the word and
    phase 1 will ship no probe at all.
-6. **The committed `nuget.config` gets no local feed** (§4.3), which reverses your earlier "CI
+6. **Artifact size** (§4.1). Measured: `librgbverifycffi.so` 15.4 MB, `.dylib` 11.9 MB, so three RIDs add
+   roughly 43 MB of natives to every install — on top of the ~133 MB `RgbLib` already ships in the same
+   `runtimes/**` layout. NuGet publishes every RID's native to every consumer, so this cannot be trimmed
+   per-deployment without breaking dev. Confirm the size is acceptable, or drop to linux-x64-only in the
+   published package and have developers stage their host native locally (which reintroduces a
+   machine-local step for dev, though not for production).
+7. **The committed `nuget.config` gets no local feed** (§4.3), which reverses your earlier "CI
    builds+packs into a local feed, committed nuget.config points at it" choice. Reason, verified: a
    folder source that does not exist on a fresh clone fails restore with `NU1301` on a cold cache and a
    gitignored directory cannot exist in a fresh clone, so it would break the Plugin Builder permanently —
@@ -854,6 +895,24 @@ scripts are inert if unreferenced.
 ---
 
 ## 10. Revision history
+
+### Revision 7 — after spec-gate round 6
+
+Round 6 independently reproduced the §7.4 command sequence against a cold cache (matching the author's
+own measurement), so that is settled. Remaining defects, all fixed:
+
+| Issue | Resolution |
+|---|---|
+| T1 unimplementable — `RuntimeIdentifiers()` is private (`Services/RgbVerifyNative.cs:42`) and `InternalsVisibleTo` does not expose privates | widened to `internal` and listed in §11 (§4.5, T1) |
+| T6 could not fail first: the Tests output **already** contains both natives today via the old `<None Include>` copy path (verified), so it would pass before the change — the machine-local-state trap §1 warns about | T6 carries a mandatory precondition (clean staging tree + `<None Include>` removed) and is explicitly demoted below T7 (T6) |
+| T13 duplicated T3 and could not fail first (both `Verify` and its throw contract land in phase 1), so **nothing** guarded which entry point `Execute` calls — the claimed protection against a forgotten flip did not exist | T13 replaced by a call-site guard parsing `RGBPlugin.cs` for the throwing entry point and the absence of `VerifyOrLog` (T13) |
+| Masking guard was evadable three further ways: an item whose `Include` is unrelated but whose `Link`/`PackagePath` retargets into `runtimes/**/native`; a masking item placed in `Directory.Build.props` (which phase 1 already edits); and a second `RgbVerifyCffi` `PackageReference`, since only `refs[0]` was version-checked | guard now scans the csproj **and** `Directory.Build.props`/`.targets`, inspects `Link`/`PackagePath`/child elements as well as `Include`/`Update`, and requires exactly one reference with a non-empty version. All three new vectors executed against fixtures (§7.4) |
+| The `Console.Error` fallback guarded the wrong branch: BTCPay registers a real `ILoggerFactory` on the plugin-load path (`Startup.cs:64-67`), so `GetService` is essentially never null, while the case that actually swallows the message is a **non-null** factory returning `NullLogger.Instance` (`Startup.cs:76`) | the diagnostic is written to **both** sinks unconditionally; the sink is an injected `TextWriter` (default `Console.Error`), which also removes T12's dependence on global `Console.SetError` under xunit parallelism (§4.5, T12) |
+| `TryLoadFromCandidates` took no `baseDir` while `CandidatePaths` did, forcing the rewritten `ResolveNative` to ignore its `assembly` parameter | both take explicit parameters: `ResolveBaseDir(Assembly)` and `TryLoadFromCandidates(baseDir, …)` (§4.5) |
+| T10/T11 were misclassified as pass-at-introduction guards though their own rows said they fail first | classification corrected: only T8/T9 are guards; T10/T11/T13 fail first (§7.1) |
+| Docs list missed `CLAUDE.md:328` and `README.md:300-306` ("Platform Support"), both false after phase 2 | added (§4.7, §11) |
+| Artifact-size consequence unstated (measured 15.4 MB + 11.9 MB per native; ~43 MB for three RIDs, atop RgbLib's ~133 MB) | recorded with the measured figures and raised as decision §9.6 |
+| `release.yml` tag/release citation given as a range | cited precisely: tag `:168`, release `:186` |
 
 ### Revision 6 — after spec-gate round 5
 
@@ -979,7 +1038,7 @@ Not adopted: that `--locked-mode` and `--force-evaluate` conflict — verified t
 |---|---|---|
 | `BTCPayServer.Plugins.RgbUtexo.csproj` | packaging-glob `Remove`s | 1 |
 | " | remove `:79-84`; add `PackageReference`; bump `<Version>` `:9`; `WHY` comment on `:12` | 2 |
-| `Services/RgbVerifyNative.cs` | extract `ResolveBaseDir`, `CandidatePaths` (deduped), `TryLoadFromCandidates`; rewrite `ResolveNative` to use them | 1 |
+| `Services/RgbVerifyNative.cs` | extract `ResolveBaseDir(Assembly)`, `CandidatePaths` (deduped), `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` to `internal`; rewrite `ResolveNative` to use them | 1 |
 | `RGBPlugin.cs` | probe call site after `:33`, log-only mode | 1 |
 | " | flip to hard-fail | 2 |
 | `Directory.Build.props` | add `RgbVerifyCffi` to the `:10` exclusion condition | 1 |
