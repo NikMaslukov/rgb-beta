@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 11 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 12 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history**
 - **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
@@ -46,7 +46,14 @@
   trigger. Added `existedButFailed` and T3 clause (h).
 - **rev 11** — that change was only half-propagated: `NativeProbe`, `DefaultProbe` and the binding lambda
   were not widened, so the new list could never reach the formatter (T3(h) unsatisfiable) and the lambda
-  passed three arguments to a four-out-parameter method. Widened the whole channel.
+  passed three arguments to a four-out-parameter method (measured: `CS7036`). Widened the whole channel,
+  and added the standing rule that a signature change moves as a unit.
+- **rev 12** — the propagation had still missed the one **normative** surface: §2's "Message content"
+  item 3 continued to assert the packaging defect unconditionally, so an implementer following it would
+  have built exactly the misdiagnosis rev 10 existed to prevent, with T3(h) asserting the opposite. Item 3
+  now branches explicitly. Also resolved a real contradiction: the binding comment said the real bindings
+  "MUST be lambdas, not method groups" while `DefaultProbe`/`DefaultHasExport` are static methods used as
+  method groups at `probe ?? DefaultProbe` — both true, of different things, now stated as such.
 
 > **Precondition: none. Mergeable on its own, and it closes an audit clause on its own.**
 
