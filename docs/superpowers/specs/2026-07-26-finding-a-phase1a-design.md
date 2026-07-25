@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 12 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 13 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history**
 - **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
@@ -18,8 +18,8 @@
 - **rev 4** — T16 narrowed again: the parity clause was measured **tautological** (post-refactor
   `ResolveNative` *is* the shared loop) and **unimplementable** (it is private and returns an `IntPtr`,
   not a path); operator remediation given a concrete reporting channel; rollback covers `CLAUDE.md`.
-- **rev 5** — `ci.yml` native staging made a required part of this phase (T16 and the existing smoke test
-  fail loudly unstaged, so merging without it leaves CI red); the claim that this had to wait for phase 1b
+- **rev 5** — `ci.yml` native staging made a required part of this phase (the existing smoke test fails
+  loudly unstaged); the claim that this had to wait for phase 1b
   was false. The undefined "supported set" clause removed from the message; §3.1 run 2 now names a
   non-destructive removal location.
 - **rev 6** — an implementer-view reviewer found the refactor's worst failure mode: the plugin assembly
@@ -48,6 +48,15 @@
   were not widened, so the new list could never reach the formatter (T3(h) unsatisfiable) and the lambda
   passed three arguments to a four-out-parameter method (measured: `CS7036`). Widened the whole channel,
   and added the standing rule that a signature change moves as a unit.
+- **rev 13** — a **cold** reviewer (given no list of prior measurements, deliberately) found three majors
+  eight primed rounds had missed: the `DefaultProbe`/`DefaultHasExport` bodies did not compile as written
+  (lambda parameters shadowing the enclosing ones, CS0136, and out parameters never assigned, CS0177 — the
+  CS0123 rationale was vestigial from an abandoned field design); the proposed T16, after three successive
+  narrowings, had become a **literal duplicate** of the existing `RgbVerifyBindingTests` case and was
+  dropped; and `TryLoadFromCandidates` performs the `dlopen`, so a native whose *initializer* aborts now
+  does so at plugin load rather than first send — uncatchable, and a real change in blast radius, now
+  stated. Also corrected: `ci.yml` already fails on `main`, so the staging step fixes a pre-existing
+  breakage rather than one 1a introduces.
 - **rev 12** — the propagation had still missed the one **normative** surface: §2's "Message content"
   item 3 continued to assert the packaging defect unconditionally, so an implementer following it would
   have built exactly the misdiagnosis rev 10 existed to prevent, with T3(h) asserting the opposite. Item 3
@@ -441,7 +450,7 @@ none of them apply here.
 ## 3. Test plan
 
 Behavioural tests (T1–T4, T12, T14, T15) are written and observed failing before the corresponding
-change; T14 additionally requires the intra-phase ordering in its row. **T16 and T17 are regression guards**: it
+change; T14 additionally requires the intra-phase ordering in its row. **T17 is a regression guard**: it
 passes on the commit that introduces it, and exists to fail later if resolver/probe parity breaks.
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
