@@ -94,13 +94,40 @@
         </ProjectReference>
     </ItemGroup>
 
+    <PropertyGroup>
+        <RestoreHelperOutDir>$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0</RestoreHelperOutDir>
+    </PropertyGroup>
+
+    <!-- Local dev (Debug): BTCPay loads the plugin from bin/Debug via DEBUG_PLUGINS, so the helper
+         must sit next to the plugin DLL in the build output. -->
     <Target Name="CopyRestoreHelper" AfterTargets="Build">
         <ItemGroup>
-            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.dll" />
-            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.runtimeconfig.json" />
-            <HelperOut Include="$(MSBuildProjectDirectory)/RgbRestoreHelper/bin/$(Configuration)/net10.0/RgbRestoreHelper.deps.json" />
+            <HelperOut Include="$(RestoreHelperOutDir)/RgbRestoreHelper.dll" />
+            <HelperOut Include="$(RestoreHelperOutDir)/RgbRestoreHelper.runtimeconfig.json" />
+            <HelperOut Include="$(RestoreHelperOutDir)/RgbRestoreHelper.deps.json" />
         </ItemGroup>
         <Copy SourceFiles="@(HelperOut)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    </Target>
+
+    <!-- Release/Plugin Builder (dotnet publish): a copy into $(OutDir) is NOT part of the publish
+         set, so the helper must be added to ResolvedFileToPublish or the released .btcpay omits it
+         and every production restore fails closed with "Restore helper not found". The ProjectReference
+         builds the helper before ComputeFilesToPublish, so these files exist by then. -->
+    <Target Name="AddRestoreHelperToPublish" BeforeTargets="ComputeFilesToPublish">
+        <ItemGroup>
+            <ResolvedFileToPublish Include="$(RestoreHelperOutDir)/RgbRestoreHelper.dll">
+                <RelativePath>RgbRestoreHelper.dll</RelativePath>
+                <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            </ResolvedFileToPublish>
+            <ResolvedFileToPublish Include="$(RestoreHelperOutDir)/RgbRestoreHelper.runtimeconfig.json">
+                <RelativePath>RgbRestoreHelper.runtimeconfig.json</RelativePath>
+                <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            </ResolvedFileToPublish>
+            <ResolvedFileToPublish Include="$(RestoreHelperOutDir)/RgbRestoreHelper.deps.json">
+                <RelativePath>RgbRestoreHelper.deps.json</RelativePath>
+                <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            </ResolvedFileToPublish>
+        </ItemGroup>
     </Target>
 
 </Project>
