@@ -188,12 +188,22 @@ internal static class RgbNativeSelfCheck
     // logs to BOTH sinks, then throws — the hard-fail entry point (wired in phase 2)
     internal static void Verify(ILoggerFactory? factory, TextWriter sink,
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static void Verify(IServiceProvider? bootstrapServices);   // sink = Console.Error
+    internal static void Verify(IServiceProvider? bootstrapServices,
+                                NativeProbe? probe = null,
+                                Func<IntPtr, string, bool>? hasExport = null);
 
     // catches EVERY exception, reports to BOTH sinks, returns false — the phase-1 entry point
     internal static bool VerifyOrLog(ILoggerFactory? factory, TextWriter sink,
                                      NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static bool VerifyOrLog(IServiceProvider? bootstrapServices); // sink = Console.Error
+    internal static bool VerifyOrLog(IServiceProvider? bootstrapServices,
+                                     NativeProbe? probe = null,
+                                     Func<IntPtr, string, bool>? hasExport = null);
+
+    // real bindings, declared as static METHODS (not static readonly fields): a field's type
+    // initializer would run on first touch of the class — i.e. before the method body, outside
+    // the try the shapes below exist to provide.
+    static bool DefaultProbe(out IntPtr h, out IReadOnlyList<string> searched);
+    static bool DefaultHasExport(IntPtr h, string name);
 }
 // Both convenience overloads take the bootstrap IServiceProvider, not a resolved ILogger: resolving
 // the factory must happen inside the callee's guard (see "Logging sink" below), and it keeps the two
@@ -330,11 +340,14 @@ in the *argument list*, outside every guard, so a throwing service provider esca
 triggers the `disable:` + restart cascade. Required shape:
 
 ```
-internal static bool VerifyOrLog(IServiceProvider? sp)
+internal static bool VerifyOrLog(IServiceProvider? sp, NativeProbe? probe = null,
+                                 Func<IntPtr, string, bool>? hasExport = null)
 {
     ILoggerFactory? factory = null;
-    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* never let diagnostics break startup */ }
-    return VerifyOrLog(factory, Console.Error, DefaultProbe, DefaultHasExport);
+    TextWriter sink = TextWriter.Null;          // safe default; Console.Error is acquired inside the try
+    try { factory = sp?.GetService<ILoggerFactory>(); sink = Console.Error; }
+    catch { /* diagnostics must never break startup */ }
+    return VerifyOrLog(factory, sink, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);
 }
 ```
 
@@ -344,13 +357,22 @@ against an unguarded draft, a throwing provider surfaced a bare `InvalidOperatio
 actionable `RgbNativeUnavailableException` T14 promises. Required shape:
 
 ```
-internal static void Verify(IServiceProvider? sp)
+internal static void Verify(IServiceProvider? sp, NativeProbe? probe = null,
+                            Func<IntPtr, string, bool>? hasExport = null)
 {
     ILoggerFactory? factory = null;
-    try { factory = sp?.GetService<ILoggerFactory>(); } catch { /* diagnostics must not mask the finding */ }
-    Verify(factory, Console.Error, DefaultProbe, DefaultHasExport);
+    TextWriter sink = TextWriter.Null;
+    try { factory = sp?.GetService<ILoggerFactory>(); sink = Console.Error; }
+    catch { /* diagnostics must not mask the finding */ }
+    Verify(factory, sink, probe ?? DefaultProbe, hasExport ?? DefaultHasExport);   // rethrows by design
 }
 ```
+
+The optional `probe`/`hasExport` parameters exist so T12 and T14 can pair a hostile `IServiceProvider`
+with a *failing* probe. Without them those assertions are unsatisfiable: the convenience overloads would
+hardwire the real probe, which **succeeds** on any machine where the native is staged, so the throwing
+provider is swallowed and nothing fails. `Execute` passes neither argument, so production behaviour is
+unchanged.
 
 A null-only fallback would be the wrong design here, for a reason worth stating because it inverts the
 earlier rationale: BTCPay *does* register a real factory on the plugin-load path
@@ -480,11 +502,11 @@ written before phase-2's changes.
 | T2 | 1 | `SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow` | injected fakes for all four parameters, probe+export reporting success ⇒ no throw; all four symbol names queried | `RgbNativeSelfCheck` does not exist |
 | T3 | 1 | `SelfCheck_ProbeReturnsFalse_ThrowsWithActionableMessage` | injected probe returns **`false`** (the `TryLoad` contract — the assembly-scoped `Load` overload throws instead of returning `IntPtr.Zero`, so a Zero-based premise would be untestable) ⇒ `RgbNativeUnavailableException` naming the RID, expected filename, every searched candidate path, and `RgbVerifyCffi` | same |
 | T4 | 1 | `SelfCheck_MissingExport_ThrowsNamingTheSymbol` | probe succeeds, one export missing ⇒ throws naming that symbol (the `EntryPointNotFound` mode) | same |
-| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2.4 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the single-argument overload specifically — an `IServiceProvider` whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
+| T12 | 1 | `VerifyOrLog_FailingProbe_ReportsToBothSinksAndReturnsFalse` | `VerifyOrLog` with a failing injected probe returns `false` **and writes the actionable message to the `TextWriter` sink even when a non-null `ILogger` is supplied** — the unconditional dual-sink property §2.4 requires (an implementation that writes to the sink only when the logger is null would pass a conditional test while still letting the message vanish into a `NullLogger`). Also asserts: the `ILogger` receives it at error level; a logger that discards (`NullLogger.Instance`) still leaves it in the sink; a probe throwing an arbitrary exception type still returns `false`; and **a throwing `ILoggerFactory`/`CreateLogger`, a throwing `TextWriter`, and — exercising the `IServiceProvider` overload specifically, with a failing probe injected via its optional parameter — a provider whose `GetService` throws all return `false` rather than propagating** (the 4-arg overload receives an already-resolved factory, so it cannot cover the resolution failure at all) (together these are the catch-all that stops phase 1 self-DoSing). Not tested through `Execute`, which needs a `PluginServiceCollection` + `IConfiguration` and cannot produce the failure path where the native is present | `VerifyOrLog` does not exist |
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, **including when the `IServiceProvider` overload is given a provider whose `GetService` throws** — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException`, **including when the `IServiceProvider` overload is given a failing probe plus a provider whose `GetService` throws** — the thrown type must still be `RgbNativeUnavailableException`, never the provider's exception — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
 | T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `ExpressionStatement` whose expression is an `InvocationExpression` naming `VerifyOrLog`, as a **live, unguarded statement** — the *statement* must be a direct child of the method's `BlockSyntax` (measured: keying on the invocation node itself matches nothing, since invocations are never direct children of a block), no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
 Tests reading repo files (T8, T9, T10, T15) locate the repo root from an
@@ -504,7 +526,7 @@ changes; the run is a regression check that packaging did not disturb the crate.
 
 ### 4.3 Pack verification (scripted)
 
-`bash scripts/pack-rgbverify.sh` must produce a nupkg whose entry list is exactly the §2.1 layout
+`bash scripts/pack-rgbverify.sh --stage --pack-only --version <v>` must produce a nupkg whose entry list is exactly the §2.1 layout
 (`unzip -l`), including `lib/net8.0/_._`, and whose nuspec declares **no** dependencies; for the canonical
 pack, containing every shipped RID.
 
