@@ -172,15 +172,19 @@ internal sealed class RgbNativeUnavailableException : Exception { … }   // def
 internal static class RgbNativeSelfCheck
 {
     // logs to BOTH sinks, then throws — the hard-fail entry point (wired in phase 2)
-    internal static void Verify(ILogger? logger, TextWriter sink,
+    internal static void Verify(ILoggerFactory? factory, TextWriter sink,
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static void Verify(ILogger? logger);   // sink defaults to Console.Error
+    internal static void Verify(IServiceProvider? bootstrapServices);   // sink = Console.Error
 
     // catches EVERY exception, reports to BOTH sinks, returns false — the phase-1 entry point
     internal static bool VerifyOrLog(ILoggerFactory? factory, TextWriter sink,
                                      NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static bool VerifyOrLog(IServiceProvider? bootstrapServices);  // sink = Console.Error
+    internal static bool VerifyOrLog(IServiceProvider? bootstrapServices); // sink = Console.Error
 }
+// Both convenience overloads take the bootstrap IServiceProvider, not a resolved ILogger: resolving
+// the factory must happen inside the callee's guard (see "Logging sink" below), and it keeps the two
+// call sites — phase 1's VerifyOrLog(ctx.BootstrapServices) and phase 2's Verify(ctx.BootstrapServices)
+// — a one-identifier diff, which is exactly what T13 and T15 key on.
 // real bindings — both MUST be lambdas, not method groups (a method group conversion fails
 // CS0123 for either: TryLoadFromCandidates takes an extra baseDir, TryGetExport has an out param):
 //   probe     = (out IntPtr h, out IReadOnlyList<string> s) =>
