@@ -3,7 +3,25 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 1 — split out of the phase-1 spec after its gate round 5
+**Revision:** 5 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+
+**Revision history**
+- **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
+- **rev 2** — corrected the false "a diagnostic and nothing else" claim (1a rewrites `ResolveNative`, the
+  live P/Invoke path); added T16 and a required live signet send; made the message operator-honest
+  (it must not name `pack-rgbverify.sh` or the unpublished package, nor promise a fixed build that does
+  not exist); T3 asserts properties rather than substrings; the publish check moved into a throwaway
+  worktree with an explicit project path.
+- **rev 3** — T16 reframed after a reviewer showed it could not fail first and duplicated the existing
+  smoke test; T3(g) specified ordinal + case-sensitive (the required filename contains `rgbverifycffi`, so
+  a case-insensitive absence check was unsatisfiable); `NativeFileName()` added to the extraction list.
+- **rev 4** — T16 narrowed again: the parity clause was measured **tautological** (post-refactor
+  `ResolveNative` *is* the shared loop) and **unimplementable** (it is private and returns an `IntPtr`,
+  not a path); operator remediation given a concrete reporting channel; rollback covers `CLAUDE.md`.
+- **rev 5** — `ci.yml` native staging made a required part of this phase (T16 and the existing smoke test
+  fail loudly unstaged, so merging without it leaves CI red); the claim that this had to wait for phase 1b
+  was false. The undefined "supported set" clause removed from the message; §3.1 run 2 now names a
+  non-destructive removal location.
 
 > **Precondition: none. Mergeable on its own, and it closes an audit clause on its own.**
 
@@ -34,10 +52,14 @@ enough that this spec carries two obligations it would not otherwise need:
   extra *environmental* cover: like `RgbVerifyBindingTests.cs:67-72` it needs a staged
   native, so on a nativeless CI box both fail rather than run. A reviewer correctly flagged an earlier
   draft for claiming T16 filled that gap.
-- **§3.1's live signet send is therefore the refactor's only true end-to-end cover**, and is required
-  before merge. CI cannot supply it while `ci.yml` stages no native (finding-B codex follow-up #1, still
-  open); that follow-up is worth closing alongside phase 1b, which is what makes a staged CI native
-  possible.
+- **§3.1's live signet send is the refactor's only true end-to-end cover**, and is required before merge.
+- **`ci.yml` must stage the native — and this is required for 1a, not optional.** T16 and the existing
+  `RgbVerifyBindingTests` both fail loudly when no native is staged, and `ci.yml` stages none today, so
+  merging 1a without this leaves CI red. No package is needed: `release.yml:96-108` already does exactly
+  this with `bash native/rgb-verify/build-native.sh` plus a Rust toolchain, so the same three steps go
+  into `ci.yml`'s test job. An earlier draft claimed a staged CI native had to wait for phase 1b; that was
+  false — `build-native.sh` needs nothing from the packaging work. This also closes finding-B codex
+  follow-up #1, which has been open since that finding shipped.
 
 With those, the net effect is: today a missing native fails every send closed; after this, the same, plus
 a startup error that says so — and the resolution path is measurably unchanged.
@@ -194,8 +216,11 @@ run, and never said what breaks. Required order:
    be false advice. The message says: this is a known packaging defect in the plugin distribution, and give the **concrete reporting channel** —
    the plugin's issue tracker at `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` — asking the
    operator to quote this message. "Contact the vendor" without naming where is a dead end, which is the
-   one step an operator can actually take. If the RID is outside the supported set, say so explicitly — that
-   is a different problem with a different fix.
+   one step an operator can actually take. Phase 1a deliberately makes **no** claim about which
+   platforms are "supported": delivery is still whatever `build-native.sh` staged, and the shipped RID set
+   is a phase-1b/parent decision that is not yet settled. An implementer must not invent one — a wrong
+   "your platform is unsupported" line would send an operator down the wrong path. Naming the RID and the
+   searched paths (item 2) is sufficient and is what T3 enforces.
 4. **Developer remediation, last, and only naming things that exist:** `native/rgb-verify/build-native.sh`
    builds and stages the native for the host RID. The message must **not** name
    `scripts/pack-rgbverify.sh` or the `RgbVerifyCffi` package — neither exists after phase 1a, and citing
@@ -328,8 +353,12 @@ exercising native resolution for a plugin-loaded assembly, and measured runtime 
 plausible probe can pass every unit test and still fail inside BTCPay.
 
 1. **native present** — plugin loads, no error logged, no `disable:` command written;
-2. **native removed** — the actionable message is logged with the RID, every searched path, and the
-   consequence, and the plugin **still loads**.
+2. **native removed** — rename it inside the plugin's **build output**
+   (`bin/Debug/net10.0/runtimes/<rid>/native/`), restoring it afterwards. Do **not** clean
+   `native/rgb-verify/runtimes` for this: that is the source staging tree, `build-native.sh` rebuilds only
+   the host RID, and the container-built `linux-x64` artifact would be irrecoverable without another
+   container run. The message must be logged with the consequence, the RID and every searched path, and
+   the plugin **still loads**.
 
 3. **A live signet send**, because §1's refactor touches the live P/Invoke resolution path. Unit tests
    cover the probe; only a real send proves `ResolveNative` still binds the native for an actual
@@ -386,8 +415,10 @@ T1–T4, T12, T14, T15, T16.
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
 (deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` to `internal`; rewrite
 `ResolveNative` to use them — measured behaviour-preserving), `RGBPlugin.cs` (probe call site after `:33`,
-log-only), `BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata("RepoRoot", …)`), `CLAUDE.md`
+log-only), `BTCPayServer.Plugins.RgbUtexo.Tests/…csproj` (`AssemblyMetadata("RepoRoot", …)`),
+`.github/workflows/ci.yml` (Rust toolchain + `build-native.sh` staging in the test job, mirroring
+`release.yml:96-108`), `CLAUDE.md`
 (the startup check's phase-1a behaviour only — not the phase-2 recovery procedure, which is not yet true).
 
 **Deliberately unchanged:** the `<None Include>` block, `nuget.config`, both `packages.lock.json`,
-`.github/workflows/**`, `Directory.Build.props`, `.gitignore`.
+`.github/workflows/release.yml`, `Directory.Build.props`, `.gitignore`.
