@@ -4,7 +4,7 @@
 **Code base HEAD:** `04c1781` (spec commits sit on top; all code line numbers below are against `04c1781`)
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Status doc:** `audit-july-22-conclusions.md` §A (lines 26–32)
-**Revision:** 10 — after spec-gate round 8 (changelogs for rounds 1–8 in §10)
+**Revision:** 11 — after spec-gate round 9 (changelogs for rounds 1–9 in §10)
 
 ---
 
@@ -370,7 +370,7 @@ internal sealed class RgbNativeUnavailableException : Exception { … }   // def
 
 internal static class RgbNativeSelfCheck
 {
-    // throws RgbNativeUnavailableException — the phase-2 (hard-fail) entry point
+    // logs to BOTH sinks, then throws — the phase-2 (hard-fail) entry point
     internal static void Verify(NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static void Verify();          // bound to the real probe (below)
 
@@ -487,8 +487,11 @@ the probe" — was false and is withdrawn.
 - **phase 1 — log-only:** `RgbNativeSelfCheck.VerifyOrLog(logger)`. Satisfies the audit's literal "logs a
   loud, actionable error" clause with no package dependency, and is safe to merge because sends already
   fail closed.
-- **phase 2 — hard-fail:** `RgbNativeSelfCheck.Verify()`. T12/T13 assert the two behaviours, so the flip
-  cannot be made silently or forgotten.
+- **phase 2 — hard-fail:** `RgbNativeSelfCheck.Verify()`, which **logs to both sinks and then throws**. It
+  must log itself rather than relying on `PluginManager`'s catch (`PluginManager.cs:313`) to surface the
+  message, so the audit's "logs a loud, actionable error" clause is satisfied by our own code in the end
+  state, not by host behaviour we do not control. T14 asserts this. T12/T13 assert the two wirings, so the
+  flip cannot be made silently or forgotten.
 
 **Logging sink — emit to both, always.** The logger is obtained as `LoadConfiguration` already does at
 `RGBPlugin.cs:89`: `ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>()`.
@@ -632,9 +635,20 @@ no longer builds a native at all.
 - **Implemented:** native delivered by the `RgbVerifyCffi` package; root-cause `<None Include>` packing
   removed and its return blocked by T11 + the gate; startup hard-fail probe; isolation-hardened publish
   gate with `runtimeTargets` provenance; CI test job gets the native from restore; glibc floor pinned.
-- **Not closed until all four hold:** (a) the org has published `RgbVerifyCffi 0.11.1-rc.10-native.1` to
-  nuget.org; (b) phase 2 has landed with both lockfiles regenerated against nuget.org under strict
-  pinning; (c) §7.4's gate passes in CI; (d) **an artifact produced by BTCPay's hosted Plugin Builder
+- **Not closed until all six hold:** (a) the org has published `RgbVerifyCffi 0.11.1-rc.10-native.1` to
+  nuget.org, **and its `contentHash` in the regenerated lockfiles equals the SHA-512 recorded from the
+  nupkg `pack-native.yml` produced** (committed as `native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512`
+  and asserted by §7.4 check 2). Without this, §6(a) only proves *something* was published under that id,
+  and a substituted package would silently become the trust core — §3's residual risk (i) rests on this;
+  (b) phase 2 has landed with both lockfiles regenerated against nuget.org under strict
+  pinning; (c) §7.4's gate passes in CI; (e) **the native extracted from that same `.btcpay` loads on a
+  Debian-like linux-x64 target with all four exports resolvable** — verified by
+  `scripts/verify-native-loads-debian.sh`, which runs
+  `python3 -c "import ctypes; ctypes.CDLL(...)"` plus a `hasattr` check for each export inside a
+  `--platform linux/amd64` bookworm container (measured: seconds, no .NET needed). Bullets (a)–(d) are all
+  presence/publication checks; without (e) a team could tick every box while every production install
+  hard-fails at startup on a glibc mismatch — the same "verified somewhere that isn't production" failure
+  §1 warns about; (d) **an artifact produced by BTCPay's hosted Plugin Builder
   from the merged release tag** — not a `release.yml` artifact, not a local publish — has been
   downloaded and shown to contain `runtimes/linux-x64/native/librgbverifycffi.so`, with the `.btcpay`
   filename, the tag, and the listing output recorded in `audit-july-22-conclusions.md` §A, and the owner
@@ -673,7 +687,8 @@ if someone removes the property, the glob exclusion, or reintroduces the masking
 | T6 | 2 | `RealNative_SelfCheck_Passes` | the default `Verify()` succeeds in the test host. **Precondition, mandatory:** written and observed failing against a tree where `native/rgb-verify/runtimes` is cleaned, the `<None Include>` is still present-or-removed, **and the `PackageReference` is not yet added** — a clean staging tree alone is not enough, because once phase-2 step 1 lands the package itself supplies the native and the test passes at introduction. The Tests output also already contains both natives today via the old copy path (verified). Weaker evidence than T7; see the note below | without that precondition it does not fail first — the machine-local-state trap §1 warns about |
 | T7 | 2 | `PackagedNative_IsAPackageAsset` | the test host's `.deps.json` has, under `targets[*]["RgbVerifyCffi/<version>"].runtimeTargets`, an entry with `assetType == "native"` for the host RID — provenance, not presence, and not a `libraries`-section match | native currently arrives as a copied `None` item |
 | T11 | 2 | `PluginProject_HasNoRuntimesNoneInclude` | plugin csproj has **no** `None`/`Content`/`EmbeddedResource` item, via `Include=` or `Update=`, whose path references `native/rgb-verify/runtimes`, and no `<Copy>` task restaging the gate native — the masking mechanism must be gone, since T6/T7 stay green if both mechanisms coexist. Parses the csproj as XML (a line grep is evaded by a multi-line element), strips any MSBuild namespace, and normalises `\` to `/` | the `<None Include>` block still exists |
-| T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | **Roslyn-parsed**: parse `RGBPlugin.cs` with `Microsoft.CodeAnalysis.CSharp`, locate `Execute`, and assert it contains an `InvocationExpression` naming the throwing entry point, **no** invocation naming `VerifyOrLog`, and that the invocation is a *live, unguarded statement* — its ancestor chain up to the method body must contain no `IfStatement`, `TryStatement`, loop, or lambda. Both weaker rules are provably vacuous: measured, `if (false) { Verify(); }` and `try { Verify(); } catch { }` each satisfy "an invocation exists and VerifyOrLog does not", letting phase 2 be claimed hard-fail while behaviour stays log-only. A plain source-text match is likewise satisfied by a commented-out or `#if false` call. As the flip's only automated guard the rule must reject all four | phase 1's call site invokes `VerifyOrLog`, so it fails until the flip lands |
+| T13 | 2 | `PluginStartup_UsesHardFailEntryPoint` | **Roslyn-parsed**: parse `RGBPlugin.cs` with `Microsoft.CodeAnalysis.CSharp`, locate `Execute`, and assert it contains an `InvocationExpression` naming the throwing entry point, **no** invocation naming `VerifyOrLog`, and that the invocation is a *live, unguarded statement* — it must be a **direct child statement of `Execute`'s body block**, with no `IfStatement`, `TryStatement`, loop, lambda, or `LocalFunctionStatement` in its ancestor chain and no unconditional `return` preceding it at that level. Weaker rules are provably vacuous: measured, `if (false) { Verify(); }`, `try { Verify(); } catch { }`, a `Verify()` inside an uncalled local function, and one placed after an unconditional `return` each satisfy "an invocation exists and VerifyOrLog does not", letting phase 2 be claimed hard-fail while behaviour stays log-only. A plain source-text match is likewise satisfied by a commented-out or `#if false` call. As the flip's only automated guard the rule must reject all four | phase 1's call site invokes `VerifyOrLog`, so it fails until the flip lands |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException` — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch | `Verify` currently only throws |
 
 Tests reading repo files (T8, T9, T10, T11, T13) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
@@ -731,49 +746,63 @@ serialising each entry and searching it catches a `-local` string in either `req
 set -euo pipefail
 PROJ=BTCPayServer.Plugins.RgbUtexo.csproj
 LOCKS=(packages.lock.json BTCPayServer.Plugins.RgbUtexo.Tests/packages.lock.json)
+ISO=$(mktemp -d)                                            # kill global-packages-cache influence
+git clean -dfx native/rgb-verify/runtimes                   # kill staging-tree influence
 
-# Scan the FULLY IMPORTED project: -preprocess inlines every Import, so a masking item
-# cannot hide in Directory.Build.* or an imported .props. Measured at ~0.8s on this repo.
-dotnet msbuild "$PROJ" -preprocess:"$ISO/evaluated.xml" -p:StaticWebAssetsEnabled=false >/dev/null
+# NB: `dotnet restore -c Release` / `--configuration` are invalid (measured: MSB1001 Unknown switch).
+# Configuration must reach restore as a property, and only publish takes -c.
+COMMON="-p:Configuration=Release -p:ContinuousIntegrationBuild=true -p:StaticWebAssetsEnabled=false"
+NUGET_PACKAGES="$ISO/pkgs" dotnet restore "$PROJ" --locked-mode $COMMON
+NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$PROJ" --no-restore -c Release $COMMON -o "$ISO/pub"
 
-python3 - "$ISO/evaluated.xml" "$PROJ" -- "${LOCKS[@]}" <<'GUARD'
-import json, sys, xml.etree.ElementTree as ET
-args = sys.argv[1:]; split = args.index("--")
-evaluated, proj = args[0], args[1]; locks = args[split+1:]
+# ---- 1. AUTHORITATIVE: artifact provenance. Every gate native that actually ships must be a
+# declared RgbVerifyCffi package asset AND byte-identical to the package's own copy. This
+# inspects the bytes that ship, so it is indifferent to HOW a stray native was staged —
+# property indirection, an <Exec> script, a wildcard Include, %XX escapes, ResolvedFileToPublish,
+# a <Copy> task, or an imported .props. Source-text scanning cannot achieve this (see 3).
+python3 - "$ISO/pub" "$ISO/pkgs" rgbverifycffi <<'GUARD'
+import json, sys, hashlib, pathlib
+pub, cache, pkg = sys.argv[1], sys.argv[2], sys.argv[3].lower()
 def die(m): sys.exit(f"::error::{m}")
-def attr(e, n): return (e.get(n) or "")
+def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+deps = next((json.load(open(f)) for f in pathlib.Path(pub).glob("*.deps.json")), None)
+if deps is None: die("no .deps.json in publish output")
+declared = {}                       # publish-relative path -> package version
+for tgt in deps.get("targets", {}).values():
+    for lib, info in tgt.items():
+        if not lib.lower().startswith(pkg + "/"): continue
+        for rel, meta in info.get("runtimeTargets", {}).items():
+            if meta.get("assetType") == "native": declared[rel] = lib.split("/", 1)[1]
+if not declared: die(f"publish deps.json declares no native assets for {pkg}")
+found = [p for p in pathlib.Path(pub).rglob("*") if p.is_file()
+         and "rgbverify" in p.name.lower() and p.suffix in (".so", ".dylib", ".dll")]
+if not found: die("no gate native in the publish output at all — audit finding A")
+for p in found:
+    rel = str(p.relative_to(pub))
+    if rel not in declared:
+        die(f"{rel} is not a {pkg} package asset — hand-staged native, finding A's root cause")
+    src = pathlib.Path(cache) / pkg / declared[rel] / rel
+    if not src.exists(): die(f"cannot locate the package's own copy at {src}")
+    if sha(p) != sha(src): die(f"{rel} differs from the package's copy — overwritten after restore")
+for rid, lib in (("linux-x64", "librgbverifycffi.so"), ("linux-arm64", "librgbverifycffi.so"),
+                 ("osx-arm64", "librgbverifycffi.dylib")):
+    if f"runtimes/{rid}/native/{lib}" not in declared: die(f"package ships no native for {rid}")
+GUARD
+
+# ---- 2. The reference itself: exactly one RgbVerifyCffi, at a published version, and both
+# lockfiles pinning that same version.
+python3 - "$PROJ" -- "${LOCKS[@]}" <<'GUARD'
+import json, sys, pathlib, xml.etree.ElementTree as ET
+args = sys.argv[1:]; split = args.index("--")
+proj, locks = args[0], args[split+1:]
+def die(m): sys.exit(f"::error::{m}")
 def tag(e): return e.tag.rsplit('}', 1)[-1]
-GATE = ("rgb-verify/runtimes", "rgbverifycffi")
-
-def parse(p):
-    try: return ET.parse(p).getroot()
-    except FileNotFoundError: die(f"{p} not found")
-    except ET.ParseError as ex:
-        die(f"{p} is not parseable XML ({ex}) — cannot verify it does not mask the gate native")
-
-# 1. NO element anywhere in the evaluated project may name the gate native as a path.
-#    Every element type is scanned rather than a whitelist: the masking mechanism can be a
-#    None/Content/EmbeddedResource item, a <Copy> task, or — the idiom this csproj already
-#    uses at :116-129 — a <ResolvedFileToPublish> added in a publish target. A <Copy> into
-#    $(OutDir) is not even part of the publish set (csproj comment at :111-115), so
-#    ResolvedFileToPublish is the stronger vector and must be covered.
-root = parse(evaluated)
-for e in root.iter():
-    if tag(e) == "PackageReference": continue      # the package id legitimately contains the name
-    blob = " ".join(list(e.attrib.values()) + [(c.text or "") for c in e] + [e.text or ""])
-    blob = blob.replace("\\", "/").lower()
-    if any(g in blob for g in GATE):
-        die(f"<{tag(e)}> names the gate native by hand — finding A's root cause can return this way")
-    # An item-list source (SourceFiles="@(...)") hides the path, so also reject staging aimed
-    # at runtimes/ regardless of where the payload comes from.
-    if tag(e) in ("Copy", "None", "Content", "EmbeddedResource", "ResolvedFileToPublish") \
-       and "runtimes/" in blob:
-        die(f"<{tag(e)}> targets runtimes/ — possible masking path")
-
-# 2. Exactly one RgbVerifyCffi reference, at a published version, and both lockfiles agree.
-root = parse(proj)
+def attr(e, n): return (e.get(n) or "")
+try: root = ET.parse(proj).getroot()
+except FileNotFoundError: die(f"{proj} not found")
+except ET.ParseError as ex: die(f"{proj} is not parseable XML ({ex})")
 refs = [e for e in root.iter() if tag(e) == "PackageReference"
-        and attr(e, "Include").lower() == "rgbverifycffi"]   # NuGet ids are case-insensitive
+        and attr(e, "Include").lower() == "rgbverifycffi"]      # NuGet ids are case-insensitive
 if not refs: die("no RgbVerifyCffi PackageReference — the gate native would be absent")
 if len(refs) > 1: die(f"{len(refs)} RgbVerifyCffi PackageReferences — ambiguous version")
 want = attr(refs[0], "Version")
@@ -788,64 +817,55 @@ for lf in locks:
         if "-local" in json.dumps(i): die(f"{lf} pins RgbVerifyCffi to a -local build")
         if i.get("resolved") != want:
             die(f"{lf} resolves RgbVerifyCffi {i.get('resolved')}, csproj wants {want}")
+        # The lockfile contentHash is the base64 SHA-512 of the nupkg. Comparing it against the
+        # hash recorded from the CI-built package is what proves the nuget.org artifact IS ours;
+        # otherwise §6(a) only proves *something* was published under that id and a substituted
+        # package would silently become the trust core.
+        exp = pathlib.Path("native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512")
+        if not exp.exists(): die("EXPECTED-NUPKG-SHA512 missing — cannot prove the published nupkg is ours")
+        if i.get("contentHash") != exp.read_text().strip():
+            die(f"{lf} contentHash for RgbVerifyCffi does not match the recorded CI nupkg SHA-512")
 GUARD
 
-git clean -dfx native/rgb-verify/runtimes                  # kill staging-tree influence
-ISO=$(mktemp -d)                                            # kill global-packages-cache influence
-# NB: `dotnet restore -c Release` / `--configuration` are invalid (measured: MSB1001 Unknown switch).
-# Configuration must reach restore as a property, and only publish takes -c.
-COMMON="-p:Configuration=Release -p:ContinuousIntegrationBuild=true -p:StaticWebAssetsEnabled=false"
-NUGET_PACKAGES="$ISO/pkgs" dotnet restore "$PROJ" --locked-mode $COMMON
-NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$PROJ" --no-restore -c Release $COMMON -o "$ISO/pub"
-
-for rid in linux-x64 linux-arm64; do
-  f="$ISO/pub/runtimes/$rid/native/librgbverifycffi.so"
-  test -f "$f" || { echo "::error::gate native missing for $rid in publish output"; exit 1; }
-done
-test -f "$ISO/pub/runtimes/osx-arm64/native/librgbverifycffi.dylib" \
-  || { echo "::error::gate native missing for osx-arm64 in publish output"; exit 1; }
-
-python3 - "$ISO/pub/BTCPayServer.Plugins.RgbUtexo.deps.json" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-ok=any(a.get("assetType")=="native"
-       for t in d.get("targets",{}).values()
-       for k,v in t.items() if k.startswith("RgbVerifyCffi/")
-       for a in v.get("runtimeTargets",{}).values())
-sys.exit(0 if ok else "::error::gate native is not a RgbVerifyCffi package asset")
-PY
+# ---- 3. ADVISORY ONLY: a cheap grep for the obvious accidental regression (the base-HEAD
+# <None Include=…runtimes…> block). NOT a guarantee — it was demonstrably evaded by property
+# indirection, <Exec> staging, wildcard Includes and %XX escapes. Check 1 is the guarantee;
+# this exists solely to fail fast with a clearer message in the common case.
+if grep -Eq '<(None|Content|EmbeddedResource|ResolvedFileToPublish)[^>]*(Include|Update)="[^"]*native/rgb-verify/runtimes' "$PROJ"; then
+  echo "::error::plugin csproj still packs native/rgb-verify/runtimes by hand"; exit 1
+fi
 ```
 
 Properties this encodes, each the fix to a defect a reviewer found:
 
-- all three machine-local influences from §1 neutralised (staging cleaned, cache isolated, no local
+- all three machine-local influences from §1 neutralised (staging tree cleaned, cache isolated, no local
   source — the committed `nuget.config` is nuget.org-only);
-- **failing guards use explicit `if … then exit 1`**, never `! cmd`: with `set -e`, negating a command
-  with `!` suppresses errexit, so a `! grep -q …` guard silently never fails. Verified, including that
-  the negated form also swallows a *file-not-found* error, so it would mask a mistyped path. All three
-  guard branches above were executed against fixture csproj files (clean / `-local` version / re-added
-  `<None Include>`) and behave as specified;
-- **no guard greps the whole tree** for the interim version: this spec is a tracked file and documents
-  the `-local` suffix, so a tree-wide `git grep` would fail the gate unconditionally. Guards inspect
+- **the masking check is artifact-based, not source-based.** Nine rounds of source-text hardening were
+  defeated each time — most recently by MSBuild property indirection (`$(A)/$(B)$(C)`), an `<Exec>` script
+  staging the file with no path text in the project at all, wildcard `Include`s, and `%XX` escapes
+  (`runtime%73/`). Static analysis of a Turing-complete build system cannot enumerate those. Inspecting
+  the shipped bytes can: every `librgbverifycffi.*` in the artifact must be a *declared* `RgbVerifyCffi`
+  runtime asset **and** byte-identical to the package's own copy in the isolated restore cache.
+  Demonstrated: a legitimate publish passes; an extra native at an undeclared path is caught; an
+  overwrite of a declared path with different bytes is caught;
+- every shipped RID's native must be declared by the package, so a RID silently vanishing from the
+  canonical nupkg fails the gate rather than the merchant's startup;
+- `$ISO` is assigned **before** first use (an earlier draft referenced it above its assignment, which
+  under `set -u` aborted the gate before any check ran — failing at base HEAD for the wrong reason);
+- failing guards use explicit `if … exit 1` or a nonzero `sys.exit`, never `! cmd`: with `set -e`,
+  negating a command suppresses errexit, and the negated form also swallows file-not-found;
+- no guard greps the tree for the interim version string: this spec is tracked and documents the
+  `-local` suffix, so a tree-wide `git grep` would fail the gate unconditionally. Checks 2 inspects
   build inputs only;
 - locked mode genuinely exercised (`ContinuousIntegrationBuild=true`; without it `RestoreLockedMode` is
   off and the gate would neither detect lockfile drift nor prove the merged state);
 - `StaticWebAssetsEnabled=false` passed to **both** restore and publish, matching the property-parity
-  requirement documented at `ci.yml:38-42` (a differing SWA property spawns a second concurrent build
-  racing `obj/` — intermittent MSB3030/MSB3491);
+  requirement at `ci.yml:38-42` (a differing SWA property spawns a second concurrent build racing
+  `obj/` — intermittent MSB3030/MSB3491);
 - provenance inspected via `targets[…].runtimeTargets`, not a `"RgbVerifyCffi/"` match that the
   `libraries` section also satisfies;
-- guards parse XML/JSON and cover every packing item type (`None`/`Content`/`EmbeddedResource`), both
-  `Include=` and `Update=`, `Link=`/`PackagePath=` retargeting, masking items hidden in
-  `Directory.Build.props`/`.targets`, duplicate `RgbVerifyCffi` references, backslash paths, and a
-  namespaced csproj — all executed against fixtures, along with lockfile-stale and csproj↔lockfile
-  version-drift cases. Also run against the **real repo files**: at base HEAD the guard fails with the
-  correct reason (the masking `<None Include>` is present), and against a phase-2-shaped fixture (that
-  block removed, the `PackageReference` added, lockfiles agreeing) it passes silently — so it neither
-  crashes on the real inputs nor false-positives on the legitimate post-phase-2 csproj;
-- the restore runs `--locked-mode`, which cannot rewrite the lockfile, so no separate "did it mutate
-  tracked files" check is needed (an earlier revision claimed a `git diff --quiet` that the script did
-  not contain);
+- the source-text check is retained but labelled **advisory**, so no reader mistakes it for the
+  guarantee;
 - the job runs `actions/checkout` with **`submodules: recursive`**: the plugin's BTCPay
   `ProjectReference` is `Condition="Exists(…)"` (`csproj:61-62`), so a plain checkout silently drops it
   and the job would fail on compile errors instead of the native assertion.
@@ -929,6 +949,25 @@ scripts are inert if unreferenced.
 ---
 
 ## 10. Revision history
+
+### Revision 11 — after spec-gate round 9
+
+Round 9 demonstrated that **source-text masking checks cannot be made sound**: property indirection
+(`$(A)/$(B)$(C)`), an `<Exec>` script staging the file with no path text in the project, wildcard
+`Include`s, and `%XX` escapes (`runtime%73/`) each reinstated hand-staging with the guard green
+(`-preprocess` inlines imports but does **not** expand properties). Rather than add a tenth string rule,
+the check moved to the artifact.
+
+| Issue | Resolution |
+|---|---|
+| **Blocker:** four demonstrated evasions of the source-scanning masking guard | the authoritative check is now **artifact provenance**: every `librgbverifycffi.*` in the publish output must be a *declared* `RgbVerifyCffi` runtime asset **and** byte-identical to the package's own copy in the isolated restore cache. Indifferent to how a stray native was staged. Verified: legitimate publish passes; an extra native at an undeclared path is caught; an overwrite of a declared path is caught. The source grep is retained but labelled **advisory** |
+| `$ISO` was referenced ~57 lines above its assignment; under `set -u` the gate aborted before any check, so it failed at base HEAD for the wrong reason and closure bullet (c) could never legitimately pass | `ISO` assigned first (§7.4) |
+| Preprocess ran before restore, so package `build/buildTransitive` props were absent on a cold CI checkout — coverage silently differed dev-vs-CI (the §1 trap again) | the preprocess dependency is gone entirely with the artifact-based check |
+| T13 still vacuous: a `Verify()` inside an uncalled local function, or after an unconditional `return`, satisfied the ancestor-chain rule | T13 now requires a direct child statement of `Execute`'s body with no preceding unconditional `return` and no `LocalFunctionStatement` ancestor |
+| **§6's closure bullets were all presence/publication checks** — none proved the native actually loads on the target, so a team could tick every box while every production install hard-failed on a glibc mismatch | new closure bullet (e): the native extracted from the same `.btcpay` must `dlopen` with all four exports resolvable inside a `--platform linux/amd64` bookworm container (`scripts/verify-native-loads-debian.sh`; measured, seconds, no .NET needed) |
+| Nothing proved the nuget.org package **is** the nupkg CI built — §6(a) only asked that the org "has published", so a substituted package could become the trust core (§3 residual risk (i) rested on nothing) | the CI nupkg's SHA-512 is committed as `native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512` and §7.4 check 2 asserts both lockfiles' `contentHash` equals it |
+| Phase-2 `Verify()` logged nothing itself, leaving the audit's "loud, actionable error" clause dependent on `PluginManager`'s catch | `Verify` logs to both sinks before throwing; new test T14 |
+| Provenance accepted `assetType == "native"` for any RID, so a package missing linux-x64 could pass | every shipped RID's native must be declared (§7.4 check 1) |
 
 ### Revision 10 — after spec-gate round 8
 
@@ -1108,10 +1147,11 @@ Not adopted: that `--locked-mode` and `--force-evaluate` conflict — verified t
 | File | Phase |
 |---|---|
 | `native/rgb-verify/packaging/RgbVerifyCffi.csproj`, `native/rgb-verify/packaging/_._` | 1 |
-| `scripts/pack-rgbverify.sh`, `scripts/verify-publish-native.sh` | 1 |
+| `scripts/pack-rgbverify.sh`, `scripts/verify-publish-native.sh`, `scripts/verify-native-loads-debian.sh` | 1 |
 | `.github/workflows/pack-native.yml` | 1 |
 | `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`) | 1 |
-| test file(s) for T1–T4, T8–T10, T12 | 1 |
+| test file(s) for T1–T4, T8–T10, T12, T14 | 1 |
+| `native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512` (recorded at S3) | 2 |
 | test file(s) for T6, T7, T11, T13 | 2 |
 
 **Modified:**
