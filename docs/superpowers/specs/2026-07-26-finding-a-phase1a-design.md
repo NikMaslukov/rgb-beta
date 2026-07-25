@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 10 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 11 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
 
 **Revision history**
 - **rev 1** — extracted from the phase-1 spec (probe + tests only; packaging moved to phase 1b).
@@ -36,13 +36,17 @@
   six `rgblibcffi` imports are `private static extern`; §3.1's live signet send covers that path instead.
   A staged-native precondition added, since unstaged the remaining clause passes for the wrong reason
   (measured). A standing accessibility rule added to §3 after the fifth violation of it.
-- **rev 10** — the diagnostic now distinguishes *absent* from *present-but-unloadable*: a dry-run reviewer
-  showed the message asserted "known packaging defect" unconditionally, though `TryLoadFromCandidates`
-  returns false for both and an operator with a wrong-architecture or glibc-incompatible native would be
-  misdiagnosed. Added `existedButFailed` and T3 clause (h).
 - **rev 9** — that standing rule corrected: as first written it excluded the class-sketch members and so
   invalidated T2/T3/T4/T12/T14. T16 gained its access route (the public `DecodeInvoice` wrapper); §5 now
   lists the `ResolveNative` widening; the wrapped `§3 and N6` dangling reference finally removed.
+- **rev 10** — the diagnostic now distinguishes *absent* from *present-but-unloadable*: a dry-run reviewer
+  showed the message asserted "known packaging defect" unconditionally, though `TryLoadFromCandidates`
+  returns false for both and an operator with a wrong-architecture or glibc-incompatible native would be
+  misdiagnosed — the glibc case being the very failure the parent spec calls the most likely real-world
+  trigger. Added `existedButFailed` and T3 clause (h).
+- **rev 11** — that change was only half-propagated: `NativeProbe`, `DefaultProbe` and the binding lambda
+  were not widened, so the new list could never reach the formatter (T3(h) unsatisfiable) and the lambda
+  passed three arguments to a four-out-parameter method. Widened the whole channel.
 
 > **Precondition: none. Mergeable on its own, and it closes an audit clause on its own.**
 
@@ -98,7 +102,9 @@ produced `.btcpay`) needs the package. Finding A stays an open blocker.
 New `Services/RgbNativeSelfCheck.cs`:
 
 ```
-internal delegate bool NativeProbe(out IntPtr handle, out IReadOnlyList<string> searched);
+internal delegate bool NativeProbe(out IntPtr handle,
+                                  out IReadOnlyList<string> searched,
+                                  out IReadOnlyList<string> existedButFailed);
 
 internal sealed class RgbNativeUnavailableException : Exception { … }   // defined in this file
 
@@ -123,7 +129,8 @@ internal static class RgbNativeSelfCheck
     // real bindings, declared as static METHODS (not static readonly fields): a field's type
     // initializer would run on first touch of the class — i.e. before the method body, outside
     // the try the shapes below exist to provide.
-    static bool DefaultProbe(out IntPtr h, out IReadOnlyList<string> searched);
+    static bool DefaultProbe(out IntPtr h, out IReadOnlyList<string> searched,
+                             out IReadOnlyList<string> existedButFailed);
     static bool DefaultHasExport(IntPtr h, string name);
 }
 // Both convenience overloads take the bootstrap IServiceProvider, not a resolved ILogger: resolving
@@ -132,9 +139,10 @@ internal static class RgbNativeSelfCheck
 // — a one-identifier diff, which is exactly what T13 and T15 key on.
 // real bindings — both MUST be lambdas, not method groups (a method group conversion fails
 // CS0123 for either: TryLoadFromCandidates takes an extra baseDir, TryGetExport has an out param):
-//   probe     = (out IntPtr h, out IReadOnlyList<string> s) =>
+//   probe     = (out IntPtr h, out IReadOnlyList<string> s, out IReadOnlyList<string> f) =>
 //                   RgbVerifyNative.TryLoadFromCandidates(
-//                       RgbVerifyNative.ResolveBaseDir(typeof(RgbVerifyNative).Assembly), out h, out s)
+//                       RgbVerifyNative.ResolveBaseDir(typeof(RgbVerifyNative).Assembly),
+//                       out h, out s, out f)
 //   hasExport = (h, n) => NativeLibrary.TryGetExport(h, n, out _)
 ```
 
@@ -218,7 +226,13 @@ The probe therefore shares the resolver's own path-resolution code. Extract from
   tell two very different failures apart: a file that is missing (a packaging defect) versus one that is
   present but unloadable (wrong architecture, corrupt, or incompatible system libraries — e.g. a glibc
   floor newer than the host). Without it the diagnostic must guess, and would tell an operator with a
-  broken-but-present native to report a packaging defect that is not their problem. It takes `baseDir` explicitly so `ResolveNative` can pass
+  broken-but-present native to report a packaging defect that is not their problem.
+
+  **The whole channel must be widened together**, or the distinction cannot be tested: `NativeProbe`,
+  `DefaultProbe` and the real-binding lambda all carry `existedButFailed` too. Widening only
+  `TryLoadFromCandidates` — as an earlier draft did — leaves an injected probe with no way to signal
+  present-but-unloadable, which makes T3(h) unsatisfiable through the specified surface and leaves the
+  binding lambda passing three arguments to a four-out-parameter method. It takes `baseDir` explicitly so `ResolveNative` can pass
   `ResolveBaseDir(assembly)` (honouring its own `assembly` parameter) and the probe can pass the plugin
   assembly's directory — neither silently substitutes a different base.
 
