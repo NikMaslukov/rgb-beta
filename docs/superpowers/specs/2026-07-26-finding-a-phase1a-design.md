@@ -327,7 +327,10 @@ plausible probe can pass every unit test and still fail inside BTCPay.
 
 ```bash
 W=$(mktemp -d); git worktree add --detach "$W" HEAD      # never mutate the working tree
-git -C "$W" clean -dfx native/rgb-verify/runtimes         # the Plugin Builder has no staged natives
+# A fresh worktree has an EMPTY submodules/btcpayserver, so BOTH conditional ProjectReferences
+# (csproj:60-61) resolve to nothing and the publish fails. Measured: this init is required.
+git -C "$W" submodule update --init --recursive submodules/btcpayserver
+git -C "$W" clean -dfx native/rgb-verify/runtimes         # no-op in a fresh worktree (runtimes/ is gitignored)
 ISO=$(mktemp -d)
 NUGET_PACKAGES="$ISO/pkgs" dotnet publish "$W/BTCPayServer.Plugins.RgbUtexo.csproj" \
   -c Release -o "$ISO/pub" -p:StaticWebAssetsEnabled=false
@@ -342,9 +345,14 @@ need); the project path must be explicit (both the `.slnx` and the csproj sit at
 publishing via the solution drags in six btcpayserver submodule projects); and `-c Release` belongs on
 `publish` (`dotnet restore -c Release` is invalid — MSB1001).
 
+**Measured, not assumed:** run against a detached worktree of `4e0045f`, the publish tree contained **0**
+`librgbverifycffi.*`, while the control `librgblibcffi.{so,dylib,dll}` *was* present under
+`runtimes/*/native/` — so the absence is specific to the gate native, not a broken publish.
+
 **What it proves, precisely:** that a Plugin-Builder-equivalent publish ships no gate native — finding A
-reproduced on demand. It does **not** run the resulting tree, so it does not by itself show the
-diagnostic firing; that evidence comes from run 2 above. An earlier draft claimed the stronger thing.
+reproduced on demand. It does **not** run the resulting tree, and on a dev Mac it cannot exercise
+linux-x64 at all, so it does not by itself show the diagnostic firing; that evidence comes from run 2.
+An earlier draft claimed the stronger thing.
 
 ---
 
