@@ -156,11 +156,11 @@ Rationale, both halves empirically verified:
   `NU1301` on a cold cache, and a gitignored directory cannot exist in a fresh clone (git does not track
   empty directories). Strictly worse than the bug being fixed.
 - A local source ahead of nuget.org would let a locally built nupkg **shadow the org-published trust
-  core**, voiding residual-risk mitigation (i) in §3.
+  core**, voiding the parent's residual-risk mitigation (i).
 
 `local-nuget-feed/` is added to the root `.gitignore` (G5).
 
-### 2.4 Startup self-check — resolver-parity, ABI-safe, hard-fail
+### 2.4 Startup self-check — resolver-parity, ABI-safe (log-only in this phase)
 
 New `Services/RgbNativeSelfCheck.cs`:
 
@@ -171,9 +171,10 @@ internal sealed class RgbNativeUnavailableException : Exception { … }   // def
 
 internal static class RgbNativeSelfCheck
 {
-    // logs to BOTH sinks, then throws — the phase-2 (hard-fail) entry point
-    internal static void Verify(NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static void Verify();          // bound to the real probe (below)
+    // logs to BOTH sinks, then throws — the hard-fail entry point (wired in phase 2)
+    internal static void Verify(ILogger? logger, TextWriter sink,
+                                NativeProbe probe, Func<IntPtr, string, bool> hasExport);
+    internal static void Verify(ILogger? logger);   // sink defaults to Console.Error
 
     // catches EVERY exception, reports it to BOTH sinks, returns false — the phase-1 entry point
     internal static bool VerifyOrLog(ILogger? logger, TextWriter sink,
@@ -291,7 +292,7 @@ the probe" — was false and is withdrawn.
 - **phase 2 — hard-fail (specified in the phase-2 spec, not implemented here):** `RgbNativeSelfCheck.Verify()`, which **logs to both sinks and then throws**. It
   must log itself rather than relying on `PluginManager`'s catch (`PluginManager.cs:313`) to surface the
   message, so the audit's "logs a loud, actionable error" clause is satisfied by our own code in the end
-  state, not by host behaviour we do not control. T14 asserts this. T12 pins the phase-1 wiring; T13 (phase 2) pins the flip, so it
+  state, not by host behaviour we do not control. T14 asserts this. T12 pins `VerifyOrLog`'s behaviour and T15 pins that `Execute` actually calls it; T13 (phase 2) pins the flip, so it
   cannot be made silently or forgotten.
 
 **Logging sink — emit to both, always.** The logger is obtained as `LoadConfiguration` already does at
@@ -310,12 +311,9 @@ is a cheap price for an audit-mandated error that cannot vanish into a null logg
 parameter, not global `Console` state, so T12 observes it without `Console.SetError` and without
 xunit parallelism ordering hazards.
 
-**Operational consequence, explicitly accepted by the user.** Throwing from `Execute` makes
-`PluginManager` log the error, queue `disable:BTCPayServer.Plugins.RgbUtexo`, and throw
-`ConfigException` — **BTCPay restarts and the plugin returns disabled**
-(`submodules/btcpayserver/BTCPayServer/Plugins/PluginManager.cs:302-325`). All plugin functionality is
-lost, not just sends, and an admin must re-enable the plugin (and clear
-`~/.btcpayserver/Plugins/commands`). See the parent's risks section–the parent's risks section.
+The hard-fail wiring's operational consequences — plugin auto-disable, the fleet-wide blast radius, and
+the restart-loop exposure — belong to phase 2 and are specified there. Phase 1 logs and continues, so
+none of them apply here.
 
 ### 2.5 CI — `pack-native.yml` only
 
@@ -329,22 +327,20 @@ Release (`:186`), so using it pre-merge would tag unmerged code.
 - job `linux-arm64`: same, `--platform linux/arm64` — on an x64 GitHub runner this requires binfmt/QEMU registration (`docker/setup-qemu-action`) or, preferably, `runs-on: ubuntu-24.04-arm` to build natively; the `--platform` flag alone works only on an Apple-Silicon dev machine;
 - job `osx-arm64`: `macos-14` runner, Mach-O export check, upload artifact;
 - job `assemble`: download all three, `pack-rgbverify.sh --pack-only --require-all-rids --version <v>`,
-  assert the nupkg layout (§4.1), upload the canonical nupkg for the org to publish at S3.
+  assert the nupkg layout (§2.1), upload the canonical nupkg for the org to publish at S3.
 
 Every RID therefore has CI provenance; the production trust core is not a developer's cross-build.
 
 **`ci.yml`** — in the merged state a plain restore suffices (the package is on nuget.org) and the test
 job then has the native (G4). No interim steps are ever committed (the parent's sequencing section).
 
-package and the step would be dead. Keep the existing
-`publish-out` native check (`:136-140`). Add the phase-2 acceptance gate's gate (provenance assertion + `-local` guard +
-masking-mechanism check) as a **separate job with its own `actions/checkout`**, gating the release but
-never sharing a workspace with the publishing job — see the phase-2 acceptance gate for why an in-workspace run would poison
-the shipped artifact's restore.
-
 Phase 1 makes **no** change to `ci.yml` or `release.yml`.
 
 ### 2.6 Documentation
+
+Phase 1 touches `CLAUDE.md` only. `README.md`, `.github/README.md` and the audit status doc describe
+package delivery and hard-fail, which are not true until phase 2 — editing them here would violate the
+"every committed state is coherent" rule.
 
 Docs are split by phase so no committed state describes a reality that does not yet exist (G6). **Phase
 1** documents the pack workflow, the local feed, the glibc-floor requirement, the log-only startup
@@ -360,13 +356,9 @@ package delivery and hard-fail, and adds the recovery procedure.
   `:310` ("Ships in the `.btcpay` via `runtimes/**`" — now via the package) and `:360` ("Not covered:
   win-x64 and linux-arm64 … prod = linux-x64 only" — linux-arm64 is now shipped). The `rgblibcffi` half
   is unrelated and stays.
-- Root `README.md` (`:224`, `:242`, `:264`) describes the native build/packaging and is also the
-  `PackageReadmeFile`; update those passages. Also `:300-306` ("Platform Support"), which after phase 2 is
-  wrong twice over: `linux-arm64` becomes supported, and an unsupported platform now loses the whole
-  plugin at startup rather than only sends.
-- `audit-july-22-conclusions.md` §A: per the parent's closure criteria.
-- `.github/README.md` supply-chain section: the gate native now arrives as a pinned package; no lockfile
-  exemption exists in the merged state.
+
+
+
 
 ---
 
@@ -415,14 +407,15 @@ phase 1, used by phase 2's closure) is what catches it.
 
 ## 4. Test plan
 
-Behavioural tests (T1–T4, T12, T14) are written and observed failing before the corresponding change. T8 and T9 are **regression guards**: they encode an invariant that already holds and are expected to
+Behavioural tests (T1–T4, T12, T14, T15) are written and observed failing before the corresponding change.
+T14 additionally requires the intra-phase ordering noted in its row. T8 and T9 are **regression guards**: they encode an invariant that already holds and are expected to
 pass on the commit that introduces them (T10 does fail first — it encodes a change) — their value is failing later,
 if someone removes the property, the glob exclusion, or reintroduces the masking mechanism. The table's
 "first fails because" column states which of the two each is.
 
 ### 4.1 Automated tests (`BTCPayServer.Plugins.RgbUtexo.Tests`) — phase 1 only
 
-Phase-1 rows of the parent's test table (T1–T4, T8, T9, T10, T12, T14). T6, T7, T11 and T13 belong to phase 2 and must not be written here: they can only fail first if
+Phase-1 tests (T1–T4, T8, T9, T10, T12, T14, T15). T6, T7, T11 and T13 belong to phase 2 and must not be written here: they can only fail first if
 written before phase-2's changes.
 
 
@@ -437,9 +430,10 @@ written before phase-2's changes.
 | T8 | 1 | `PluginProject_KeepsCopyLocalLockFileAssemblies` | plugin csproj sets `CopyLocalLockFileAssemblies=true` (load-bearing, the phase-2 spec) | passes at base; guards regression |
 | T9 | 1 | `NoLocalPackageVersion_IsCommitted` | the plugin csproj's `RgbVerifyCffi` `PackageReference` version (if any) and every `RgbVerifyCffi` entry in both `packages.lock.json` files contain no `-local`. Parses XML/JSON — it must **not** grep the tree, or it matches this spec's own prose and its own source | passes at base (no reference yet); guards the parent's sequencing section |
 | T10 | 1 | `PluginProject_ExcludesPackagingProjectFromGlobs` | plugin csproj `Remove`s `native/rgb-verify/packaging/**` from `Compile`/`Content`/`EmbeddedResource`/`None` | the removes do not exist |
-| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException` — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch | `Verify` currently only throws |
+| T14 | 1 | `Verify_FailingProbe_LogsToBothSinksThenThrows` | `Verify` writes the actionable message to the `ILogger` **and** the `TextWriter` sink before throwing `RgbNativeUnavailableException` — the end-state "logs a loud, actionable error" clause must be met by our code, not by `PluginManager`'s catch. **Ordering:** write `Verify` throw-only under T2–T4 first, then write T14 (fails), then add the logging (passes) — written alongside the logging it passes at introduction and proves nothing | `Verify` throws without logging |
+| T15 | 1 | `PluginStartup_InvokesLogOnlyEntryPoint` | **Roslyn-parsed**, mirroring T13: `RGBPlugin.Execute` contains an `InvocationExpression` naming `VerifyOrLog` as a **live, unguarded statement** — a direct child of the method body, no `IfStatement`/`TryStatement`/loop/lambda/`LocalFunctionStatement` ancestor and no preceding unconditional `return`. Without it phase 1's *only* deliverable — the probe actually being invoked at startup — has no automated guard, since T12 exercises `VerifyOrLog` in isolation and T13 (the call-site guard) is phase 2 | no call site exists yet |
 
-Tests reading repo files (T8, T9, T10) locate the repo root from an
+Tests reading repo files (T8, T9, T10, T15) locate the repo root from an
 `AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
 `$(MSBuildThisFileDirectory)..`, so they work for out-of-tree runs. T9 must parse the csproj XML and the
 lockfile JSON — it must not grep the tree, or it matches this spec's prose and its own source. T6/T7
@@ -456,10 +450,20 @@ changes; the run is a regression check that packaging did not disturb the crate.
 
 ### 4.3 Pack verification (scripted)
 
-`pack-rgbverify.sh` must produce a nupkg whose entry list is exactly the §2.1 layout (`unzip -l`),
-including `lib/net8.0/_._`, whose nuspec declares **no** dependencies, and — for the canonical pack —
-containing all three RIDs. Then a `--force-evaluate` restore of the plugin and Tests projects must
-succeed.
+`bash scripts/pack-rgbverify.sh` must produce a nupkg whose entry list is exactly the §2.1 layout
+(`unzip -l`), including `lib/net8.0/_._`, and whose nuspec declares **no** dependencies; for the canonical
+pack, containing every shipped RID.
+
+Consumption is then proved against a **throwaway scratch project**, never the plugin or Tests projects: in
+phase 1 nothing references `RgbVerifyCffi`, so restoring the real projects would be vacuous, and a
+`--force-evaluate` restore would rewrite the two `packages.lock.json` files this phase lists as
+deliberately unchanged. The scratch project targets `net10.0`, references the packed version from the
+local feed, and must publish with the natives at `runtimes/<rid>/native/`.
+
+`bash scripts/verify-native-loads-debian.sh` must then load the packed `linux-x64` native inside a
+`--platform linux/amd64` bookworm container and resolve all four exports — `python3 -c "import ctypes;
+ctypes.CDLL(...)"` plus a `hasattr` check per export (measured: seconds, no .NET needed). This is what
+catches a glibc-floor mistake at pack time rather than at a merchant's startup in phase 2.
 
 ### 4.4 Live verification (phase 1)
 
@@ -487,8 +491,8 @@ if unreferenced.
 ## 6. Files touched (phase 1)
 
 **New:** `native/rgb-verify/packaging/RgbVerifyCffi.csproj`, `native/rgb-verify/packaging/_._`,
-`scripts/pack-rgbverify.sh`, `scripts/verify-publish-native.sh`,
-`scripts/verify-native-loads-debian.sh`, `.github/workflows/pack-native.yml`,
+`scripts/pack-rgbverify.sh`, `scripts/verify-native-loads-debian.sh`,
+`.github/workflows/pack-native.yml`,
 `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`), test file(s) for
 T1–T4, T8–T10, T12, T14.
 
