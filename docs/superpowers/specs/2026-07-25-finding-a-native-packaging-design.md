@@ -954,7 +954,7 @@ lockfile traversal matches this repo's real schema. Remaining defects, all fixed
 | §7.1 claimed every test fails first, contradicted by the guard tests marked "passes at base" | behavioural tests vs regression guards distinguished explicitly (§7.1) |
 | §4.0 phase-2 step 5 wired the gate into `ci.yml` while §4.6/§11 said `ci.yml` needs no change | reconciled: gate goes to `release.yml` only (§4.0, §4.6) |
 | T6 gives false confidence — the Exe test host resolves the native from its own `deps.json` without the resolver | stated in §7.1; §7.5 now treats live plugin-hosted startup as mandatory evidence, including a phase-2 native-present run |
-| §4.3 reversed a user decision without flagging it, unlike the other two | recorded as §9.6 |
+| §4.3 reversed a user decision without flagging it, unlike the other two | recorded as a decision to confirm (now §9.7 after revision 7 inserted the artifact-size item) |
 | Parity justification overclaimed that the old approach caught a deleted registration | corrected: neither approach does; covered by the binding smoke test and noted as an edge case (§4.5, §5.6) |
 | §11 marked phases on only 4 of ~15 rows | every row now carries its phase |
 
