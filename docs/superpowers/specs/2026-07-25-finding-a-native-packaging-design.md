@@ -255,10 +255,11 @@ no longer builds a native at all.
    acceptable, and who owns S3 and by when.
 2. **Hard-fail restart-loop exposure** (§5.3) — confirm no target deployment has a read-only plugins
    volume, or accept the loop as the diagnostic.
-3. **`linux-arm64` added to the shipped RID set** (§4.1), widening the two-RID set chosen earlier —
-   recommended, because hard-fail turns a missing native on an officially shipped BTCPay platform into a
-   whole-plugin outage. Costs one CI job. Confirm, or drop it and accept that arm64 hosts cannot run the
-   plugin at all.
+3. **`linux-arm64` added to the shipped RID set** (§4.1) — **CONFIRMED (2026-07-26): it ships.** The
+   package carries linux-x64, linux-arm64 and osx-arm64; phase 1b's declared `GateRid` set and its
+   `ubuntu-24.04-arm` CI job are enabled accordingly, and phase 2's acceptance gate already asserts all
+   three RIDs in the publish output. Rationale: hard-fail turns a missing native on an officially shipped
+   BTCPay platform into a whole-plugin outage, so an arm64 host would otherwise lose the plugin entirely.
 4. **A `macos-14` CI job** for the osx-arm64 asset's provenance and its Mach-O export check (§4.2,
    §4.6). Confirm a macOS runner job is acceptable.
 5. **Log-only in phase 1, hard-fail in phase 2** (§4.0, §4.5). Your instruction was hard-fail over

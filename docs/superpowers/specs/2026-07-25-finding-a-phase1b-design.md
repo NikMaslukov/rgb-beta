@@ -147,10 +147,7 @@ than named:
 <ItemGroup>
   <GateRid Include="linux-x64"   Lib="librgbverifycffi.so" />
   <GateRid Include="osx-arm64"   Lib="librgbverifycffi.dylib" />
-  <!-- PROVISIONAL: linux-arm64 is parent decision 3 and is NOT yet confirmed by the user. Until it is,
-       this line stays commented out; uncommenting it is the whole change. Hardwiring it would make
-       `dotnet pack` fail outright if the decision goes the other way. -->
-  <!-- <GateRid Include="linux-arm64" Lib="librgbverifycffi.so" /> -->
+  <GateRid Include="linux-arm64" Lib="librgbverifycffi.so" />   <!-- confirmed: parent decision 3 -->
 </ItemGroup>
 
 <Target Name="RequireAllRids" BeforeTargets="Pack" Condition="'$(RequireAllRids)' == 'true'">
@@ -234,7 +231,7 @@ is why S2 cannot live in `release.yml`: that workflow is dispatchable on any ref
 Release (`:186`), so using it pre-merge would tag unmerged code.
 
 - job `linux-x64`: build in a `rust:1-bookworm` container (G7), ELF export check, upload artifact;
-- job `linux-arm64` (**only once parent decision 3 is confirmed**): `runs-on: ubuntu-24.04-arm`, building natively. Not QEMU: emulated Rust builds are slow enough to dominate the workflow, and `--platform linux/arm64` alone works only on an Apple-Silicon dev machine;
+- job `linux-arm64`: `runs-on: ubuntu-24.04-arm`, building natively. Not QEMU: emulated Rust builds are slow enough to dominate the workflow, and `--platform linux/arm64` alone works only on an Apple-Silicon dev machine;
 - job `osx-arm64`: `macos-14` runner, Mach-O export check, upload artifact;
 - job `assemble`: download every RID artifact, `pack-rgbverify.sh --pack-only --require-all-rids --version <v>`,
   assert the nupkg layout (§2.1), upload the canonical nupkg for the org to publish at S3.
