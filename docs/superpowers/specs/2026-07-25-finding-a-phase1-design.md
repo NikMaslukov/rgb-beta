@@ -372,7 +372,9 @@ The optional `probe`/`hasExport` parameters exist so T12 and T14 can pair a host
 with a *failing* probe. Without them those assertions are unsatisfiable: the convenience overloads would
 hardwire the real probe, which **succeeds** on any machine where the native is staged, so the throwing
 provider is swallowed and nothing fails. `Execute` passes neither argument, so production behaviour is
-unchanged.
+unchanged. Verified by compilation: `probe ?? DefaultProbe` with `DefaultProbe` a **method group** binds
+via target-typed conversion in the null-coalescing operator (0 errors, 0 warnings), so the shapes above
+compile as written.
 
 A null-only fallback would be the wrong design here, for a reason worth stating because it inverts the
 earlier rationale: BTCPay *does* register a real factory on the plugin-load path
