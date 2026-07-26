@@ -59,7 +59,7 @@ matters.
   draft for claiming T16 filled that gap.
 - **§3.1's live signet send is the refactor's only true end-to-end cover**, and is required before merge.
 - **`ci.yml` must stage the native — and this is required for 1a, not optional.** `ci.yml`'s test job **fails on this branch — **not** on `main`; see §4, where this is stated in full** — the binding test is an ungated `[Fact]`, `runtimes/` is
-  gitignored, and nothing supplies the native — so this is a pre-existing breakage this phase fixes, not
+  gitignored, and nothing supplies the native — so the job fails — breakage **this branch introduced** in `4449c3c` and this phase repairs, not
   one 1a introduces. **T17 needs the staged native for a different reason:** its in-body precondition (§3) fails loudly when the
   native is absent; without that precondition the assertion would pass *vacuously*, because `ResolveNative("rgblibcffi", …)` returns `IntPtr.Zero` whether or not the guard
   exists. Without the precondition the spec's most important regression guard would be silently green on a
@@ -709,7 +709,7 @@ An earlier draft claimed the stronger thing.
 Remove the call site, `Services/RgbNativeSelfCheck.cs`, and the tests; revert the
 `Services/RgbVerifyNative.cs` extractions, the Tests-csproj `AssemblyMetadata`, and the `README.md` note.
 **Keep the `ci.yml` staging step**: it fixes a red `main` — noting honestly that **this phase's branch introduces that redness rather than inheriting it**: `RgbVerifyBindingTests.cs` was added on this branch (4449c3c) and `origin/main`'s `ci.yml` exists but contains **zero** references to the gate native, and `4449c3c` is not an ancestor of `origin/main` (verified directly, not taken from a review report) — so an earlier claim that the job 'already fails on main' was false. That does not change what this phase does — it still stages the native in `ci.yml`'s test job and the job goes green — but it changes why: the staging repairs breakage **this branch introduced** in `4449c3c`, rather than fixing an inherited failure as a courtesy. Stated correctly so nobody later reads the staging step as optional, so reverting it would
-reintroduce a pre-existing failure. No data migration, no
+reintroduce a failure this branch itself created (`4449c3c` added the gate-native test; `origin/main` has no such test), which is a stronger reason to keep the step, not a weaker one. No data migration, no
 schema change, no persisted state, no wire-format change.
 
 ---
