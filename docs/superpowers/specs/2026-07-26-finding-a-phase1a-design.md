@@ -205,9 +205,7 @@ either way, which is why §3.1's live run remains the only evidence for the host
   earlier revisions assumed, and T17 remains **essential** — the resolver is still consulted for every
   `rgblibcffi` P/Invoke, so the `libraryName != Library` guard is load-bearing even though the candidate
   loop is not. **`SetDllImportResolver` is consulted only for P/Invoke resolution, never
-for `NativeLibrary.Load`/`TryLoad`.** A probe built on those APIs would therefore fail on a *correctly*
-packaged deployment — with the probe wired to hard-fail, that is a self-inflicted outage on every
-production install. The custom resolver was written on the assumption that default probing does not search
+for `NativeLibrary.Load`/`TryLoad`.** A probe built on those APIs would fail on a correctly packaged deployment **in a project with no NuGet native asset**, which is what that measurement used; in *this* repo `RgbLib` puts the directory on the default search path and `TryLoad` succeeds instead (measured below). The design avoids those APIs regardless, because their behaviour turns on an unrelated package's assets rather than on ours. The custom resolver was written on the assumption that default probing does not search
 `runtimes/<rid>/native/` for a plugin assembly. **Measured, that assumption does not hold in the test
 host** — the native binds with `SetDllImportResolver` deleted entirely. It may still hold under BTCPay's
 plugin ALC; nobody has measured that. The refactor therefore preserves the resolver rather than relying
@@ -387,7 +385,8 @@ run, and never said what breaks. Required order:
      T18(c), which plants two loadable candidates and so leaves `existedButFailed` empty. This is a **success**
      state: the probe returns healthy and **emits nothing to either sink**. The earlier failure is
      informational only and must not be surfaced, or an operator on a perfectly working install sees
-     unloadable-native text that T4 forbids in that state. `existedButFailed` never by itself makes a
+     unloadable-native text. **T2**'s second case pins that silence, not T4 — every T4 run reports a missing
+     export and so never reaches state 4. `existedButFailed` never by itself makes a
      state a failure.
 
      **(5) The probe itself threw** — `VerifyOrLog`'s catch-all fires, so `searched`, `existedButFailed`
