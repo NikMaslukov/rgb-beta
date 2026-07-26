@@ -717,7 +717,7 @@ schema change, no persisted state, no wire-format change.
 ## 5. Files touched
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
-T1–T4, T12, T14, T15, T17–T23. The Roslyn-parsed sources are `RGBPlugin.cs` (**T15** — T13 is phase 2's hard-fail call-site guard and has no row here; it is named only where this spec discusses the phase-2 flip), **`Services/RgbNativeSelfCheck.cs`** (T19's `DefaultProbe` clause, T23(d)) and **`Services/RgbVerifyNative.cs`** (T19's `ResolveNative` clauses, T23(e)) — with **T23(f) scanning the whole compilation**, not those two files — its own row and rule 5's scope half both require it, and two-file scoping is what the partial-class mutant defeats — the last two did not exist when this list was first written.
+T1–T4, T12, T14, T15, T17–T23. Rule 5 compiles the whole plugin; the syntax trees a clause *asserts over* are `RGBPlugin.cs` (**T15** — T13 is phase 2's hard-fail call-site guard and has no row here; it is named only where this spec discusses the phase-2 flip), **`Services/RgbNativeSelfCheck.cs`** (T19's `DefaultProbe` clause, T23(d)) and **`Services/RgbVerifyNative.cs`** (T19's `ResolveNative` clauses, T23(e)) — with **T23(f) scanning the whole compilation**, not those two files — its own row and rule 5's scope half both require it, and two-file scoping is what the partial-class mutant defeats — the last two did not exist when this list was first written.
 
 **Rounds 23–32 — the static-pin saga, recorded because it explains half of §3's wording.** T22/T23 were
 added after reviewers showed the convenience overloads' *default* bindings (`sink`, `probe`, `hasExport`)
