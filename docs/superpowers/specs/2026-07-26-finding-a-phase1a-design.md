@@ -35,11 +35,17 @@ the only thing that needs it (phase 2) is blocked indefinitely on an external pu
 **Delivery is unchanged.** The native still ships via the existing
 `<None Include="native/rgb-verify/runtimes/**">` (`BTCPayServer.Plugins.RgbUtexo.csproj:79-84`).
 
-**But this phase is *not* "a diagnostic and nothing else", and an earlier draft claimed so wrongly.** It
-also rewrites `ResolveNative` (`Services/RgbVerifyNative.cs:17-40`) to share its candidate loop with the
-probe — and that is the **live P/Invoke resolution path every RGB send already depends on**. A refactor
-bug there breaks sends that work today, which is strictly worse than the status quo. The risk is real
-enough that this spec carries two obligations it would not otherwise need:
+**This phase is *not* "a diagnostic and nothing else".** It also rewrites `ResolveNative`
+(`Services/RgbVerifyNative.cs:17-40`) to share its candidate loop with the probe — the **live P/Invoke
+resolution path every RGB send goes through**.
+
+How much that risks is worth stating precisely, because it is narrower than it sounds and §2 measures it.
+The `libraryName != Library` guard **is** load-bearing: the resolver is consulted for all six
+`rgblibcffi` P/Invokes in the same assembly, and losing the guard breaks the whole wallet path. The
+**candidate loop is not**, in this repo: `RgbLib`'s native assets already place `runtimes/<rid>/native/`
+on the default search path, so a broken loop is masked rather than fatal (measured — §2). That asymmetry
+sets the obligations below: guard the guard hard, and do not pretend a unit test can prove the loop
+matters.
 
 - **No unit test can prove the resolver is load-bearing in this repo, and the spec no longer claims one
   does.** Measured: the real `DllImport` binds with the resolver forced to `IntPtr.Zero` and with the
