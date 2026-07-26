@@ -762,6 +762,19 @@ production derives. The class is small enough to enumerate and is now closed:
 | `DefaultProbe` body (single declaration) | T23(g) — structural, the only reachable pin |
 | `DefaultHasExport` body (single declaration) | T22(a) and T23(b) behaviourally, T23(g) structurally — **not** T23(g) alone |
 
+**The same question applied to invocation *targets*, not just derived values.** A wrong callee preserves
+signatures and out-values exactly as a constant body does, so each call the mandated shapes make needs the
+same treatment. Enumerated:
+
+| Call | Status |
+|---|---|
+| `Verify(sp)` → 4-arg `Verify`; `VerifyOrLog(sp)` → 4-arg `VerifyOrLog` | pinned, T23(i) |
+| `DefaultProbe` → `TryLoadFromCandidates`; `DefaultHasExport` → `NativeLibrary.TryGetExport` | pinned, T23(g) |
+| `ResolveNative` → `TryLoadFromCandidates`, and `DefaultProbe` → `ResolveBaseDir` | pinned, T19 and T22(c) |
+| `RGBPlugin.Execute` → `VerifyOrLog` | pinned, T15 under rule 5 |
+| `TryLoadFromCandidates` → `CandidatePaths` | pinned **behaviourally** by T18(a), which compares `searched` against `CandidatePaths(baseDir)`'s own output — a different callee producing a different list fails it |
+| `CandidatePaths` → `RuntimeIdentifiers`, `CandidatePaths` → `NativeFileName` | **not pinned, and deliberately so**: inlining either helper's logic yields byte-identical output on every host this ships to, so no assertion can distinguish it. This is the same host-equivalence class as T1's two acknowledged survivors, and the residual risk is likewise fail-closed |
+
 Any future parameter these overloads resolve rather than receive must arrive with its own pin in this
 table, or it is unpinned by construction: no behavioural test can see it, because every test supplies the
 resolved value directly.
