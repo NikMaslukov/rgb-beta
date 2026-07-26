@@ -528,6 +528,16 @@ any test clause that consumes the new value. The current channel carries `handle
 widening rule was partially widened, which is precisely the failure it exists to prevent. A partial widening is not a smaller
 change — it is a spec that does not compile.
 
+**Mutation-tested (rev 25).** An independent reviewer built the §2 surface (0 errors, 0 warnings under
+`TreatWarningsAsErrors`), ran all specified tests (26/26 green, T17 non-vacuous against the real staged
+native), and then introduced **12 plausible wrong implementations — every one was caught**: dropped
+`libraryName != Library` guard (T17); exhaustive-load loop (T18(c)); `existedButFailed` tested before
+exports (T4); `catch { return false; }` (T12/T20); `AppContext.BaseDirectory` (T19); sink-only-when-logger-
+null (T12); no dedupe (T1); `searched` filtered by `File.Exists` (T18(a)); call site after
+`LoadConfiguration` (T15); only-first-export enforced (T4); consequence-last (T3(c)); no absent/unloadable
+branch (T3(h)). That is the evidence the suite pins behaviour rather than restating it — the question that
+drove rounds 10–14.
+
 **Standing rule for every test clause in this spec — five separate clauses have violated it.** A clause may only
 assert against a member reachable from the Tests assembly: `public`, or `internal` **and declared anywhere
 in §2** — the class sketch and the extraction list both count (`InternalsVisibleTo` at `csproj:88` reaches
