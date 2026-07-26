@@ -39,7 +39,7 @@ open decisions live there and are not repeated here.
   first**; measured, that makes all 11 clauses pass. Both convenience overloads also take an optional
   `sink`, so content is observable in tests without `Console.SetError`; and the message must always name
   `RgbVerifyCffi` (T3 asserts that string, which a phase-1-only wording would not have contained).
-**Precondition:** none. **Mergeable on its own.**
+**Precondition:** phase 1a (it supplies the `AssemblyMetadata("RepoRoot")` attribute P1–P2 rely on).
 
 ---
 

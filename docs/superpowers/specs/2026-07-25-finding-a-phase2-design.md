@@ -41,7 +41,7 @@ enforcing this — no test or CI check can.
    - The *"no build containing it exists — a known packaging defect"* branch becomes **false**: after S3 a
      build containing the native does exist, so the operator remediation changes to "upgrade to a plugin
      build that ships it".
-   So this step must also amend §2's message content and **every 1a assertion that pins the old wording or the old call site** — not just T3/T4/T14: **T12 and T20** also assert the token table against emitted text (both universal lines and the packaging-defect branch), and **T15** requires a live unguarded `VerifyOrLog` statement in `Execute`, which the flip removes. Flipping without amending T12, T15 and T20 leaves them red. T13 replaces T15 and must carry T15's ordering clause,
+   So this step must also amend §2's message content and **every 1a assertion that pins the old wording or the old call site** — not just T3/T4/T14: **T12 and T20** also assert the token table against emitted text — T12 across all four failure states, and T20 asserting the *absence* of the packaging-defect tokens in state 5, and **T15** requires a live unguarded `VerifyOrLog` statement in `Execute`, which the flip removes. Flipping without amending T12, T15 and T20 leaves them red. T13 replaces T15 and must carry T15's ordering clause,
    and the `README.md` troubleshooting entry 1a added. Also claim the audit's process-fix (iii) here —
    *"a startup self-test that refuses RGB sends"* — which 1a explicitly does not close;
 4. bump the plugin version in **both** places `release.yml` validates a tag against —
@@ -360,7 +360,7 @@ On the existing signet setup, no wallet data touched:
 
 ## 7. Rollback
 
-Restore the `<None Include>` block, drop the `PackageReference`, revert both lockfiles, revert the
+Restore the `<None Include>` block, **restore phase 1a's `ci.yml` staging step** (removing it is part of this phase; leaving it out on rollback re-reds `main` for the pre-existing reason phase 1a fixes), drop the `PackageReference`, revert both lockfiles, revert the
 call-site flip and the version bumps, and revert the CI changes. No data migration, no schema change, no
 persisted state, no wire-format change.
 
@@ -369,6 +369,9 @@ persisted state, no wire-format change.
 ## 8. Files touched (phase 2)
 
 **New:** `native/rgb-verify/packaging/EXPECTED-NUPKG-SHA512`, test file(s) for T6, T7, T11, T13.
+
+**Also modified, per §1 step 3 and §2.3 — an earlier draft's file list contradicted its own step list:**
+`Services/RgbNativeSelfCheck.cs` (the message content this phase rewrites), `.github/workflows/ci.yml` (remove phase 1a's now-dead `build-native.sh` staging), and the phase-1a test files carrying **T3 (including T3(g), whose "neither exists after this phase" basis expires once the package ships), T4, T12, T14, T15 and T20**.
 
 **Modified:** `BTCPayServer.Plugins.RgbUtexo.csproj` (remove `:79-84`; add `PackageReference`; bump
 `<Version>` `:9`; `WHY` comment on `:12` recording that `CopyLocalLockFileAssemblies=true` is

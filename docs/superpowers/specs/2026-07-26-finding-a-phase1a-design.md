@@ -390,6 +390,9 @@ exact substrings are normative:
 
 | Token | Appears in |
 |---|---|
+| `could not be loaded` (opening) | states 1–2 only |
+| `loaded but is the wrong version` (opening) | state 3 only |
+| `self-check failed` (opening) | state 5 only |
 | `All RGB asset sends will be rejected` | every failure state |
 | `Receiving RGB assets and the rest of the plugin are unaffected` | every failure state |
 | `is absent from this build` + `known packaging defect` | absent state only |
