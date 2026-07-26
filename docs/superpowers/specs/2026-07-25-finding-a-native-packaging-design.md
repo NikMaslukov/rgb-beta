@@ -51,12 +51,13 @@ that reads machine-local state is worthless. There are three such states, not on
    reachable source at all,
 3. a local NuGet **folder feed**.
 
-The acceptance gate in §7.4 neutralises all three. Empirically confirmed during design: with a cold
+Phase 2's acceptance gate neutralises all three. Empirically confirmed during design: with a cold
 cache (`NUGET_PACKAGES` → empty dir) a nonexistent folder source fails restore with `NU1301`, whereas
 with a warm cache the identical configuration restores successfully — cache warmth alone flips the
 result.
 
-**Verifiable reproduction at base HEAD:** §7.4's gate fails at `04c1781`.
+**Verifiable reproduction at base HEAD:** phase 2's acceptance gate fails at `04c1781`; phase 1a's §3.1
+also reproduces it today with a worktree publish that needs no package.
 
 ### Secondary defects closed by the same change
 
@@ -125,7 +126,7 @@ fail-closed behaviour means absence costs liveness, not funds. The control this 
    Fail-loud replaces fail-silent.
 2. **A startup probe** that refuses to load the plugin when the native cannot be loaded or its entry
    points cannot be resolved, so an operator learns at boot rather than on a customer's first send.
-3. **An isolation-hardened publish assertion** (§7.4) that cannot pass on machine-local state and that
+3. **An isolation-hardened publish assertion** (phase 2's acceptance gate) that cannot pass on machine-local state and that
    also asserts the old masking mechanism is absent.
 
 **What the probe does and does not prove.** It detects: the library being absent for the running RID; a
@@ -234,11 +235,11 @@ no longer builds a native at all.
 | dependent shared library missing | normally caught at `dlopen`; a lazily-bound symbol may defer to first call, where the gate fails closed |
 | glibc newer than target | `dlopen` fails ⇒ probe throws ⇒ plugin disabled (§5.5); prevented by G7 |
 | plugin has no RGB configuration | probe **still runs**: `LoadConfiguration` never returns null (`RGBPlugin.cs:94-99`), so the `config == null` return at `:33` is dead code. Phase-2 hard-fail therefore affects every install, configured or not (§4.5) |
-| warm NuGet cache masking a missing source | §7.4 isolates `NUGET_PACKAGES` |
+| warm NuGet cache masking a missing source | phase 2's gate isolates `NUGET_PACKAGES` |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
 | packaging project's `obj/` polluting the plugin build | glob `Remove`s (§4.1); phase 1b's P1 guards |
 | `CopyLocalLockFileAssemblies` removed later | phase 2's T8 fails (the property only becomes load-bearing once the `PackageReference` exists) |
-| `<None Include=…runtimes…>` re-added **alongside** the package | T11 fails and §7.4's masking check fails — presence/provenance assertions alone would stay green |
+| `<None Include=…runtimes…>` re-added **alongside** the package | phase 2's T11 fails and its gate's masking check fails — presence/provenance assertions alone would stay green |
 | interim `-local` version leaking into a commit | phase 2's T9 and its acceptance-gate version check fail |
 | duplicate candidate paths from identical RID strings | `CandidatePaths` dedupes (§4.5); T1 asserts the deduped order |
 | concurrency | none introduced; the probe runs once, single-threaded, before any service exists |
@@ -251,7 +252,8 @@ no longer builds a native at all.
 ## 9. Decisions to confirm
 
 1. **Merge is gated on an external party (S3).** Phase 1 lands now; phase 2 and the merge wait on the
-   org's nuget.org publish, and finding A stays an open blocker meanwhile (§4.0, §6). Confirm that is
+   org's nuget.org publish, and finding A stays an open blocker meanwhile (§4 here; closure criteria in
+   phase 2). Confirm that is
    acceptable, and who owns S3 and by when.
 2. **Hard-fail restart-loop exposure** (§5.3) — confirm no target deployment has a read-only plugins
    volume, or accept the loop as the diagnostic.
