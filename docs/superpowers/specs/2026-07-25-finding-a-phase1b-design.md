@@ -246,11 +246,12 @@ Every RID therefore has CI provenance; the production trust core is not a develo
 **`ci.yml`** — phase 2 will make a plain restore sufficient once the package is on nuget.org and the test
 job then has the native (G4). No interim steps are ever committed (the parent's sequencing section).
 
-Phase 1 makes **no** change to `ci.yml` or `release.yml`.
+Phase 1b makes **no** change to `ci.yml` or `release.yml`. (Phase **1a** does add the `build-native.sh`
+staging step to `ci.yml` — that belongs to the diagnostic phase, since its tests need the native.)
 
 ### 2.6 Documentation
 
-Phase 1 touches `CLAUDE.md` only. `README.md`, `.github/README.md` and the audit status doc describe
+Phase 1b's documentation goes to the tracked `README.md`. `README.md`, `.github/README.md` and the audit status doc describe
 package delivery and hard-fail, which are not true until phase 2 — editing them here would violate the
 "every committed state is coherent" rule.
 
