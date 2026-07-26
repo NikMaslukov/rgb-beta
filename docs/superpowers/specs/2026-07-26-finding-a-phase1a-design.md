@@ -113,7 +113,7 @@ internal static class RgbNativeSelfCheck
     // state 5 and the audit's 'logs a loud, actionable error' clause fails there. T20 pins it.
     internal static void Verify(ILoggerFactory? factory, TextWriter writer,
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static void Verify(IServiceProvider? bootstrapServices,
+    internal static void Verify(IServiceProvider? sp,
                                 NativeProbe? probe = null,
                                 Func<IntPtr, string, bool>? hasExport = null,
                                 TextWriter? sink = null);
@@ -121,7 +121,7 @@ internal static class RgbNativeSelfCheck
     // catches EVERY exception, reports to BOTH sinks, returns false — the phase-1 entry point
     internal static bool VerifyOrLog(ILoggerFactory? factory, TextWriter writer,
                                      NativeProbe probe, Func<IntPtr, string, bool> hasExport);
-    internal static bool VerifyOrLog(IServiceProvider? bootstrapServices,
+    internal static bool VerifyOrLog(IServiceProvider? sp,
                                      NativeProbe? probe = null,
                                      Func<IntPtr, string, bool>? hasExport = null,
                                      TextWriter? sink = null);
