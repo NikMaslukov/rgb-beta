@@ -748,11 +748,11 @@ production derives. The class is small enough to enumerate and is now closed:
 | Derived internally by the convenience overloads | Pinned by |
 |---|---|
 | `factory = sp?.GetService<ILoggerFactory>()` (**both** convenience overloads) | T23(h) — healthy provider + failing probe, logger must receive the text, asserted for `VerifyOrLog(sp)` **and** `Verify(sp)` |
-| `writer = sink ?? Console.Error` | T23(d) sink half — the pinned assignment, and it must be the only one |
-| `probe ?? DefaultProbe` | T23(d) probe half |
-| `hasExport ?? DefaultHasExport` | T23(d) |
-| `ResolveBaseDir(typeof(RgbVerifyNative).Assembly)` | T19 (call-site argument), T22(c) (body) |
-| `DefaultProbe` / `DefaultHasExport` bodies | T23(g) — structural, the only reachable pin |
+| `writer = sink ?? Console.Error` (**both** overloads) | T23(d) sink half — the pinned assignment, and it must be the only one |
+| `probe ?? DefaultProbe` (**both** overloads) | T23(d) probe half |
+| `hasExport ?? DefaultHasExport` (**both** overloads) | T23(d) |
+| `ResolveBaseDir(typeof(RgbVerifyNative).Assembly)` (single site, in `DefaultProbe`) | T19 (call-site argument), T22(c) (body) |
+| `DefaultProbe` / `DefaultHasExport` bodies (single declaration each) | T23(g) — structural, the only reachable pin |
 
 Any future parameter these overloads resolve rather than receive must arrive with its own pin in this
 table, or it is unpinned by construction: no behavioural test can see it, because every test supplies the
