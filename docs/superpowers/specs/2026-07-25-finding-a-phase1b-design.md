@@ -346,7 +346,7 @@ claimed them, contradicting §6's ownership statement.
 ## 6. Files touched (phase 1b)
 
 Phase 1a owns `Services/RgbNativeSelfCheck.cs`, the `Services/RgbVerifyNative.cs` extraction, the
-`RGBPlugin.cs` call site, the Tests-csproj `AssemblyMetadata`, and tests T1–T4, T12, T14, T15 and T17–T20. None of
+`RGBPlugin.cs` call site, the Tests-csproj `AssemblyMetadata`, and tests T1–T4, T12, T14, T15 and T17–T23 (T21–T23 postdate this sentence's first draft: T21/T22 pin the real `DllImport` and the default helpers' bodies, T23 the convenience overloads' default bindings). None of
 them are restated here; an earlier draft claimed both, giving two specs duplicate ownership of the same
 files.
 
