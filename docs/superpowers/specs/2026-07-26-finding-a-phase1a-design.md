@@ -538,8 +538,11 @@ native), and then introduced **12 plausible wrong implementations — every one 
 exports (T4); `catch { return false; }` (T12/T20); `AppContext.BaseDirectory` (T19); sink-only-when-logger-
 null (T12); no dedupe (T1); `searched` filtered by `File.Exists` (T18(a)); call site after
 `LoadConfiguration` (T15); only-first-export enforced (T4); consequence-last (T3(c)); no absent/unloadable
-branch (T3(h)). That is the evidence the suite pins behaviour rather than restating it — the question that
-drove rounds 10–14.
+branch (T3(h)). That is the evidence the suite pins behaviour rather than restating it — the question that drove rounds
+10–14. A second independent reviewer (rev 26) repeated the exercise with **20** mutations — these 12 plus
+8 of its own — and caught 17; the three survivors each require contradicting verbatim spec text and two
+are additionally caught by §3.1's mandatory live run. Both reviewers built the surface at 0 errors /
+0 warnings under `TreatWarningsAsErrors` and ran 26/26 tests green.
 
 **Standing rule for every test clause in this spec — five separate clauses have violated it.** A clause may only
 assert against a member reachable from the Tests assembly: `public`, or `internal` **and declared anywhere
