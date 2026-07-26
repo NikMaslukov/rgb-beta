@@ -656,15 +656,15 @@ fails closed**: the trust invariant holds even where coverage does not.
 |---|---|---|---|
 | 1 | delete `yield return RuntimeInformation.RuntimeIdentifier;` | on every host this ships to that value equals `<os>-<arch>`, so the candidate list is unchanged | a musl host searches one fewer candidate and reports the native absent — fail-closed |
 | 2 | delete `yield return $"{os}-{arch}"` | same host-equivalence; matters more, being the portable RID the artifact ships under | as above |
-| 3 | reverse `RuntimeIdentifiers()`'s order | the two RIDs coincide on these hosts, so the deduped list is identical | wrong search order finds the native later or not at all, never the wrong library |
+| 3 | reverse `RuntimeIdentifiers()`'s order | the two RIDs coincide on these hosts, so the deduped list is identical | **fail-closed** — a wrong search order finds the native later or not at all, never the wrong library |
 | 4 | drop `ResolveBaseDir`'s empty-`Location` fallback | unreachable wherever the assembly has a location, which is every shipped host | fail-closed |
-| 5 | `ResolveNative` returns a fabricated non-zero handle | a deliberate act, not a plausible slip | the subsequent `DllImport` fails at first call rather than binding something wrong |
+| 5 | `ResolveNative` returns a fabricated non-zero handle | a deliberate act, not a plausible slip | **fail-closed** — the subsequent `DllImport` fails at first call rather than binding something wrong |
 | 6 | inline `RuntimeIdentifiers`/`NativeFileName` inside `CandidatePaths` | byte-identical output on every shipped host | fail-closed |
 | 10 | the **message body** inlines `NativeFileName()` as a literal instead of calling it | the literal matches on this host, so every content clause still passes — §2 introduces the extraction precisely to prevent this drift, but no clause pins the call | a future platform change updates the helper and the message silently keeps the old filename — fail-closed, the operator is told to look for a file that is not the one searched |
 | 11 | the **message body** inlines `RuntimeInformation.RuntimeIdentifier` as a literal | as above | as above |
 | 9 | collapse `RuntimeIdentifiers()`'s os/arch computation (`:45-51`, including the unreachable `_ =>` arm) to host values | byte-identical on every host the suite runs on | fail-closed |
 | 8 | collapse `NativeFileName` to the host's own branch | byte-identical output on this host; a genuinely *wrong* filename is still caught by T1 | a mis-targeted build searches for the wrong filename and reports the native absent — fail-closed |
-| 7 | delete `SetDllImportResolver`, or force `ResolveNative` to `IntPtr.Zero` | **no unit test in this repo can prove the resolver is load-bearing** — `RgbLib`'s native assets already put `runtimes/<rid>/native/` on the default search path, so the real `DllImport` still binds | §3.1's live signet run is the only evidence, which is why it is mandatory rather than optional |
+| 7 | delete `SetDllImportResolver`, or force `ResolveNative` to `IntPtr.Zero` | **no unit test in this repo can prove the resolver is load-bearing** — `RgbLib`'s native assets already put `runtimes/<rid>/native/` on the default search path, so the real `DllImport` still binds | **fail-closed** — a broken resolver means the gate cannot load and sends are rejected, never signed against an unverified intent; §3.1's live signet run is the only evidence, which is why it is mandatory rather than optional |
 
 Entry 7 is the one that matters for review: it is not a gap in the tests but a limit of what tests can
 establish here, and it is why this phase does not claim unit coverage of the resolver rewrite.
