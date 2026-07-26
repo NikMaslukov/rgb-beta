@@ -126,7 +126,7 @@ for stale `obj/` trees, reproduced by a round-2 reviewer. Add, mirroring the exi
 <None Remove="native/rgb-verify/packaging/**" />
 ```
 
-T10 guards this. The Tests project has no default-glob exposure to that path and needs no change.
+P1 guards this. The Tests project has no default-glob exposure to that path and needs no change.
 
 **Guards inside the packaging project:**
 
@@ -135,7 +135,7 @@ T10 guards this. The Tests project has no default-glob exposure to that path and
   <!-- A package without the production RID would reproduce audit finding A: the artifact publishes
        cleanly but the C8 gate cannot load, so every RGB send fails. -->
   <Error Condition="!Exists('../runtimes/linux-x64/native/librgbverifycffi.so')"
-         Text="RgbVerifyCffi: runtimes/linux-x64/native/librgbverifycffi.so missing — build it before packing (see CLAUDE.md)" />
+         Text="RgbVerifyCffi: runtimes/linux-x64/native/librgbverifycffi.so missing — build it before packing (see scripts/pack-rgbverify.sh)" />
 </Target>
 ```
 

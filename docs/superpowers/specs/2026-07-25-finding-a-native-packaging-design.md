@@ -12,7 +12,7 @@
 > | Spec | Precondition | Closes |
 > |---|---|---|
 > | `2026-07-26-finding-a-phase1a-design.md` | **none — mergeable now** | the audit's "log a loud, actionable error" clause |
-> | `2026-07-25-finding-a-phase1b-design.md` | none, but only *useful* once S3 is scheduled | nothing — it produces the package |
+> | `2026-07-25-finding-a-phase1b-design.md` | **phase 1a** (it supplies the `AssemblyMetadata("RepoRoot")` attribute P1–P2 use); only *useful* once S3 is scheduled | nothing — it produces the package |
 > | `2026-07-25-finding-a-phase2-design.md` | **S3**: the org has published to nuget.org | finding A itself |
 >
 > Split at revision 11 because the document had grown past 1,100 lines. Phase 1 was split again after its
@@ -237,9 +237,9 @@ no longer builds a native at all.
 | warm NuGet cache masking a missing source | §7.4 isolates `NUGET_PACKAGES` |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
 | packaging project's `obj/` polluting the plugin build | glob `Remove`s (§4.1); T10 guards |
-| `CopyLocalLockFileAssemblies` removed later | T8 fails |
+| `CopyLocalLockFileAssemblies` removed later | phase 2's T8 fails (the property only becomes load-bearing once the `PackageReference` exists) |
 | `<None Include=…runtimes…>` re-added **alongside** the package | T11 fails and §7.4's masking check fails — presence/provenance assertions alone would stay green |
-| interim `-local` version leaking into a commit | T9 fails and §7.4's version check fails |
+| interim `-local` version leaking into a commit | phase 2's T9 and its acceptance-gate version check fail |
 | duplicate candidate paths from identical RID strings | `CandidatePaths` dedupes (§4.5); T1 asserts the deduped order |
 | concurrency | none introduced; the probe runs once, single-threaded, before any service exists |
 | malicious input | none reachable; the probe takes no external input |
