@@ -563,7 +563,7 @@ none of them apply here.
 Behavioural tests (T1–T4, T12, T14, T15, T18, T19, T20) are written and observed failing before the corresponding
 change; T14 additionally requires the intra-phase ordering in its row. **T19 and T20 are behavioural and fail first** — `ResolveNative`'s inline loop exists today, so T19's
 delegation assertion fails until the rewrite lands, and no state-5 branch exists until T20 forces one.
-**T17, T21, T22 and T23 are regression guards** (each passes at introduction and exists to fail later; T21 and T22 additionally require the staged-native precondition): it passes on the commit that introduces it and exists to fail later
+**T17, T21, T22 and T23 are regression guards** (each passes at introduction and exists to fail later; T21, T22 and T23 additionally require the staged-native precondition, and T23(b) further requires `RgbLib`'s `rgblibcffi`, which the plugin already carries): it passes on the commit that introduces it and exists to fail later
 if the resolver starts hijacking another library.
 Mislabelling a guard as behavioural has been a recurring defect in this spec family, so the distinction
 is stated per-row.
