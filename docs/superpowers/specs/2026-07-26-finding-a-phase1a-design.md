@@ -738,6 +738,26 @@ No round in this range found a defect in the design or a false-ACCEPT path; all 
 the tests were specified.
 
 
+**Closed class: everything the convenience overloads derive internally.** Two rounds found the same
+defect twice — a helper's *body* replaced by a constant while its signature, call sites and observable
+out-values stayed intact, surviving the whole suite (`DefaultProbe` returning `true`; then
+`factory = sp?.GetService<ILoggerFactory>()` replaced by `null`). Both deleted the deliverable in
+production while every behavioural test stayed green, because the tests hand in pre-resolved values that
+production derives. The class is small enough to enumerate and is now closed:
+
+| Derived internally by the convenience overloads | Pinned by |
+|---|---|
+| `factory = sp?.GetService<ILoggerFactory>()` | T23(h) — healthy provider + failing probe, logger must receive the text |
+| `writer = sink ?? Console.Error` | T23(d) sink half — the pinned assignment, and it must be the only one |
+| `probe ?? DefaultProbe` | T23(d) probe half |
+| `hasExport ?? DefaultHasExport` | T23(d) |
+| `ResolveBaseDir(typeof(RgbVerifyNative).Assembly)` | T19 (call-site argument), T22(c) (body) |
+| `DefaultProbe` / `DefaultHasExport` bodies | T23(g) — structural, the only reachable pin |
+
+Any future parameter these overloads resolve rather than receive must arrive with its own pin in this
+table, or it is unpinned by construction: no behavioural test can see it, because every test supplies the
+resolved value directly.
+
 **Standing rules for Roslyn clauses — net form.** The five rules below accreted across six review
 rounds, each written after a measured defeat of the previous wording, and each keeps its derivation so a
 future reader can see why it exists. What an implementer must actually satisfy is this:
