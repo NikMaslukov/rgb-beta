@@ -423,7 +423,9 @@ run, and never said what breaks. Required order:
 No secrets, no PII, no wallet data.
 
 **Required literal tokens.** T3/T4 must assert against fixed strings, not paraphrases — otherwise the test
-author derives the expected wording from their own implementation and the assertion is a tautology. These
+author derives the expected wording from their own implementation and the assertion is a tautology. **Standing rule for every positional assertion in this spec: assert the presence of both operands first.** `IndexOf` returns −1 for an absent substring, which silently converts an ordering clause into either a vacuous pass or a false-reject. It has done both here — T3(f) passed with the reporting-channel URL missing entirely, and T3(c) false-rejected states 1–2 where the detail tokens legitimately do not appear. Any clause of the form "X after Y" therefore reads: **Y is present, X is present, and `IndexOf(X) > IndexOf(Y)`** — with minima taken only over operands whose index is ≥ 0.
+
+These
 exact substrings are normative:
 
 Rows marked **(opening)** are asserted with **`StartsWith`** against the **whole mandated sentence**, and
@@ -455,7 +457,7 @@ misdiagnose without reproducing another state's opening verbatim.
 | `ABI/version mismatch` | missing-export only |
 | the exception type name | state 5 — presence only; the "only" half is unassertable, since T3(h) excludes varying strings from absence assertions |
 | `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues` | every failure state |
-| `build-native.sh` | every failure state, including state 5 — and in **every** state it must appear *after* the reporting-channel URL (`IndexOf` comparison). §2 item 4 requires developer remediation last in all four states; T3(f) asserted it only in states 1–2, leaving T4's, T20's and T12's state-3/5 messages free to lead with a repo script path an operator cannot run |
+| `build-native.sh` | every failure state, including state 5 — and in **every** state it must appear *after* the reporting-channel URL — asserted per the positional standing rule above, so the URL's own presence is asserted first (T3(f0)); ordering alone is satisfied vacuously when the URL is absent. §2 item 4 requires developer remediation last in all four states; T3(f) asserted it only in states 1–2, leaving T4's, T20's and T12's state-3/5 messages free to lead with a repo script path an operator cannot run |
 
 Each state-specific token must be **absent** from the other three failure states — that mutual exclusion is what
 makes the branch assertions non-vacuous, and every test that asserts a state must assert both the tokens
