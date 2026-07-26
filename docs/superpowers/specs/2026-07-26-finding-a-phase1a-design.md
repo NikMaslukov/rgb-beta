@@ -794,7 +794,8 @@ same treatment. Enumerated:
 |---|---|
 | `Verify(sp)` → 4-arg `Verify`; `VerifyOrLog(sp)` → 4-arg `VerifyOrLog` | pinned, T23(i) |
 | `DefaultProbe` → `TryLoadFromCandidates`; `DefaultHasExport` → `NativeLibrary.TryGetExport` | pinned, T23(g) |
-| `ResolveNative` → `TryLoadFromCandidates`, and `DefaultProbe` → `ResolveBaseDir` | pinned, T19 and T22(c) |
+| `ResolveNative` → `TryLoadFromCandidates` | pinned, T19 (asserts the delegating invocation and that no loop remains) |
+| `DefaultProbe` → `ResolveBaseDir` | pinned, T19 (asserts the call-site argument); `ResolveBaseDir`'s *body* is pinned separately by T22(c) |
 | `RGBPlugin.Execute` → `VerifyOrLog` | pinned, T15 under rule 5 |
 | `RgbVerifyNative`'s static ctor → `NativeLibrary.SetDllImportResolver` | **not pinned behaviourally** — uncovered mutant 7; T19 pins the resolver's body, not its registration |
 | the reporting path → `CreateLogger` / `ILogger.Log` / `TextWriter.Write` | pinned, T12 and T14 (both sinks must receive the text, and each guard must fail independently) |
