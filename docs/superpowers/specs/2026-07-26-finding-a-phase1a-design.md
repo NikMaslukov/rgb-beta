@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 25 — split out of the phase-1 spec after its gate round 5, then four rounds of its own gate
+**Revision:** 26 — split out of the phase-1 spec after its gate round 5, then seventeen rounds of its own gate
 
 **Revision history (condensed).** rev 1 split from the phase-1 spec. rev 2–4 corrected the false
 "diagnostic only" claim (this phase rewrites the live `ResolveNative` path), made the message
@@ -15,9 +15,10 @@ change. rev 14–17 added `existedButFailed` and the three-state branch after a 
 misdiagnosed a glibc failure as a packaging defect, then propagated `winningPath` through the channel.
 rev 18–20 bound the token table to what `VerifyOrLog` *emits* — the phase's actual deliverable had been
 pinned only by the thrown exception — added the probe-threw state, and made the openings state-appropriate.
-rev 21–24 replaced un-buildable native fixtures with an injectable `load` seam, re-anchored the ordering
+rev 21–26 replaced un-buildable native fixtures with an injectable `load` seam, re-anchored the ordering
 clause on detail tokens after the state-appropriate openings broke it, and scoped `Verify`/`VerifyOrLog`
-coverage to the states each can actually reach.
+coverage to the states each can actually reach, and recorded the 12/12 mutation result showing the suite
+catches wrong implementations rather than restating them.
 ---
 
 ## 1. Scope
@@ -99,7 +100,10 @@ internal sealed class RgbNativeUnavailableException : Exception { … }   // def
 
 internal static class RgbNativeSelfCheck
 {
-    // logs to BOTH sinks, then throws — the hard-fail entry point (wired in phase 2)
+    // logs to BOTH sinks, then throws — the hard-fail entry point (wired in phase 2).
+    // NOTE: no catch-all. If the probe itself throws, that exception propagates unwrapped and
+    // nothing is logged; only VerifyOrLog catches. T14 therefore covers states 1-3 and T20 pins
+    // this boundary.
     internal static void Verify(ILoggerFactory? factory, TextWriter sink,
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport);
     internal static void Verify(IServiceProvider? bootstrapServices,
@@ -562,9 +566,12 @@ it touches and confirm its accessibility before it is added.
 | T17 | `Resolver_DoesNotHijackOtherNativeLibraries` | the resolver, invoked directly as `RgbVerifyNative.ResolveNative("rgblibcffi", typeof(RgbVerifyNative).Assembly, null)` (widened to `internal` for exactly this), returns `IntPtr.Zero` — it must **decline**, not resolve. **Precondition, enforced in the test body — not a prose note:** the first statement asserts `File.Exists` at `Path.Combine(AppContext.BaseDirectory, "runtimes", RuntimeInformation.RuntimeIdentifier, "native", RgbVerifyNative.NativeFileName())` — the path the Tests project's own output uses — and **fails with "unverified: gate native not staged"** if it does not. The mechanism is specified because "staged for the host RID" would otherwise be invented per-implementer. Measured: unstaged, the resolver returns Zero whether or not the guard exists, so an ungated `[Fact]` would pass vacuously — exactly the silent-green failure §1 warns about. A precondition that is only documented is not a precondition. An earlier draft added a second clause — "a real rgb-lib P/Invoke still binds" — which is **unreachable**: all six `rgblibcffi` imports are `private static extern` (`RgbLibService.cs:618-641`) and `InternalsVisibleTo` does not reach private members. End-to-end rgb-lib binding is covered by §3.1's live signet send instead, which exercises the whole wallet path | passes at introduction; a regression guard for the refactor's most dangerous failure mode |
 | T18 | `TryLoadFromCandidates_RealLoop_DistinguishesStates` | drives the **real** `TryLoadFromCandidates` against a temp `baseDir`, passing a **fake `load`** (the seam in §2) that records every path it is asked for — no real native libraries are built, so this is deterministic and needs no compiler. Nothing else calls the real loop: T3/T4/T12/T14 all inject a fake `NativeProbe`. Cases: **(a)** empty dir ⇒ `false`, `searched` equals `CandidatePaths(baseDir)` **exactly and in order** (pinning that the live loop enumerates the extracted helper rather than its own list), `existedButFailed` empty; **(b)** a file planted at the first candidate with the fake returning `IntPtr.Zero` for it ⇒ `false`, `existedButFailed` contains exactly that path; **(c)** files planted at the **first two** candidates with the fake returning distinct non-zero handles ⇒ `true`, `handle`/`winningPath` are the **first** candidate's, and the fake's recorded list contains **only** the first path — that recorded-call assertion is what distinguishes first-wins from an exhaustive-load-return-first loop, which would `dlopen` every present candidate and widen the initializer-abort radius §2 argues against | `TryLoadFromCandidates` does not exist |
 | T19 | `ResolveNative_DelegatesToSharedCandidateLoop` | **Roslyn-parsed**: `ResolveNative`'s body passes **no** `load` argument (so production always uses the real `NativeLibrary.TryLoad` default — otherwise a broken default is invisible to every test while §2 claims parity is structural), contains an `InvocationExpression` naming `TryLoadFromCandidates`, contains **no** loop construct (`ForEachStatement`/`ForStatement`/`WhileStatement`) of its own, **and passes `ResolveBaseDir(assembly)` as its first argument — not `AppContext.BaseDirectory` and not `ResolveBaseDir` of anything else**. The last clause matters because the two are indistinguishable in the test host but differ under the plugin host, where `AppContext.BaseDirectory` is BTCPay's directory rather than the plugin's. Without it, an implementer can extract the helpers and leave `ResolveNative`'s inline loop untouched: T1, T17, T18 and the binding test all still pass, and §2's "parity is structural, not an assumption" becomes false while every test is green | `ResolveNative` still has its inline loop |
-| T20 | `ProbeThrew_VerifyOrLogReportsSelfCheckFailure` | probe throws ⇒ **`VerifyOrLog`** returns `false` and emits the state-5 tokens to both sinks (the two universal lines, `self-check failed`, the exception type name, the reporting channel and `build-native.sh`) and **none** of states 1–3's state-specific tokens. **`Verify` is deliberately out of scope here**: §2 gives the catch-all to `VerifyOrLog` alone, so a throwing probe propagates its *own* exception out of `Verify` with nothing logged — the intended hard-fail behaviour, and why T14 covers states 1–3 only. An earlier draft required `Verify` to throw `RgbNativeUnavailableException` here, contradicting both. State 5 is unreachable from T3 (needs the probe to return `false`) and T4 (needs `true`), so without T20 the one state whose diagnosis cannot be derived from probe outputs is untested | no state-5 branch exists |
-injected by the Tests csproj from `$(MSBuildThisFileDirectory)..` — that attribute is why §5 lists the
-Tests csproj as modified.
+| T20 | `ProbeThrew_VerifyOrLogReportsSelfCheckFailure` | probe throws ⇒ **`VerifyOrLog`** returns `false` and emits the state-5 tokens to both sinks (the two universal lines, `self-check failed`, the exception type name, the reporting channel and `build-native.sh`) and **none** of states 1–3's state-specific tokens. **`Verify` is deliberately out of scope here**: §2 gives the catch-all to `VerifyOrLog` alone, so a throwing probe propagates its *own* exception out of `Verify` with nothing logged — the intended hard-fail behaviour, and why T14 covers states 1–3 only. An earlier draft required `Verify` to throw `RgbNativeUnavailableException` here, contradicting both. State 5 is unreachable from T3 (needs the probe to return `false`) and T4 (needs `true`). T12's theory also covers state 5 on `VerifyOrLog`; T20 is the focused case that additionally pins the `Verify` boundary — that the probe's own exception propagates unwrapped and unlogged | no state-5 branch exists |
+Tests that read repo sources — T15 and T19 (Roslyn-parsed over `RGBPlugin.cs` and
+`Services/RgbVerifyNative.cs`) and T9-style csproj assertions — locate the repository root from an
+`AssemblyMetadata("RepoRoot", …)` attribute injected by the Tests csproj from
+`$(MSBuildThisFileDirectory)..`. That attribute is why §4 and §5 list the Tests csproj as modified, and
+phase 1b and phase 2 both rely on it.
 
 ### 3.1 Live verification
 
