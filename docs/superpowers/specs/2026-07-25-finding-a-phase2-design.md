@@ -41,7 +41,7 @@ enforcing this — no test or CI check can.
    - The *"no build containing it exists — a known packaging defect"* branch becomes **false**: after S3 a
      build containing the native does exist, so the operator remediation changes to "upgrade to a plugin
      build that ships it".
-   So this step must also amend §2's message content, the T3/T4/T14 assertions that pin the old wording,
+   So this step must also amend §2's message content and **every 1a assertion that pins the old wording or the old call site** — not just T3/T4/T14: **T12 and T20** also assert the token table against emitted text (both universal lines and the packaging-defect branch), and **T15** requires a live unguarded `VerifyOrLog` statement in `Execute`, which the flip removes. Flipping without amending T12, T15 and T20 leaves them red. T13 replaces T15 and must carry T15's ordering clause,
    and the `README.md` troubleshooting entry 1a added. Also claim the audit's process-fix (iii) here —
    *"a startup self-test that refuses RGB sends"* — which 1a explicitly does not close;
 4. bump the plugin version in **both** places `release.yml` validates a tag against —
@@ -127,7 +127,8 @@ restore then supplies the native.
 ### 2.4 Documentation
 
 Switch the phase-1 passages to package delivery and hard-fail, and add the recovery procedure:
-`CLAUDE.md` `:310`, `:328`, `:360`; root `README.md` `:224`, `:242`, `:264`, and `:300-306`
+root `README.md` `:224`, `:242`, `:264`, `:300-306`, **and the troubleshooting entry phase 1a added at
+`:268`** (its four failure-state descriptions change once the probe hard-fails and the package exists)
 ("Platform Support" — after this phase `linux-arm64` is supported, and an unsupported platform loses the
 whole plugin at startup rather than only sends); `.github/README.md` supply-chain section (the gate
 native now arrives as a pinned package; no lockfile exemption exists in the merged state);
