@@ -803,6 +803,8 @@ Any future parameter these overloads resolve rather than receive must arrive wit
 table, or it is unpinned by construction: no behavioural test can see it, because every test supplies the
 resolved value directly.
 
+**Two rule families govern this spec's clauses:** the five below, for **Roslyn/static** assertions, and a separate **standing rule for positional assertions** (assert both operands present before comparing indices), stated with the token table because that is where positional clauses live.
+
 **Standing rules for Roslyn clauses — net form.** The five rules below accreted across six review
 rounds, each written after a measured defeat of the previous wording, and each keeps its derivation so a
 future reader can see why it exists. What an implementer must actually satisfy is this:
