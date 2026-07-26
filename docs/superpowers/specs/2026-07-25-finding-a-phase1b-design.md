@@ -37,8 +37,9 @@ open decisions live there and are not repeated here.
   aborted before the sink was assigned, sending the diagnostic to `TextWriter.Null` — emitted *nowhere*,
   at precisely the moment phase 2 auto-disables the plugin. Fixed with **separate guards, sink acquired
   first**; measured, that makes all 11 clauses pass. Both convenience overloads also take an optional
-  `sink`, so content is observable in tests without `Console.SetError`; and the message must always name
-  `RgbVerifyCffi` (T3 asserts that string, which a phase-1-only wording would not have contained).
+  `sink`, so content is observable in tests without `Console.SetError`. (Phase 1a's message must **not**
+  name `RgbVerifyCffi` while no such package exists — its T3(g) asserts the absence; phase 2 amends that
+  once the package ships.)
 **Precondition:** phase 1a (it supplies the `AssemblyMetadata("RepoRoot")` attribute P1–P2 rely on).
 
 ---
@@ -251,27 +252,21 @@ staging step to `ci.yml` — that belongs to the diagnostic phase, since its tes
 
 ### 2.6 Documentation
 
-Phase 1b's documentation goes to the tracked `README.md`. `README.md`, `.github/README.md` and the audit status doc describe
-package delivery and hard-fail, which are not true until phase 2 — editing them here would violate the
-"every committed state is coherent" rule.
+Phase 1b documents **only what it delivers** — the pack script, the local-feed convention, the
+`pack-native.yml` workflow and the glibc floor — and it writes them to the tracked **`README.md`**, under
+the "Building from source" material it already has.
 
-Docs are split by phase so no committed state describes a reality that does not yet exist (G6). **Phase
-1** documents the pack workflow, the local feed, the glibc-floor requirement, the log-only startup
-check, and that the native still ships via `runtimes/**` for now. **Phase 2** switches those passages to
-package delivery and hard-fail, and adds the recovery procedure.
+Two things it must **not** do, both of which an earlier draft of this section said in the same breath as
+the instruction above:
 
-- `CLAUDE.md`: replace the `rgbverifycffi` half of "Building Native Libraries for Production RIDs
-  (manual)" with the `scripts/pack-rgbverify.sh` workflow, the phase-1/S3/phase-2 sequence, the startup
-  check's mode per phase and its recovery, the glibc-floor requirement, and the load-bearing role of
-  `CopyLocalLockFileAssemblies`. Two further statements there become false in phase 2 and must be
-  corrected then, along with `:328` ("`runtimes/**` is gitignored (build artifact packaged into the
-  `.btcpay`)") which stops being true once the package supplies it:
-  `:310` ("Ships in the `.btcpay` via `runtimes/**`" — now via the package) and `:360` ("Not covered:
-  win-x64 and linux-arm64 … prod = linux-x64 only" — linux-arm64 is now shipped). The `rgblibcffi` half
-  is unrelated and stays.
+- **Not `CLAUDE.md`.** It is untracked at HEAD and holds live credentials, so it cannot carry a tracked
+  deliverable (§6).
+- **Not the package-delivery or hard-fail passages** (`README.md:224/242/264/300-306`,
+  `.github/README.md`, the audit status doc). Those describe a reality that does not exist until phase 2
+  ships the package and flips the probe; editing them here would violate the rule that every committed
+  state is coherent. Phase 2 owns them.
 
-
-
+The startup check's behaviour is phase 1a's documentation, not this phase's.
 
 ---
 
