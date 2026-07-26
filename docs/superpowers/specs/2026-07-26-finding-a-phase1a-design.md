@@ -522,11 +522,10 @@ internal static bool VerifyOrLog(IServiceProvider? sp, NativeProbe? probe = null
                                  TextWriter? sink = null)
 {
     // SEPARATE guards. Sharing one try lets a throwing provider abort before the sink is
-    // set — that is the mutant the tests catch. The written order is style only: with the
-    // guards separate, swapping the two blocks is undetectable, so no clause asserts it.
-    // (An earlier comment said "sink first" as though it were a requirement; the measurement
-    // behind it concerned sharing one guard, not ordering.)
     // assigned, so the diagnostic lands in TextWriter.Null — measured: emitted nowhere at all.
+    // The written order is style only: with the guards separate, swapping the two blocks is
+    // undetectable, so no clause asserts it. (An earlier comment read "sink first" as though
+    // it were a requirement; the measurement behind it concerned guard sharing, not order.)
     TextWriter writer = TextWriter.Null;
     try { writer = sink ?? Console.Error; } catch { /* keep TextWriter.Null */ }
     ILoggerFactory? factory = null;
