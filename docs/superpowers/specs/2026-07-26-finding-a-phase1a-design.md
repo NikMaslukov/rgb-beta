@@ -708,7 +708,7 @@ An earlier draft claimed the stronger thing.
 
 Remove the call site, `Services/RgbNativeSelfCheck.cs`, and the tests; revert the
 `Services/RgbVerifyNative.cs` extractions, the Tests-csproj `AssemblyMetadata`, and the `README.md` note.
-**Keep the `ci.yml` staging step**: it fixes a red `main` — noting honestly that **this phase's branch introduces that redness rather than inheriting it**: `RgbVerifyBindingTests.cs` was added on this branch (4449c3c) and `origin/main`'s `ci.yml` has no test touching the gate native, so an earlier claim that the job 'already fails on main' was false, so reverting it would
+**Keep the `ci.yml` staging step**: it fixes a red `main` — noting honestly that **this phase's branch introduces that redness rather than inheriting it**: `RgbVerifyBindingTests.cs` was added on this branch (4449c3c) and `origin/main`'s `ci.yml` exists but contains **zero** references to the gate native, and `4449c3c` is not an ancestor of `origin/main` (verified directly, not taken from a review report) — so an earlier claim that the job 'already fails on main' was false, and with it the argument that leaving CI red is someone else's problem. Whoever merges this phase decides about CI deliberately, so reverting it would
 reintroduce a pre-existing failure. No data migration, no
 schema change, no persisted state, no wire-format change.
 
