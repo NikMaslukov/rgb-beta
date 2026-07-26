@@ -139,7 +139,7 @@ internal static class RgbNativeSelfCheck
 // Both convenience overloads take the bootstrap IServiceProvider, not a resolved ILogger: resolving
 // the factory must happen inside the callee's guard (see "Logging sink" below), and it keeps the two
 // call sites — phase 1's VerifyOrLog(ctx.BootstrapServices) and phase 2's Verify(ctx.BootstrapServices)
-// — a one-identifier diff, which is exactly what T13 and T15 key on.
+// — a one-identifier diff, which is exactly what T15 here and phase 2's T13 key on.
 // Bodies of DefaultProbe / DefaultHasExport — DIRECT FORWARDING CALLS, not lambdas:
 //   static bool DefaultProbe(out IntPtr h, out string? w, out IReadOnlyList<string> s,
 //                            out IReadOnlyList<string> f)
