@@ -180,7 +180,23 @@ cause the host to add that directory to `NATIVE_DLL_SEARCH_DIRECTORIES`. With `R
 `TryLoad(name, asm, null)` ⇒ **True**, and `Load(name, asm, null)` ⇒ **non-zero**. So in *this* repo
 default probing already finds the gate native, and the custom resolver is belt-and-braces rather than
 load-bearing — in the test host at least. Under BTCPay's plugin `AssemblyLoadContext` it is unverified
-either way, which is why §3.1's live run remains the only evidence for the host that matters. **`SetDllImportResolver` is consulted only for P/Invoke resolution, never
+either way, which is why §3.1's live run remains the only evidence for the host that matters.
+
+  **Confirmed independently by the author**, same binary run twice with the resolver hard-wired to return
+  `IntPtr.Zero` on every call:
+
+  ```
+  WithRgbLib=false:  TryLoad(name,asm,null)=False   real DllImport THREW DllNotFoundException  resolverCalls=1
+  WithRgbLib=true:   TryLoad(name,asm,null)=True    real DllImport => 7                        resolverCalls=1
+  ```
+
+  The P/Invoke consults the resolver in both cases (`resolverCalls=1`) and `TryLoad` never does
+  (`resolverCalls=0` for that call). The difference is entirely `RgbLib`: its native assets add
+  `runtimes/<rid>/native/` to the default search path, so the gate native binds despite the resolver
+  declining. Two consequences worth stating: the refactor's risk to the live send path is **lower** than
+  earlier revisions assumed, and T17 remains **essential** — the resolver is still consulted for every
+  `rgblibcffi` P/Invoke, so the `libraryName != Library` guard is load-bearing even though the candidate
+  loop is not. **`SetDllImportResolver` is consulted only for P/Invoke resolution, never
 for `NativeLibrary.Load`/`TryLoad`.** A probe built on those APIs would therefore fail on a *correctly*
 packaged deployment — with the probe wired to hard-fail, that is a self-inflicted outage on every
 production install. The custom resolver was written on the assumption that default probing does not search
