@@ -660,6 +660,8 @@ fails closed**: the trust invariant holds even where coverage does not.
 | 4 | drop `ResolveBaseDir`'s empty-`Location` fallback | unreachable wherever the assembly has a location, which is every shipped host | fail-closed |
 | 5 | `ResolveNative` returns a fabricated non-zero handle | a deliberate act, not a plausible slip | the subsequent `DllImport` fails at first call rather than binding something wrong |
 | 6 | inline `RuntimeIdentifiers`/`NativeFileName` inside `CandidatePaths` | byte-identical output on every shipped host | fail-closed |
+| 10 | the **message body** inlines `NativeFileName()` as a literal instead of calling it | the literal matches on this host, so every content clause still passes — §2 introduces the extraction precisely to prevent this drift, but no clause pins the call | a future platform change updates the helper and the message silently keeps the old filename — fail-closed, the operator is told to look for a file that is not the one searched |
+| 11 | the **message body** inlines `RuntimeInformation.RuntimeIdentifier` as a literal | as above | as above |
 | 9 | collapse `RuntimeIdentifiers()`'s os/arch computation (`:45-51`, including the unreachable `_ =>` arm) to host values | byte-identical on every host the suite runs on | fail-closed |
 | 8 | collapse `NativeFileName` to the host's own branch | byte-identical output on this host; a genuinely *wrong* filename is still caught by T1 | a mis-targeted build searches for the wrong filename and reports the native absent — fail-closed |
 | 7 | delete `SetDllImportResolver`, or force `ResolveNative` to `IntPtr.Zero` | **no unit test in this repo can prove the resolver is load-bearing** — `RgbLib`'s native assets already put `runtimes/<rid>/native/` on the default search path, so the real `DllImport` still binds | §3.1's live signet run is the only evidence, which is why it is mandatory rather than optional |
@@ -797,6 +799,7 @@ same treatment. Enumerated:
 | `RGBPlugin.Execute` → `VerifyOrLog` | pinned, T15 under rule 5 |
 | `TryLoadFromCandidates` → `NativeLibrary.TryLoad` (the production default loader) | pinned, T23(e) — which forbids swapping it to `Load`, and T23(c), which asserts the default loader returns a real handle |
 | `TryLoadFromCandidates` → `CandidatePaths` | pinned **behaviourally** by T18(a), which compares `searched` against `CandidatePaths(baseDir)`'s own output — a different callee producing a different list fails it |
+| the message body → `NativeFileName()` / `RuntimeInformation.RuntimeIdentifier` | **not pinned** — inlining either as a literal passes every content clause on this host; uncovered mutants 10 and 11 |
 | `CandidatePaths` → `RuntimeIdentifiers`, `CandidatePaths` → `NativeFileName` | **not pinned, and deliberately so**: inlining either helper's logic yields byte-identical output on every host this ships to, so no assertion can distinguish it. **Uncovered mutant 6.** Same host-equivalence class as mutants 1–2, and likewise fail-closed |
 
 Any future parameter these overloads resolve rather than receive must arrive with its own pin in this
