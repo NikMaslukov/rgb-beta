@@ -270,7 +270,8 @@ no longer builds a native at all.
    BTCPay, whereas a log-only probe needs no package and satisfies the audit's clause as literally
    written ("logs a loud, actionable error") immediately. Confirm the two-step, or say the word and
    phase 1 will ship no probe at all.
-6. **Artifact size** (§4.1). Measured: `librgbverifycffi.so` 15.4 MB, `.dylib` 11.9 MB, so three RIDs add
+6. **Artifact size** (§4.1). Measured on this workstation against the currently staged artifacts
+   (`native/rgb-verify/runtimes/`): `librgbverifycffi.so` 15.4 MB, `.dylib` 11.9 MB, so three RIDs add
    roughly 43 MB of natives to every install — on top of the ~133 MB `RgbLib` already ships in the same
    `runtimes/**` layout. NuGet publishes every RID's native to every consumer, so this cannot be trimmed
    per-deployment without breaking dev. Confirm the size is acceptable, or drop to linux-x64-only in the

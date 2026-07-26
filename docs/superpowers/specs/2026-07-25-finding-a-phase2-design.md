@@ -71,7 +71,11 @@ they land there. Local Debug dev loads the plugin from `bin/Debug/net10.0` via `
 removing the property would strip the native from Debug builds and — with the probe active — hard-fail
 the plugin locally. Guarded by T8 plus a `WHY` comment at the property.
 
-Verified asset flow for the four contexts that matter:
+Verified asset flow for the four contexts that matter — **measured with a stub native-only package in a
+scratch consumer, not with the real `RgbVerifyCffi` in this repo.** Asset *flow* is a build-time property
+(does the file land in the output), so it is far less environment-sensitive than *resolution*, where an
+equivalent scratch measurement proved misleading because `RgbLib`'s native assets change the default
+search path. Re-confirm the linux-x64 row against the real package before relying on it for closure:
 
 | Context | Native present | Mechanism |
 |---|---|---|
