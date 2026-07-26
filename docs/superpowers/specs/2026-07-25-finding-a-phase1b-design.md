@@ -303,7 +303,7 @@ phase 1, used by phase 2's closure) is what catches it.
 | unexpected exception on the probe path | caught by `VerifyOrLog`'s catch-all, logged, startup continues — a typed-only catch would let it escape `Execute` and trigger the fleet-wide `disable:`+restart phase 1 exists to avoid |
 | native ABI- or contract-mismatched | not detected by the probe (see §2.4); the first real call fails and the gate fails closed, as today |
 | `SetDllImportResolver` registration deleted by a future refactor | probe stays green (it shares the path logic, not the registration); caught by the existing binding smoke test |
-| packaging project's `obj/` polluting the plugin build | glob `Remove`s (§2.1); T10 guards |
+| packaging project's `obj/` polluting the plugin build | glob `Remove`s (§2.1); P1 guards |
 | `CopyLocalLockFileAssemblies` removed later | not load-bearing in this phase (nothing references the package yet); phase 2 owns that guard |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
 | concurrency | none introduced; the probe runs once, single-threaded, before any service exists |

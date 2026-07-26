@@ -236,7 +236,7 @@ no longer builds a native at all.
 | plugin has no RGB configuration | probe **still runs**: `LoadConfiguration` never returns null (`RGBPlugin.cs:94-99`), so the `config == null` return at `:33` is dead code. Phase-2 hard-fail therefore affects every install, configured or not (§4.5) |
 | warm NuGet cache masking a missing source | §7.4 isolates `NUGET_PACKAGES` |
 | stale cache after a re-pack at the same version | cache entry deleted by the pack script; `--force-evaluate` clears `NU1403` |
-| packaging project's `obj/` polluting the plugin build | glob `Remove`s (§4.1); T10 guards |
+| packaging project's `obj/` polluting the plugin build | glob `Remove`s (§4.1); phase 1b's P1 guards |
 | `CopyLocalLockFileAssemblies` removed later | phase 2's T8 fails (the property only becomes load-bearing once the `PackageReference` exists) |
 | `<None Include=…runtimes…>` re-added **alongside** the package | T11 fails and §7.4's masking check fails — presence/provenance assertions alone would stay green |
 | interim `-local` version leaking into a commit | phase 2's T9 and its acceptance-gate version check fail |
