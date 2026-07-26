@@ -52,8 +52,7 @@ matters.
 - **No unit test can prove the resolver is load-bearing in this repo, and the spec no longer claims one
   does.** Measured: the real `DllImport` binds with the resolver forced to `IntPtr.Zero` and with the
   registration deleted, because `RgbLib`'s native assets already place `runtimes/<rid>/native/` on the
-  default search path. T21 pins that the P/Invoke path works; §3.1's live run under BTCPay's plugin ALC is
-  the only evidence about the resolver's necessity, and is mandatory before merge. Three successive narrowings of a proposed "T16" reduced it to a literal duplicate of that
+  default search path. T21 pins that the P/Invoke path works; §3.1's live run under BTCPay's plugin ALC is the only evidence that the **shipped** configuration binds there, and is mandatory before merge. It says nothing about the resolver's *necessity* — none of its runs deletes the registration (uncovered mutant 7). Three successive narrowings of a proposed "T16" reduced it to a literal duplicate of that
   test, so it has been dropped rather than kept as ceremony. The refactor's incremental cover is **T17** (the resolver
   must not hijack rgb-lib), **T19** (it must actually delegate to the shared loop) and the live signet send. It is not extra *environmental* cover: T17 and the binding test at `RgbVerifyBindingTests.cs:67-72` both need a staged native, so on a nativeless CI box both fail; T19 is Roslyn source-parsed and needs none. A reviewer correctly flagged an earlier
   draft for claiming T16 filled that gap.
