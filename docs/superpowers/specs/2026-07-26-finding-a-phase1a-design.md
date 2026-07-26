@@ -712,7 +712,9 @@ schema change, no persisted state, no wire-format change.
 ## 5. Files touched
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
-T1–T4, T12, T14, T15, T17–T23. The Roslyn-parsed sources are `RGBPlugin.cs` (T13, T15) and **`Services/RgbNativeSelfCheck.cs`** (T19's `DefaultProbe` clause and T23(d)) — the latter did not exist when this list was first written.
+T1–T4, T12, T14, T15, T17–T23. The Roslyn-parsed sources are `RGBPlugin.cs` (T13, T15), **`Services/RgbNativeSelfCheck.cs`** (T19's `DefaultProbe` clause, T23(d)) and **`Services/RgbVerifyNative.cs`** (T19's `ResolveNative` clauses, T23(e), T23(f)) — the last two did not exist when this list was first written.
+
+**Standing rule for every Roslyn clause in this spec: assert over syntax *nodes*, never over the text of a node.** `ToString()` on a declaration includes interior trivia, so any `Contains`-style check is defeated by writing the expected text in a comment while the code does something else — measured against T23(d), which was the sole pin on the "self-check always healthy" mutant. The same checks also false-reject correct code that merely wraps a line. Node-kind and identifier assertions have neither failure mode.
 
 **Modified:** `Services/RgbVerifyNative.cs` (extract `ResolveBaseDir(Assembly)`, `CandidatePaths`
 (deduped), `NativeFileName()`, `TryLoadFromCandidates(baseDir, …)`; widen `RuntimeIdentifiers()` **and `ResolveNative`** to `internal` (T17 invokes the latter directly);
