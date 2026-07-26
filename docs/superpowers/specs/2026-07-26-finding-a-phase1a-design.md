@@ -3,7 +3,7 @@
 **Date:** 2026-07-26 · **Branch:** `fix/sqlite-vuln` · **Code base HEAD:** `04c1781`
 **Audit finding:** A — "`rgbverifycffi` missing from Plugin-Builder artifact" (Blocker — gate can't load)
 **Parent spec:** `2026-07-25-finding-a-native-packaging-design.md` (problem, threat model, sequencing, decisions)
-**Revision:** 26 — split out of the phase-1 spec after its gate round 5, then seventeen rounds of its own gate
+**Revision:** split out of the phase-1 spec at its gate round 5, then gated independently through round 32
 
 **Revision history (condensed).** rev 1 split from the phase-1 spec. rev 2–4 corrected the false
 "diagnostic only" claim (this phase rewrites the live `ResolveNative` path), made the message
@@ -718,6 +718,25 @@ schema change, no persisted state, no wire-format change.
 
 **New:** `Services/RgbNativeSelfCheck.cs` (also defines `RgbNativeUnavailableException`); test file(s) for
 T1–T4, T12, T14, T15, T17–T23. The Roslyn-parsed sources are `RGBPlugin.cs` (**T15** — T13 is phase 2's hard-fail call-site guard and has no row here; it is named only where this spec discusses the phase-2 flip), **`Services/RgbNativeSelfCheck.cs`** (T19's `DefaultProbe` clause, T23(d)) and **`Services/RgbVerifyNative.cs`** (T19's `ResolveNative` clauses, T23(e)) — with **T23(f) parsing both** `RgbNativeSelfCheck.cs` and `RgbVerifyNative.cs`, since its closure starts at `DefaultProbe` in the former and continues into the latter — the last two did not exist when this list was first written.
+
+**Rounds 23–32 — the static-pin saga, recorded because it explains half of §3's wording.** T22/T23 were
+added after reviewers showed the convenience overloads' *default* bindings (`sink`, `probe`, `hasExport`)
+were pinned by nothing: every behavioural test injects them, so production could be rewired to an
+always-healthy self-check with the suite green. Pinning a default whose wrong value is behaviourally
+unobservable requires a static assertion, and specifying that assertion in prose then failed **seven
+consecutive rounds**, each fix defeated by the next round's mutant: substring containment (comment cloak),
+node assertion (dead statement, then `probe ??=` reassignment, then a shadowing local function), an
+anti-shadow rule that first omitted method declarations and then forbade the declarations §2 itself
+mandates, and finally a qualifier assertion defeated by a `using` alias and then by a stub type in the
+**enclosing namespace** — which no syntax-only check can see. That last defeat is why rule 5 requires
+semantic binding, and why the net-form checklist above says rule 5 is the only sound rule. Rounds 23–32
+also added state 5's second trigger (`hasExport` throwing after a successful load), bound T12/T14's
+*emitted* text to the variable content rather than the fixed token table, gave the never-name prohibitions
+real asserting clauses, and serialized every test that leaves the sink at its default, after a reviewer
+demonstrated the two `Console.SetError` sites racing under xunit parallelism — including a vacuous pass.
+No round in this range found a defect in the design or a false-ACCEPT path; all of them were defects in how
+the tests were specified.
+
 
 **Standing rules for Roslyn clauses — net form.** The five rules below accreted across six review
 rounds, each written after a measured defeat of the previous wording, and each keeps its derivation so a
