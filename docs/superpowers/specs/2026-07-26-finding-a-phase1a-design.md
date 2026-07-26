@@ -35,6 +35,8 @@ the only thing that needs it (phase 2) is blocked indefinitely on an external pu
 **Delivery is unchanged.** The native still ships via the existing
 `<None Include="native/rgb-verify/runtimes/**">` (`BTCPayServer.Plugins.RgbUtexo.csproj:79-84`).
 
+**So merging this phase does not close finding A, and the closure note must not claim it does.** Nothing here puts the native into the Plugin-Builder artifact: that glob is over a gitignored directory (`native/rgb-verify/.gitignore:3` — zero tracked files), `build-native.sh` runs only from `release.yml`, and the Plugin Builder runs only `dotnet publish`, so a Plugin-Builder install still has **no** `librgbverifycffi.*` at all and every RGB send still fails closed. What changes is *when and how* the operator finds out — once, loudly, at startup, with the RID, the searched paths and a reporting channel, instead of one silent per-send rejection at a time. That is the audit's first "must do regardless" clause and it is worth merging on its own; the finding itself closes in phase 2, which is blocked on the org's nuget.org publish (parent §9 decision 1).
+
 **This phase is *not* "a diagnostic and nothing else".** It also rewrites `ResolveNative`
 (`Services/RgbVerifyNative.cs:17-40`) to share its candidate loop with the probe — the **live P/Invoke
 resolution path every RGB send goes through**.
