@@ -315,7 +315,7 @@ API semantics.
 **What this parity does and does not cover.** It guarantees the probe searches exactly where the real
 `DllImport` will search. It does **not** verify that `SetDllImportResolver` is still registered — a
 regression deleting the registration would leave the probe green while real sends fail (still
-fail-closed, so no false-ACCEPT). **That gap is not covered by any unit test, and cannot be in this repo.** Measured: with the registration deleted entirely, and separately with the resolver forced to `IntPtr.Zero`, the real `DllImport` still binds — `RgbLib`'s native assets already put the directory on the default search path. The existing binding tests compensate for nothing, and neither does T21. Only §3.1's live run under BTCPay's plugin ALC can distinguish the two, which is why it is mandatory before merge.
+fail-closed, so no false-ACCEPT — **uncovered mutant 7**). **That gap is not covered by any unit test, and cannot be in this repo.** Measured: with the registration deleted entirely, and separately with the resolver forced to `IntPtr.Zero`, the real `DllImport` still binds — `RgbLib`'s native assets already put the directory on the default search path. The existing binding tests compensate for nothing, and neither does T21. Only §3.1's live run under BTCPay's plugin ALC can distinguish the two, which is why it is mandatory before merge.
 
 Further implementation notes:
 
