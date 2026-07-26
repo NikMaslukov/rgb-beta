@@ -53,9 +53,9 @@ enough that this spec carries two obligations it would not otherwise need:
   gitignored, and nothing supplies the native — so this is a pre-existing breakage this phase fixes, not
   one 1a introduces. **T17 needs the staged native for a different reason:** its in-body precondition (§3) fails loudly when the
   native is absent; without that precondition the assertion would pass *vacuously*, because `ResolveNative("rgblibcffi", …)` returns `IntPtr.Zero` whether or not the guard
-  exists. The spec's most important regression guard is silently green on a nativeless box, which is
-  exactly why its staged-native precondition is mandatory and why the `ci.yml` staging step is part of
-  this phase rather than an optional extra. No package is needed: `release.yml:96-108` already does exactly
+  exists. Without the precondition the spec's most important regression guard would be silently green on a
+  nativeless box — which is exactly why the precondition is mandatory and why the `ci.yml` staging step is
+  part of this phase rather than an optional extra. No package is needed: `release.yml:96-108` already does exactly
   this with `bash native/rgb-verify/build-native.sh` plus a Rust toolchain, so the same three steps go
   into `ci.yml`'s test job. An earlier draft claimed a staged CI native had to wait for phase 1b; that was
   false — `build-native.sh` needs nothing from the packaging work. This also closes finding-B codex
@@ -512,7 +512,7 @@ none of them apply here.
 
 ## 3. Test plan
 
-Behavioural tests (T1–T4, T12, T14, T15, T18) are written and observed failing before the corresponding
+Behavioural tests (T1–T4, T12, T14, T15, T18, T19, T20) are written and observed failing before the corresponding
 change; T14 additionally requires the intra-phase ordering in its row. **T19 and T20 are behavioural and fail first** — `ResolveNative`'s inline loop exists today, so T19's
 delegation assertion fails until the rewrite lands, and no state-5 branch exists until T20 forces one.
 **T17 is the only regression guard**: it passes on the commit that introduces it and exists to fail later
