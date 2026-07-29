@@ -331,6 +331,38 @@ This repository uses NuGet lockfiles (`packages.lock.json`) for both the plugin 
 - After a BTCPay submodule update (or any change to the plugin's direct/transitive packages): `dotnet restore --force-evaluate` regenerates the lockfile to match the new graph. Commit the regenerated `packages.lock.json`.
 - The lockfile pins *version strings* only. It does NOT verify NuGet author signatures or SLSA provenance — those are deferred release-process controls.
 
+### Packaging the gate native (`RgbVerifyCffi`)
+
+The pre-sign verification library (`native/rgb-verify`, built by `native/rgb-verify/build-native.sh`) can also be packed as a native-only NuGet package. Nothing references that package yet — this is the machinery that produces it.
+
+```bash
+# stage every shipped RID and pack (host RID natively, cross RIDs in containers)
+scripts/pack-rgbverify.sh --require-all-rids --version 0.11.1-rc.10-native.1
+
+# pack only what is already staged (what CI's assemble job does)
+scripts/pack-rgbverify.sh --pack-only --require-all-rids --version 0.11.1-rc.10-native.1
+
+# run the pack-pipeline checks: package layout, both RID guards, and the Debian load check
+scripts/pack-rgbverify.sh --verify
+```
+
+`--stage` and `--pack-only` are independent switches, not modes; passing neither does both. The shipped RID set (`linux-x64`, `linux-arm64`, `osx-arm64`) is declared once, in the packaging project's `GateRid` items, and the pack refuses to produce a package missing the production RID.
+
+The package lands in `local-nuget-feed/`, which is **not** a source in the committed `nuget.config` — a folder source that cannot exist in a fresh clone fails restore with `NU1301` for every consumer, and a local source ahead of nuget.org could shadow the published trust core. Supply it on the command line instead:
+
+```bash
+dotnet restore <project> \
+  --source https://api.nuget.org/v3/index.json \
+  --source ./local-nuget-feed \
+  --force-evaluate
+```
+
+`--force-evaluate` is needed because Rust builds are not byte-reproducible: re-packing at a version already restored elsewhere otherwise fails with `NU1403`.
+
+**glibc floor.** The canonical Linux natives are built in `rust:1-bookworm` (Debian 12), because a native linked against a newer glibc than the deployment target fails to `dlopen` there. `scripts/verify-native-loads-debian.sh` loads the packed `linux-x64` native inside a Debian 12 container and resolves all four exports, so a floor mistake surfaces at pack time rather than at a merchant's startup.
+
+For releases, `.github/workflows/pack-native.yml` (manual dispatch) builds each RID on a runner of that architecture, checks the exports with a tool that can read that object format, and uploads the assembled `.nupkg` as an artifact. It deliberately does not tag or publish a release.
+
 ## License
 
 MIT License - See LICENSE file

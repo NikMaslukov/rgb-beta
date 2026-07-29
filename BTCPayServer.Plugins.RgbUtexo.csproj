@@ -43,6 +43,13 @@
         <Content Remove="RgbRestoreHelper\**" />
         <EmbeddedResource Remove="RgbRestoreHelper\**" />
         <None Remove="RgbRestoreHelper\**" />
+        <!-- This project sits at the repo root, so the nested packaging project's
+             obj/**/*.AssemblyInfo.cs otherwise falls inside the default Compile glob and the build
+             dies with CS0579 duplicate assembly attributes as soon as that project is built. -->
+        <Compile Remove="native/rgb-verify/packaging/**" />
+        <Content Remove="native/rgb-verify/packaging/**" />
+        <EmbeddedResource Remove="native/rgb-verify/packaging/**" />
+        <None Remove="native/rgb-verify/packaging/**" />
     </ItemGroup>
 
     <ItemDefinitionGroup>

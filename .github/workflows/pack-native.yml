@@ -1,0 +1,192 @@
+name: Pack gate native
+
+# Builds librgbverifycffi for every shipped RID and assembles the RgbVerifyCffi nupkg.
+#
+# Artifact-only on purpose: this must NOT live in release.yml, which is dispatchable on any ref and
+# both tags and publishes a GitHub Release — using it pre-merge would tag unmerged code. Every RID
+# therefore has CI provenance and the production trust core is not a developer's cross-build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version, e.g. 0.11.1-rc.10-native.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  EXPORTS: rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_string_free
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-latest
+    # rust:1-bookworm pins the glibc floor to Debian 12, which is what BTCPay's images run.
+    # ubuntu-latest would link against a newer glibc and fail to dlopen on the deployment target.
+    container: rust:1-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native build deps
+        run: apt-get update -qq && apt-get install -y -qq cmake clang
+
+      - name: Build
+        working-directory: native/rgb-verify
+        run: |
+          set -euo pipefail
+          rustc --version && cargo --version
+          bash build-native.sh
+
+      - name: Assert ELF exports
+        run: |
+          set -euo pipefail
+          NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
+          test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
+          for sym in $EXPORTS; do
+            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
+              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-native-linux-x64
+          path: native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
+          if-no-files-found: error
+
+  linux-arm64:
+    # A native arm64 runner, not QEMU: emulated Rust builds are slow enough to dominate the
+    # workflow, and --platform linux/arm64 alone only works on an Apple-Silicon dev machine.
+    runs-on: ubuntu-24.04-arm
+    container: rust:1-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native build deps
+        run: apt-get update -qq && apt-get install -y -qq cmake clang
+
+      - name: Build
+        working-directory: native/rgb-verify
+        run: |
+          set -euo pipefail
+          rustc --version && cargo --version
+          bash build-native.sh
+
+      - name: Assert ELF exports
+        run: |
+          set -euo pipefail
+          NATIVE=native/rgb-verify/runtimes/linux-arm64/native/librgbverifycffi.so
+          test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
+          for sym in $EXPORTS; do
+            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
+              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-native-linux-arm64
+          path: native/rgb-verify/runtimes/linux-arm64/native/librgbverifycffi.so
+          if-no-files-found: error
+
+  osx-arm64:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        working-directory: native/rgb-verify
+        run: |
+          set -euo pipefail
+          rustc --version && cargo --version
+          bash build-native.sh
+
+      # nm -gU is BSD-only and GNU nm cannot read Mach-O, so this check has to run on the runner
+      # that produced the object.
+      - name: Assert Mach-O exports
+        run: |
+          set -euo pipefail
+          NATIVE=native/rgb-verify/runtimes/osx-arm64/native/librgbverifycffi.dylib
+          test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
+          for sym in $EXPORTS; do
+            nm -gU "$NATIVE" | grep -q "$sym" \
+              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gate-native-osx-arm64
+          path: native/rgb-verify/runtimes/osx-arm64/native/librgbverifycffi.dylib
+          if-no-files-found: error
+
+  assemble:
+    needs: [linux-x64, linux-arm64, osx-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+
+      - name: Download every RID artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gate-native-*
+          path: /tmp/gate-natives
+
+      # download-artifact flattens each artifact into its own directory, so the runtimes/ layout the
+      # packaging project globs has to be rebuilt here.
+      - name: Restage runtimes/
+        run: |
+          set -euo pipefail
+          install -D /tmp/gate-natives/gate-native-linux-x64/librgbverifycffi.so \
+            native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
+          install -D /tmp/gate-natives/gate-native-linux-arm64/librgbverifycffi.so \
+            native/rgb-verify/runtimes/linux-arm64/native/librgbverifycffi.so
+          install -D /tmp/gate-natives/gate-native-osx-arm64/librgbverifycffi.dylib \
+            native/rgb-verify/runtimes/osx-arm64/native/librgbverifycffi.dylib
+
+      # This job asserts file presence and package layout only; each RID's export check ran in the
+      # job that built it, on an OS able to read that object format.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          bash scripts/pack-rgbverify.sh --pack-only --require-all-rids --version '${{ inputs.version }}'
+
+      - name: Assert the nupkg layout
+        run: |
+          set -euo pipefail
+          NUPKG="local-nuget-feed/RgbVerifyCffi.${{ inputs.version }}.nupkg"
+          test -f "$NUPKG" || { echo "::error::$NUPKG not produced"; exit 1; }
+          ENTRIES="$(unzip -Z1 "$NUPKG" | sort)"
+          echo "$ENTRIES"
+          for expected in \
+            'lib/net8.0/_._' \
+            'runtimes/linux-x64/native/librgbverifycffi.so' \
+            'runtimes/linux-arm64/native/librgbverifycffi.so' \
+            'runtimes/osx-arm64/native/librgbverifycffi.dylib'; do
+            echo "$ENTRIES" | grep -qx "$expected" \
+              || { echo "::error::$NUPKG is missing $expected"; exit 1; }
+          done
+          if unzip -p "$NUPKG" RgbVerifyCffi.nuspec | grep -q '<dependencies'; then
+            echo "::error::$NUPKG declares dependencies; the trust core must have none"; exit 1
+          fi
+
+      - name: Assert the production native loads on Debian
+        run: bash scripts/verify-native-loads-debian.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RgbVerifyCffi-${{ inputs.version }}-nupkg
+          path: local-nuget-feed/RgbVerifyCffi.${{ inputs.version }}.nupkg
+          if-no-files-found: error
