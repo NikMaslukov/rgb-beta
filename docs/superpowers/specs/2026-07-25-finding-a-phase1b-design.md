@@ -209,8 +209,10 @@ defaults to both. Phases:
 line, by the dev script:
 
 ```
-dotnet restore <proj> --source https://api.nuget.org/v3/index.json --source ./local-nuget-feed --force-evaluate
+dotnet restore <proj> --source https://api.nuget.org/v3/index.json --source "$PWD/local-nuget-feed" --force-evaluate
 ```
+
+⚠ **The feed path must be ABSOLUTE.** This clause originally specified `--source ./local-nuget-feed`; implementation disproved it. Measured against the real project graph, both `./local-nuget-feed` and the bare relative form fail with `NU1101 Unable to find package RgbVerifyCffi` when run from the repo root, while the identical restore with `$PWD/local-nuget-feed` succeeds — reproduced in both directions after evicting the extracted cache. **The mechanism was not established and no clause here should assert one:** the two failures do not even share a source list (the `./` run's list names the repo root's `nuget.org`, the bare run's names the submodule config's `api.nuget.org`), which rules out the single tidy explanation an earlier wording of this note asserted. What is established is the requirement: absolute path.
 
 Rationale, both halves empirically verified:
 

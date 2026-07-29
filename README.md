@@ -353,9 +353,11 @@ The package lands in `local-nuget-feed/`, which is **not** a source in the commi
 ```bash
 dotnet restore <project> \
   --source https://api.nuget.org/v3/index.json \
-  --source ./local-nuget-feed \
+  --source "$PWD/local-nuget-feed" \
   --force-evaluate
 ```
+
+The feed path must be **absolute**. Measured on this project graph: both `--source ./local-nuget-feed` and the bare relative form fail with `NU1101 Unable to find package RgbVerifyCffi` when run from the repo root, while the identical restore with an absolute path succeeds. Reproduced with a cold cache in both directions; the reason relative resolution misses the feed here was not established, so use an absolute path.
 
 `--force-evaluate` is needed because Rust builds are not byte-reproducible: re-packing at a version already restored elsewhere otherwise fails with `NU1403`.
 

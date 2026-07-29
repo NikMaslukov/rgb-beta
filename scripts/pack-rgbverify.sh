@@ -157,7 +157,10 @@ pack() {
   rm -rf "${NUGET_PACKAGES:-$HOME/.nuget/packages}/rgbverifycffi/$VERSION"
 
   echo "==> packed $FEED/RgbVerifyCffi.$VERSION.nupkg"
-  echo "    consume with: dotnet restore <proj> --source https://api.nuget.org/v3/index.json --source ./local-nuget-feed --force-evaluate"
+  # Absolute, because measured on this project graph a relative folder source misses the feed:
+  # ./local-nuget-feed fails with NU1101 even from the repo root, while the same restore with an
+  # absolute path succeeds.
+  echo "    consume with: dotnet restore <proj> --source https://api.nuget.org/v3/index.json --source $FEED --force-evaluate"
 }
 
 # P3-P5 run against a scratch copy of the packaging project with dummy natives, so they are
