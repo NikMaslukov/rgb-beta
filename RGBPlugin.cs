@@ -29,6 +29,12 @@ public class RGBPlugin : BaseBTCPayServerPlugin
     {
         var ctx = (PluginServiceCollection)services;
 
+        // Before LoadConfiguration, not after: that method's IConfiguration lookup and file IO can
+        // throw, and a probe placed behind it would be skipped in exactly the degraded startups
+        // where an operator most needs to be told the pre-sign gate cannot load. Log-only — sends
+        // already fail closed, and hard-failing here would auto-disable the plugin fleet-wide.
+        RgbNativeSelfCheck.VerifyOrLog(ctx.BootstrapServices);
+
         var config = LoadConfiguration(ctx);
         if (config == null) return;
 

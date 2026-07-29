@@ -10,6 +10,11 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Tests that pin source shape (Roslyn) read the repo's own .cs files; there is no MSBuild
+         evaluation available at runtime, so the root is baked in here. -->
+    <AssemblyMetadata Include="RepoRoot" Value="$(MSBuildThisFileDirectory).." />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.0">

@@ -281,6 +281,23 @@ The blockchain hasn't reached the required number of confirmations yet. Wait for
 2. Ensure blocks are being mined (relevant for regtest/testnet)
 3. Click **Refresh** on the RGB Wallet dashboard to trigger a manual sync
 
+### "RGB pre-sign verification library could not be loaded"
+
+At startup the plugin checks that the pre-sign verification library (`rgbverifycffi`) loads and exports the symbols it needs. If it does not, the plugin logs one error naming your runtime identifier, the file name it expected, and every path it searched — then keeps running.
+
+While that error is present, **all RGB asset sends are rejected**. This is by design: the send path refuses to sign without the independent verification described in [RGB Send Intent Verification (pre-sign gate)](#rgb-send-intent-verification-pre-sign-gate). **Receiving RGB assets and the rest of the plugin are unaffected.**
+
+The message tells you which of four things happened:
+
+| The error says | What it means |
+|---|---|
+| the library **is absent from this build** | no candidate file existed — a known packaging defect in the plugin distribution, not a problem with your server |
+| a file **exists but could not be loaded** | the file is there but unusable: architecture mismatch, corruption, or incompatible system libraries (commonly a glibc floor newer than the host) |
+| the library **loaded but is the wrong version** | it loaded and an expected symbol is missing — an ABI/version mismatch between the plugin and the native library |
+| the **self-check failed** | the check itself raised an exception, which the message names |
+
+In every case, please report it at https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues and quote the whole message.
+
 ### Plugin not loading
 Check BTCPay logs for errors:
 ```bash
