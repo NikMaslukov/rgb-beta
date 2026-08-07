@@ -313,10 +313,16 @@ public class RgbLibService : IRgbLibService
             var result = _listUnspentsMethod.Invoke(null, args);
             
             var unspentsJson = GetNativeResult(result);
+            // WHY throw rather than return an empty list: a genuinely empty wallet yields Ok with "[]", so a
+            // null payload means the native call FAILED. Returning empty made a failure indistinguishable
+            // from "this wallet has no UTXOs", and the replenishment sweep then read zero colorable UTXOs,
+            // computed zero free slots, and signed a UTXO-creation transaction because of an error — the
+            // false-ACCEPT its own invariant forbids. Observed live on 2026-08-04 against a wallet that had
+            // 23 UTXOs at the time. Six sibling calls in this file already throw on a null payload;
+            // ListBtcTransactionsAsync still returns an empty list on the same failure, which is the shape
+            // removed here. No signing decision reads it, so it is left for its own change.
             if (unspentsJson == null)
-            {
-                return new List<UnspentOutput>();
-            }
+                throw new RgbLibException(GetNativeError(result) ?? "list_unspents failed");
             
             var unspents = JsonSerializer.Deserialize<List<UnspentOutputResponse>>(unspentsJson);
             return unspents?.Select(u => new UnspentOutput(

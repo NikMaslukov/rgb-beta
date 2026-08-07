@@ -87,6 +87,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
                 var fromFile = JsonSerializer.Deserialize<RGBConfiguration>(json);
                 if (fromFile != null)
                 {
+                    ApplyEnvironmentOverrides(fromFile);
                     return fromFile;
                 }
             }
@@ -102,7 +103,34 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         var env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
         if (string.Equals(env, "Development", StringComparison.OrdinalIgnoreCase))
             cfg.AllowPrivateTransportEndpoints = true;
+        ApplyEnvironmentOverrides(cfg);
         return cfg;
+    }
+
+    /// <summary>
+    /// Applies environment-variable overrides for the automatic-UTXO knobs.
+    ///
+    /// WHY these exist at all: rgb.json is the only other delivery mechanism, and writing that file is
+    /// hazardous — it replaces the whole configuration object, so a file that omits rgb_base_dir silently
+    /// resets it to the literal default "/data" and every wallet path moves, with no migration. An operator
+    /// who wants to bound or disable unattended signing must not be forced to take that risk to do it, so the
+    /// three controls this change adds are settable without touching the file at all.
+    ///
+    /// An unparseable value is ignored rather than treated as zero: zero is a meaningful setting for
+    /// MaxAutoColorableUtxos (it disables automatic creation) and must never be reached by accident.
+    /// </summary>
+    internal static void ApplyEnvironmentOverrides(RGBConfiguration cfg, Func<string, string?>? readEnv = null)
+    {
+        var read = readEnv ?? Environment.GetEnvironmentVariable;
+
+        if (int.TryParse(read("RGB_MAX_AUTO_COLORABLE_UTXOS"), out var cap))
+            cfg.MaxAutoColorableUtxos = cap;
+
+        if (int.TryParse(read("RGB_AUTO_UTXO_COOLDOWN_MINUTES"), out var cooldown))
+            cfg.AutoUtxoCooldownMinutes = cooldown;
+
+        if (int.TryParse(read("RGB_AUTO_UTXO_MAX_BACKOFF_MINUTES"), out var backoff))
+            cfg.AutoUtxoMaxBackoffMinutes = backoff;
     }
 
     private static string ResolveRgbBaseDir(string btcPayDataDir)

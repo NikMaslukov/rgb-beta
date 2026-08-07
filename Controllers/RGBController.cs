@@ -442,10 +442,26 @@ public class RGBController : Controller
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
-        var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
+        // ListUnspentsAsync now throws when the native call fails instead of returning an empty list, so this
+        // page reports the failure rather than rendering a convincing "0 UTXOs" that is really an error.
+        List<UnspentOutput> unspents;
+        try
+        {
+            unspents = await _wallets.ListUnspentsAsync(wallet.Id);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Could not list UTXOs for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = "Could not read this wallet's UTXOs from RGB. Try again in a moment.";
+            return RedirectToAction(nameof(Index), new { storeId });
+        }
+
         await using var ctx = _db.CreateContext();
+        // Shares the listener's predicate so the figure an operator reads while diagnosing a skipped
+        // replenishment matches the one the listener decided on.
         var pendingInvoices = await ctx.RGBInvoices.CountAsync(
-            i => i.WalletId == wallet.Id && i.Status == RGBInvoiceStatus.Pending);
+            RGBInvoiceListener.ActivePendingInvoicePredicate(
+                wallet.Id, DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
 
         return View(new RGBUtxosViewModel
         {

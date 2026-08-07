@@ -45,6 +45,17 @@ RGB_DATA_DIR=/data/rgb-wallets
 
 # RGB proxy endpoint for consignment exchange
 RGB_PROXY_ENDPOINT=rpc://proxy.iriswallet.com:443/json-rpc
+
+# Bounds on automatic colorable-UTXO creation, which signs and broadcasts a Bitcoin
+# transaction unattended. Set the cap to 0 to disable it entirely; the "Create UTXOs"
+# button keeps working. Automatic creation also requires RGB to be enabled for the store.
+RGB_MAX_AUTO_COLORABLE_UTXOS=50
+# Minimum gap between automatic creations for one wallet. A value of 1..19 is raised
+# to 20 and a value of 0 or less falls back to 30, because the gate compares against
+# an instant stamped mid-sweep and a gap under twice the 10-minute sweep interval
+# could never take effect.
+RGB_AUTO_UTXO_COOLDOWN_MINUTES=30
+RGB_AUTO_UTXO_MAX_BACKOFF_MINUTES=160
 ```
 
 ### Configuration File

@@ -184,7 +184,13 @@ internal static class RoslynPins
     static readonly string[] CountedNames =
     [
         "Verify", "VerifyOrLog", "DefaultProbe", "DefaultHasExport",
-        "ResolveBaseDir", "TryLoadFromCandidates", "NativeLibrary", "Console"
+        "ResolveBaseDir", "TryLoadFromCandidates", "NativeLibrary", "Console",
+        // Finding C: the replenishment decision surface. A second declaration of any of these means a
+        // parallel copy of the gate exists somewhere the clauses below never parse.
+        "ReplenishUtxosAsync", "ActivePendingInvoicePredicate",
+        "EvaluateReplenishEligibility", "EvaluateReplenishDemand",
+        "ReplenishCooldownTracker", "NextEligibleAt", "RecordAttemptSucceeded",
+        "RecordAttemptFailed", "RecordNoActionNeeded", "Prune"
     ];
 
     internal static readonly Dictionary<string, int> RepoWideMandatedTotals = new()
@@ -195,6 +201,16 @@ internal static class RoslynPins
         ["DefaultHasExport"] = 1,
         ["ResolveBaseDir"] = 1,
         ["TryLoadFromCandidates"] = 1,
+        ["ReplenishUtxosAsync"] = 1,
+        ["ActivePendingInvoicePredicate"] = 1,
+        ["EvaluateReplenishEligibility"] = 1,
+        ["EvaluateReplenishDemand"] = 1,
+        ["ReplenishCooldownTracker"] = 1,
+        ["NextEligibleAt"] = 1,
+        ["RecordAttemptSucceeded"] = 1,
+        ["RecordAttemptFailed"] = 1,
+        ["RecordNoActionNeeded"] = 1,
+        ["Prune"] = 1,
     };
 
     internal static SyntaxNode BodyOf(BaseMethodDeclarationSyntax method)

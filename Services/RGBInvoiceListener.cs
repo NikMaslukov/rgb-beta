@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Threading.Channels;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
@@ -26,6 +27,8 @@ public class RGBInvoiceListener : IHostedService
     readonly EventAggregator _events;
     readonly PaymentService _payments;
     readonly StoreRepository _stores;
+    readonly RGBConfiguration _cfg;
+    readonly ReplenishCooldownTracker _cooldowns;
     readonly ILogger<RGBInvoiceListener> _log;
 
     readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
@@ -34,15 +37,20 @@ public class RGBInvoiceListener : IHostedService
     Task? _worker;
 
     const int PollSeconds = 10;
-    const int UtxoCheckMinutes = 10;
+    // internal so ReplenishConfigurationTests can pin the invariant that the base cooldown exceeds it.
+    internal const int UtxoCheckMinutes = 10;
     DateTimeOffset _lastUtxoCheck = DateTimeOffset.MinValue;
 
     public RGBInvoiceListener(IMemoryCache cache, InvoiceRepository invoices, RGBPaymentMethodHandler handler,
         RGBWalletService wallets, RGBPluginDbContextFactory db,
-        EventAggregator events, PaymentService payments, StoreRepository stores, ILogger<RGBInvoiceListener> log)
+        EventAggregator events, PaymentService payments, StoreRepository stores, RGBConfiguration cfg,
+        ILogger<RGBInvoiceListener> log)
     {
         _cache = cache; _invoices = invoices; _handler = handler; _wallets = wallets;
-        _db = db; _events = events; _payments = payments; _stores = stores; _log = log;
+        _db = db; _events = events; _payments = payments; _stores = stores; _cfg = cfg; _log = log;
+        _cooldowns = new ReplenishCooldownTracker(
+            baseCooldown: TimeSpan.FromMinutes(_cfg.AutoUtxoCooldownMinutes),
+            maxBackoff: TimeSpan.FromMinutes(_cfg.AutoUtxoMaxBackoffMinutes));
     }
 
     public async Task StartAsync(CancellationToken ct)
@@ -154,48 +162,123 @@ public class RGBInvoiceListener : IHostedService
     async Task ReplenishUtxosAsync(CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
-        var wallets = await ctx.RGBWallets.Where(w => w.IsActive).ToListAsync(ct);
+        // Ids only: with no wallet entity in scope there is no stale snapshot for a later refactor to read.
+        var walletIds = await ctx.RGBWallets.Where(x => x.IsActive).Select(x => x.Id).ToListAsync(ct);
+        _cooldowns.Prune(walletIds);
 
-        foreach (var w in wallets)
+        foreach (var id in walletIds)
         {
             try
             {
+                // Per wallet, not per sweep: a sweep spending minutes in rgb-lib per wallet would otherwise
+                // judge later wallets' invoices against the sweep's start, counting rows that expired while
+                // it ran. This instant is the DECISION clock — eligibility and the invoice predicate. The
+                // cooldown stamps read the clock again at the moment they stamp, because the wallet's own
+                // rgb-lib work (CreateColorableUtxosAsync blocks on the per-wallet send lock) can outlast the
+                // cooldown itself, and stamping an already-elapsed instant would leave the wallet instantly eligible
+                // again. Both drifts run in the permissive direction, the one this change exists to close.
+                var now = DateTimeOffset.UtcNow;
+                var nowUnix = now.ToUnixTimeSeconds();
+
+                // Re-read per wallet: a concurrent send can quarantine, and an admin can deactivate, between
+                // the query above and the decision below.
+                var w = await ctx.RGBWallets.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+                if (w == null) continue;
+
                 var store = await _stores.FindStore(w.StoreId);
                 if (store == null) continue;
 
-                var config = store.GetPaymentMethodConfigs().TryGetValue(RGBPlugin.RGBPaymentMethodId, out var tok)
-                    ? tok.ToObject<RGBPaymentMethodConfig>(_blobSerializer) : null;
-                var minFreeSlots = config?.UtxoCount ?? 4;
-                var utxoSize = config?.UtxoSize ?? 1000;
+                var configs = store.GetPaymentMethodConfigs(onlyEnabled: true);
+                var enabled = configs.TryGetValue(RGBPlugin.RGBPaymentMethodId, out var tok);
+                // `tok is not null` is required: Roslyn does not carry TryGetValue's [MaybeNullWhen(false)]
+                // state through the `enabled` local, so without it ToObject is a CS8602 under nullable-enable.
+                var config = enabled && tok is not null
+                    ? tok.ToObject<RGBPaymentMethodConfig>(_blobSerializer)
+                    : null;
 
-                var maxAlloc = w.MaxAllocationsPerUtxo;
-                var utxos = await _wallets.ListUnspentsAsync(w.Id, ct);
-                var colorable = utxos.Where(u => u.Utxo.Colorable).ToList();
-                var totalSlots = colorable.Count * maxAlloc;
-                var usedByColorings = colorable.Sum(u => u.RgbAllocations.Count);
-                var pendingInvoices = await ctx.RGBInvoices.CountAsync(
-                    i => i.WalletId == w.Id && i.Status == RGBInvoiceStatus.Pending, ct);
-                var usedSlots = usedByColorings + pendingInvoices;
-                var freeSlots = Math.Max(0, totalSlots - usedSlots);
-
-                if (freeSlots >= minFreeSlots)
+                var skip = EvaluateReplenishEligibility(
+                    walletId: w.Id,
+                    isActive: w.IsActive,
+                    needsRecovery: w.NeedsRecovery,
+                    maxAllocationsPerUtxo: w.MaxAllocationsPerUtxo,
+                    paymentMethodEnabled: enabled,
+                    configuredWalletId: config?.WalletId,
+                    now: now,
+                    nextEligibleAt: _cooldowns.NextEligibleAt(w.Id));
+                if (skip.HasValue)
                 {
-                    _log.LogDebug("Wallet {WalletId} has {FreeSlots} free slots ({Colorings} colorings + {Pending} pending invoices using {Used}/{Total} slots), skipping",
-                        w.Id, freeSlots, usedByColorings, pendingInvoices, usedSlots, totalSlots);
+                    // Every refusal logs at Debug, per spec 3.6. An earlier revision warned on
+                    // SkipInvalidWalletConfig, on the belief that it meant a store pointing at a different
+                    // wallet — it does not; that is SkipWalletNotConfigured, which is also the ordinary state
+                    // of every store that has not set RGB up. SkipInvalidWalletConfig is a non-positive
+                    // MaxAllocationsPerUtxo, which RGBPluginMigrationRunner repairs at startup. Neither
+                    // deserves a line every ten minutes forever.
+                    _log.LogDebug("Wallet {WalletId}: skipping UTXO replenishment ({Outcome})", w.Id, skip.Value);
                     continue;
                 }
 
-                var newUtxosNeeded = (int)Math.Ceiling((double)(minFreeSlots - freeSlots) / maxAlloc);
-                var requestCount = newUtxosNeeded + colorable.Count;
-                _log.LogInformation("Wallet {WalletId}: {FreeSlots} free slots ({Colorings} colorings + {Pending} pending, {Used}/{Total} slots). Need {New} new UTXOs, requesting {Request} total",
-                    w.Id, freeSlots, usedByColorings, pendingInvoices, usedSlots, totalSlots, newUtxosNeeded, requestCount);
-                await _wallets.CreateColorableUtxosAsync(w.Id, requestCount, utxoSize, ct);
-                _log.LogInformation("Wallet {WalletId}: requested {Request} total UTXOs (expected ~{New} new)",
-                    w.Id, requestCount, newUtxosNeeded);
+                // Eligibility already refused a null config; this narrows the reference for the demand call
+                // without a null-forgiving `!`, which would compile while still being able to throw.
+                if (config is null) continue;
+
+                var utxos = await _wallets.ListUnspentsAsync(w.Id, ct);
+                var colorable = utxos.Where(u => u.Utxo.Colorable).ToList();
+                var colorableCount = colorable.Count;
+                var usedByColorings = colorable.Sum(u => u.RgbAllocations.Count);
+                var activePendingInvoices = await ctx.RGBInvoices.CountAsync(
+                    ActivePendingInvoicePredicate(w.Id, nowUnix), ct);
+
+                var decision = EvaluateReplenishDemand(
+                    colorableCount: colorableCount,
+                    usedByColorings: usedByColorings,
+                    activePendingInvoices: activePendingInvoices,
+                    maxAllocationsPerUtxo: w.MaxAllocationsPerUtxo,
+                    minFreeSlots: config.UtxoCount,
+                    utxoSize: config.UtxoSize,
+                    maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos);
+
+                if (decision.Outcome != ReplenishOutcome.Create)
+                {
+                    // Debug, per spec §3.6: the cap gate precedes the free-slots gate, so a healthy wallet
+                    // sitting at the cap with ample free slots would log this on every eligible sweep,
+                    // forever — and so would a deployment that sets the cap to 0 to disable automatic
+                    // creation outright. (Reaching here stamps the cooldown, so it is roughly 48 times a day
+                    // at the 30-minute default rather than once per 10-minute sweep; still noise, forever.)
+                    // Diagnosing a stopped replenishment is what the Debug level is for.
+                    _log.LogDebug(
+                        "Wallet {WalletId}: {Outcome} ({Colorings} colorings + {Pending} active pending, {Colorable}/{Cap} colorable UTXOs)",
+                        w.Id, decision.Outcome, usedByColorings, activePendingInvoices, colorableCount,
+                        _cfg.MaxAutoColorableUtxos);
+                    _cooldowns.RecordNoActionNeeded(w.Id, DateTimeOffset.UtcNow);
+                    continue;
+                }
+
+                _log.LogInformation(
+                    "Wallet {WalletId}: {Outcome} — requesting {Request} total colorable UTXOs ({Colorings} colorings + {Pending} active pending, {Colorable}/{Cap} standing)",
+                    w.Id, decision.Outcome, decision.RequestCount, usedByColorings, activePendingInvoices,
+                    colorableCount, _cfg.MaxAutoColorableUtxos);
+
+                try
+                {
+                    await _wallets.CreateColorableUtxosAsync(
+                        walletId: w.Id, count: decision.RequestCount, size: decision.UtxoSize, ct: ct);
+                    _cooldowns.RecordAttemptSucceeded(w.Id, DateTimeOffset.UtcNow);
+                }
+                catch
+                {
+                    // Scoped to the creation call, so the failures the sweep does before it — the store
+                    // lookup, the config parse, ListUnspentsAsync, CountAsync — reach the outer catch
+                    // unstamped and a healthy wallet is not backed off by one of those. Note this DOES
+                    // include failures raised inside CreateColorableUtxosAsync itself (it opens its own
+                    // DbContext and waits on the per-wallet send lock), which is the intended reading: if
+                    // the creation attempt did not succeed, the wallet waits longer before the next one.
+                    _cooldowns.RecordAttemptFailed(w.Id, DateTimeOffset.UtcNow);
+                    throw;
+                }
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "Failed to replenish UTXOs for wallet {WalletId}", w.Id);
+                _log.LogWarning(ex, "Failed to replenish UTXOs for wallet {WalletId}", id);
             }
         }
     }
@@ -519,6 +602,57 @@ public class RGBInvoiceListener : IHostedService
         return SettlementDecision.TransitionWaitingNoPayment;
     }
 
+    // Order is load-bearing: the cheap gates must precede the caller's ListUnspentsAsync, so a wallet whose
+    // store never enabled RGB costs no rgb-lib work at all.
+    internal static ReplenishOutcome? EvaluateReplenishEligibility(
+        string walletId, bool isActive, bool needsRecovery, int maxAllocationsPerUtxo,
+        bool paymentMethodEnabled, string? configuredWalletId,
+        DateTimeOffset now, DateTimeOffset? nextEligibleAt)
+    {
+        if (!isActive) return ReplenishOutcome.SkipWalletNotConfigured;
+        if (nextEligibleAt.HasValue && now < nextEligibleAt.Value) return ReplenishOutcome.SkipCooldown;
+        if (!paymentMethodEnabled) return ReplenishOutcome.SkipPaymentMethodDisabled;
+        if (!string.Equals(configuredWalletId, walletId, StringComparison.Ordinal))
+            return ReplenishOutcome.SkipWalletNotConfigured;
+        if (needsRecovery) return ReplenishOutcome.SkipQuarantined;
+        // WHY refuse rather than clamp: the wallet row is written only through ResolveAllocationsPerUtxo,
+        // which clamps to [1,50], so a non-positive value means a corrupt or hand-edited row. Repairing it
+        // here would turn a corrupt row into a valid signing request.
+        if (maxAllocationsPerUtxo <= 0) return ReplenishOutcome.SkipInvalidWalletConfig;
+        return null;
+    }
+
+    // All arithmetic is long and narrowed once at the end: with a greenfield-written utxoCount the int form
+    // wraps negative, and Math.Clamp then turns that into 0 — a silent skip instead of a capped batch.
+    internal static ReplenishDecision EvaluateReplenishDemand(
+        int colorableCount, int usedByColorings, int activePendingInvoices,
+        int maxAllocationsPerUtxo, int minFreeSlots, int utxoSize, int maxAutoColorableUtxos)
+    {
+        // Must precede the Math.Clamp below, whose min > max throws ArgumentException.
+        if (maxAutoColorableUtxos <= 0 || colorableCount >= maxAutoColorableUtxos)
+            return new ReplenishDecision(ReplenishOutcome.SkipCapReached, 0, utxoSize);
+
+        var totalSlots = (long)colorableCount * maxAllocationsPerUtxo;
+        var usedSlots = (long)usedByColorings + activePendingInvoices;
+        var freeSlots = Math.Max(0L, totalSlots - usedSlots);
+        if (freeSlots >= minFreeSlots)
+            return new ReplenishDecision(ReplenishOutcome.SkipEnoughFreeSlots, 0, utxoSize);
+
+        var needed = (long)Math.Ceiling((double)(minFreeSlots - freeSlots) / maxAllocationsPerUtxo);
+        var request = (int)Math.Clamp(needed + colorableCount, 0L, (long)maxAutoColorableUtxos);
+        return new ReplenishDecision(ReplenishOutcome.Create, request, utxoSize);
+    }
+
+    // A row whose expiry has passed no longer reserves anything: rgb-lib fails the blind receive and releases
+    // the UTXO, while our row stays Pending forever because only the asset-discovery sweep ever marks rows
+    // Expired. Counting those rows is what lets anyone who can mint an invoice inflate demand permanently.
+    // A null expiry is rgb-lib's own omission on a checkout-path row, so it is inactive for the same reason.
+    internal static Expression<Func<RGBInvoice, bool>> ActivePendingInvoicePredicate(string walletId, long nowUnix)
+        => i => i.WalletId == walletId
+                && i.Status == RGBInvoiceStatus.Pending
+                && i.ExpirationTimestamp != null
+                && i.ExpirationTimestamp > nowUnix;
+
     internal static bool IsAssetMatch(string? invoiceAssetId, string transferAssetId)
     {
         return !string.IsNullOrEmpty(invoiceAssetId) && transferAssetId == invoiceAssetId;
@@ -647,6 +781,20 @@ public class RGBInvoiceListener : IHostedService
             ShouldRecordPayment: false, IsZeroAmount: false);
     }
 }
+
+internal enum ReplenishOutcome
+{
+    Create,
+    SkipCooldown,
+    SkipPaymentMethodDisabled,
+    SkipWalletNotConfigured,
+    SkipQuarantined,
+    SkipInvalidWalletConfig,
+    SkipCapReached,
+    SkipEnoughFreeSlots
+}
+
+internal record ReplenishDecision(ReplenishOutcome Outcome, int RequestCount, int UtxoSize);
 
 internal enum SettlementDecision
 {

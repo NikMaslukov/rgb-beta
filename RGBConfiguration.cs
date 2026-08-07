@@ -80,6 +80,52 @@ public class RGBConfiguration
     [JsonPropertyName("restore_reap_grace_seconds")]
     public int RestoreReapGraceSeconds { get; set; } = 5;
 
+    // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
+    // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
+    // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
+    // never fire on a settle path, so audit clause 3 shipped its cap and not its rate limit. Because
+    // create_utxos is `up_to` a target total, one successful creation reaches the goal, so a longer gap
+    // costs almost no liveness. Pinned by CooldownMustOutlastTheSweepPeriod.
+    const int DefaultAutoUtxoCooldownMinutes = 30;
+    const int DefaultAutoUtxoMaxBackoffMinutes = 160;
+
+    int _autoUtxoCooldownMinutes = DefaultAutoUtxoCooldownMinutes;
+    int _autoUtxoMaxBackoffMinutes = DefaultAutoUtxoMaxBackoffMinutes;
+
+    [JsonPropertyName("max_auto_colorable_utxos")]
+    public int MaxAutoColorableUtxos { get; set; } = 50;
+
+    // WHY the clamping lives in the accessors: the listener's tracker construction is pinned to the literal
+    // expression TimeSpan.FromMinutes(_cfg.AutoUtxoCooldownMinutes), so the value has to be safe by the time
+    // it is read. A non-positive cooldown would mean "always eligible", i.e. more automatic signing.
+    //
+    // WHY the floor is TWICE the sweep period rather than one minute more: the gate compares against an
+    // instant stamped mid-sweep, so the usable margin is the cooldown minus the sweep period minus however
+    // long the rest of the sweep takes. `UtxoCheckMinutes + 1` leaves one minute of that, which a
+    // multi-wallet sweep or a single sign-and-broadcast eats, reproducing the inert cooldown for anyone who
+    // sets 11. A sweep lasting longer than UtxoCheckMinutes would already saturate the sweep timer itself,
+    // so one whole period is the natural margin. A cooldown at or below the sweep period can never fire. The
+    // listener stamps _lastUtxoCheck AFTER the sweep, so the next sweep starts later than end + period, by
+    // which time a wallet that settled during the sweep is already eligible. Raising the DEFAULT to 30 fixed
+    // the shipped case and left the trap armed for anyone who sets the knob — and `10` is exactly what an
+    // operator upgrading from an earlier build would pin to keep the old cadence. Clamping up is the
+    // false-REJECT direction (a longer wait, never a shorter one), which is the permitted one.
+    [JsonPropertyName("auto_utxo_cooldown_minutes")]
+    public int AutoUtxoCooldownMinutes
+    {
+        get => _autoUtxoCooldownMinutes;
+        set => _autoUtxoCooldownMinutes = Math.Max(
+            value > 0 ? value : DefaultAutoUtxoCooldownMinutes,
+            RGBInvoiceListener.UtxoCheckMinutes * 2);
+    }
+
+    [JsonPropertyName("auto_utxo_max_backoff_minutes")]
+    public int AutoUtxoMaxBackoffMinutes
+    {
+        get => Math.Max(_autoUtxoMaxBackoffMinutes, AutoUtxoCooldownMinutes);
+        set => _autoUtxoMaxBackoffMinutes = value > 0 ? value : DefaultAutoUtxoMaxBackoffMinutes;
+    }
+
     public RestoreLimits ToRestoreLimits() => new(
         Timeout: TimeSpan.FromSeconds(RestoreTimeoutSeconds),
         DiskCapBytes: RestoreDiskCapBytes,
