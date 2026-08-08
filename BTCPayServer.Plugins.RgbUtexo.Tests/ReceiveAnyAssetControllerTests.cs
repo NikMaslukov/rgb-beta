@@ -26,6 +26,10 @@ public class ReceiveAnyAssetControllerTests
             => CreateInvoiceImpl?.Invoke(walletId, assetId, amount, expiration, btcPayInvoiceId, minConfirmations, ct)
                ?? throw new NotImplementedException();
 
+        public Task<RGBWallet?> GetWalletAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
+
+        public Task<RGBAsset?> GetAssetAsync(string walletId, string assetId, CancellationToken ct = default) => throw new NotImplementedException();
+
         public Task<RGBWallet> CreateWalletAsync(string storeId, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default) => throw new NotImplementedException();
         public Task<string> GetAddressAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
@@ -55,7 +59,8 @@ public class ReceiveAnyAssetControllerTests
             userManager: null!,
             events: null!,
             cache: null!,
-            btcPayOptions: Options.Create(new BTCPayServerOptions()));
+            btcPayOptions: Options.Create(new BTCPayServerOptions()),
+            rateSource: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new TestTempDataProvider());

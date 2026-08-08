@@ -47,6 +47,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         services.AddStartupTask<RGBPluginMigrationRunner>();
 
         services.AddSingleton<CurrencyDataProvider, RgbCurrencyDataProvider>();
+        services.AddSingleton<IRgbRateSource, RgbRateSource>();
         services.AddSingleton<IRgbLibService, RgbLibService>();
         services.AddSingleton<MnemonicProtectionService>();
         services.AddSingleton<RgbWalletSignerProvider>();

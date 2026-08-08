@@ -25,7 +25,8 @@ public class SetupConsentGateTests
             userManager: null!,
             events: null!,
             cache: null!,
-            btcPayOptions: Options.Create(new BTCPayServerOptions()));
+            btcPayOptions: Options.Create(new BTCPayServerOptions()),
+            rateSource: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new TestTempDataProvider());

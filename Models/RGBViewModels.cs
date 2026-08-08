@@ -80,6 +80,7 @@ public class RGBAssetViewModel
     public long Balance { get; set; }
     public long FutureBalance { get; set; }
     public long SpendableBalance { get; set; }
+    public string PricingCode { get; set; } = "";
     public long PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
     public long PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
 }
@@ -237,7 +238,12 @@ public class RGBSettingsViewModel : StoreViewModel
     [Range(1, 100)]
     public int MinConfirmations { get; set; } = 1;
 
-    public bool AllowOneToOneRateFallback { get; set; }
+    public string? PricingCode { get; set; }
+    public string? SuggestedRateRule { get; set; }
+    public string? SuggestedPegRule { get; set; }
+    public string? QuoteCurrency { get; set; }
+    public bool RateRuleMissing { get; set; }
+    public bool UsesDefaultRules { get; set; }
 }
 
 public class RGBBlindReceiveViewModel : StoreViewModel

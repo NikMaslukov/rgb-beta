@@ -24,6 +24,10 @@
     <PackageReference Include="Microsoft.AspNetCore.DataProtection" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="10.0.8" />
     <PackageReference Include="NBitcoin" Version="10.0.5" />
+    <!-- StoreData.GetStoreBlob deserializes through NBXplorer's Serializer. The plugin's project
+         references carry ExcludeAssets=runtime so the host's own dependencies never ship with the
+         plugin, which also keeps this assembly out of the test output unless referenced here. -->
+    <PackageReference Include="NBXplorer.Client" Version="5.0.6" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../BTCPayServer.Plugins.RgbUtexo.csproj" />

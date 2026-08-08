@@ -42,15 +42,16 @@ public class RGBController : Controller
     readonly EventAggregator _events;
     readonly IMemoryCache _cache;
     readonly BTCPayServerOptions _btcPayOptions;
+    readonly IRgbRateSource _rateSource;
 
     public RGBController(IRGBWalletService wallets, StoreRepository stores,
         PaymentMethodHandlerDictionary handlers, RGBPluginDbContextFactory db, ILogger<RGBController> log,
         UserManager<ApplicationUser> userManager, EventAggregator events, IMemoryCache cache,
-        IOptions<BTCPayServerOptions> btcPayOptions)
+        IOptions<BTCPayServerOptions> btcPayOptions, IRgbRateSource rateSource)
     {
         _wallets = wallets; _stores = stores; _handlers = handlers; _db = db; _log = log;
         _userManager = userManager; _events = events; _cache = cache;
-        _btcPayOptions = btcPayOptions.Value;
+        _btcPayOptions = btcPayOptions.Value; _rateSource = rateSource;
     }
 
     [HttpGet]
@@ -845,14 +846,14 @@ public class RGBController : Controller
             UtxoCount = config?.UtxoCount ?? 4,
             UtxoSize = config?.UtxoSize ?? 1000,
             MaxAllocationsPerUtxo = config?.MaxAllocationsPerUtxo ?? 10,
-            MinConfirmations = config?.MinConfirmations ?? 1,
-            AllowOneToOneRateFallback = config?.AllowOneToOneRateFallback ?? false
+            MinConfirmations = config?.MinConfirmations ?? 1
         };
         await PopulateSettingsViewModel(vm, wallet, storeId);
         return View(vm);
     }
 
-    async Task PopulateSettingsViewModel(RGBSettingsViewModel vm, Data.Entities.RGBWallet wallet, string storeId)
+    async Task PopulateSettingsViewModel(RGBSettingsViewModel vm, Data.Entities.RGBWallet wallet, string storeId,
+        bool preferSubmitted = false)
     {
         var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
         vm.StoreId = storeId;
@@ -876,6 +877,59 @@ public class RGBController : Controller
             vm.ConnectionError = ex.Message;
             _log.LogWarning(ex, "RGB wallet connection failed");
         }
+
+        // The notice is advisory and must NEVER fail the settings page, so the WHOLE block —
+        // FindStore, GetRgbConfig, GetStoreBlob and the probe — sits inside one catch.
+        try
+        {
+            var store = await _stores.FindStore(storeId);
+            // On the validation-failure re-render the form redisplays what the merchant submitted, so
+            // the notice must describe that, not what is persisted — otherwise they copy a rule for the
+            // wrong contract. A cleared selection must show nothing, which is why this is a flag rather
+            // than a null-coalesce: "" is a meaningful submitted value.
+            var selectedAssetId = preferSubmitted ? vm.DefaultAssetId : GetRgbConfig(store)?.DefaultAssetId;
+
+            // The whitespace/empty handling lives in RgbPricingNotice.For, which returns None; the
+            // probe is skipped in that case because RgbPricingCode.For would throw on it.
+            if (store is not null)
+            {
+                var quote = store.GetStoreBlob().DefaultCurrency;
+                var probe = string.IsNullOrWhiteSpace(selectedAssetId)
+                    ? null
+                    : await ProbeRateAsync(store, RgbPricingCode.For(selectedAssetId), quote);
+
+                var notice = RgbPricingNotice.For(selectedAssetId, quote, probe);
+                vm.PricingCode = notice.PricingCode;
+                vm.SuggestedRateRule = notice.SuggestedRateRule;
+                vm.SuggestedPegRule = notice.SuggestedPegRule;
+                vm.QuoteCurrency = notice.QuoteCurrency;
+                vm.RateRuleMissing = notice.RateRuleMissing;
+                vm.UsesDefaultRules = notice.UsesDefaultRules;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Render no notice rather than a wrong one, and never break the page.
+            _log.LogWarning(ex, "RGB pricing notice unavailable for store {StoreId}", storeId);
+        }
+    }
+
+    // Timeout and Error deliberately set nothing upstream: they say nothing about the store's
+    // configuration, and a transient exchange problem must not tell a correctly-configured merchant
+    // that their rules are wrong.
+    async Task<RgbRateResult> ProbeRateAsync(BTCPayServer.Data.StoreData store, string pricingCode, string quote)
+    {
+        // The rules are part of the key, not just the pair: this notice is what a merchant reloads to
+        // confirm they have FIXED their rule, and rates are edited on a different controller with no
+        // invalidation hook. Keyed on the pair alone, a stale NoRate would keep claiming failure.
+        var fingerprint = RgbPricingNotice.RateRulesFingerprint(store.GetStoreBlob());
+        var key = $"rgb-rate-probe:{store.Id}:{pricingCode}:{quote}:{fingerprint.GetHashCode(StringComparison.Ordinal)}";
+        if (_cache.TryGetValue<RgbRateResult>(key, out var cached) && cached is not null)
+            return cached;
+
+        var result = await _rateSource.FetchAsync(pricingCode, quote, store, default);
+        _cache.Set(key, result, TimeSpan.FromSeconds(60));
+        return result;
     }
 
     [HttpPost("view-seed")]
@@ -960,7 +1014,7 @@ public class RGBController : Controller
 
         if (!ModelState.IsValid)
         {
-            await PopulateSettingsViewModel(model, wallet, storeId);
+            await PopulateSettingsViewModel(model, wallet, storeId, preferSubmitted: true);
             return View(nameof(Settings), model);
         }
 
@@ -978,8 +1032,7 @@ public class RGBController : Controller
             UtxoCount = model.UtxoCount is > 0 and <= 20 ? model.UtxoCount : 4,
             UtxoSize = model.UtxoSize is >= 546 and <= 100000 ? model.UtxoSize : 1000,
             MaxAllocationsPerUtxo = model.MaxAllocationsPerUtxo is > 0 and <= 50 ? model.MaxAllocationsPerUtxo : 10,
-            MinConfirmations = model.MinConfirmations is >= 1 and <= 100 ? model.MinConfirmations : 1,
-            AllowOneToOneRateFallback = model.AllowOneToOneRateFallback
+            MinConfirmations = model.MinConfirmations is >= 1 and <= 100 ? model.MinConfirmations : 1
         };
 
         store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
@@ -1083,6 +1136,9 @@ static class RgbAssetExtensions
 {
     public static RGBAssetViewModel ToViewModel(this RgbAsset a) => new() {
         AssetId = a.AssetId, Ticker = a.Ticker, Name = a.Name,
+        // ToViewModel has five call sites, two outside any try/catch, and RgbAsset.AssetId defaults
+        // to "" — an unguarded For() would throw and 500 the Assets and Transfers pages.
+        PricingCode = string.IsNullOrWhiteSpace(a.AssetId) ? "" : RgbPricingCode.For(a.AssetId),
         Precision = a.Precision, IssuedSupply = a.IssuedSupply, Balance = a.Balance,
         FutureBalance = a.FutureBalance, SpendableBalance = a.SpendableBalance
     };

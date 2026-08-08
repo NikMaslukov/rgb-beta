@@ -7,6 +7,8 @@ public interface IRGBWalletService
     Task<RGBWallet> CreateWalletAsync(string storeId, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default);
     Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default);
     Task<RGBWallet?> GetWalletForStoreAsync(string storeId, CancellationToken ct = default);
+    Task<RGBWallet?> GetWalletAsync(string walletId, CancellationToken ct = default);
+    Task<RGBAsset?> GetAssetAsync(string walletId, string assetId, CancellationToken ct = default);
     Task<string> GetAddressAsync(string walletId, CancellationToken ct = default);
     Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false);
     Task<int> CreateColorableUtxosAsync(string walletId, int count = 4, int size = 1000, CancellationToken ct = default);

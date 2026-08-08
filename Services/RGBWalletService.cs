@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq.Expressions;
 using System.Text.Json;
 using BTCPayServer.Plugins.RgbUtexo.Data;
 using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
@@ -191,6 +192,20 @@ public class RGBWalletService : IRGBWalletService
     {
         await using var ctx = _db.CreateContext();
         return await ctx.RGBWallets.FindAsync([id], ct);
+    }
+
+    // Extracted rather than inlined so tests 37b/37c can pin the REAL predicate. A ToQueryString()
+    // test over a re-authored lambda proves nothing about production — it stays green if this method
+    // later drops the WalletId filter, which is the false-ACCEPT 37b exists to catch. This mirrors
+    // ActivePendingInvoicePredicate from finding C, and ReplenishPredicateTests works for exactly
+    // this reason.
+    internal static Expression<Func<RGBAsset, bool>> AssetPredicate(string walletId, string assetId)
+        => a => a.WalletId == walletId && a.AssetId == assetId;
+
+    public async Task<RGBAsset?> GetAssetAsync(string walletId, string assetId, CancellationToken ct = default)
+    {
+        await using var ctx = _db.CreateContext();
+        return await ctx.RGBAssets.FirstOrDefaultAsync(AssetPredicate(walletId, assetId), ct);
     }
 
     public async Task<RGBWallet?> GetWalletForStoreAsync(string storeId, CancellationToken ct = default)

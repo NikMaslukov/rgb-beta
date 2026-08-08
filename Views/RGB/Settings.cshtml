@@ -68,7 +68,7 @@
                             {
                                 <option value="@asset.AssetId"
                                         selected="@(Model.DefaultAssetId == asset.AssetId ? "selected" : null)">
-                                    @asset.Ticker - @asset.Name (@asset.AssetId[..20]...)
+                                    @asset.Ticker - @asset.Name (@asset.AssetId[..20]...) — @asset.PricingCode
                                 </option>
                             }
                         </select>
@@ -154,18 +154,60 @@
                     <hr class="my-4" />
                     <h6 class="mb-3"><i class="fa fa-exchange-alt"></i> Exchange Rate</h6>
 
-                    <div class="form-check mb-2">
-                        <input type="checkbox" name="AllowOneToOneRateFallback" value="true"
-                               class="form-check-input" id="allowFallback"
-                               @(Model.AllowOneToOneRateFallback ? "checked" : "") />
-                        <label class="form-check-label" for="allowFallback">
-                            Allow 1:1 rate fallback when exchange rate is unavailable
-                        </label>
-                    </div>
-                    <div class="alert alert-warning small">
-                        <i class="fa fa-exclamation-triangle"></i>
-                        Enable only for stablecoin assets (e.g., USDT, USDC) where 1:1 rate is correct.
-                        When disabled, invoices will not offer RGB payment if exchange rate is unavailable.
+                    @if (!string.IsNullOrEmpty(Model.PricingCode))
+                    {
+                        <div class="mb-2">
+                            <label class="form-label">Pricing currency code for the selected asset</label>
+                            <code class="user-select-all d-inline-block">@Model.PricingCode</code>
+                        </div>
+
+                        <div class="mb-2">
+                            <label class="form-label">Rate rule template</label>
+                            <div><code class="user-select-all d-inline-block">@Model.SuggestedRateRule</code></div>
+                            <div class="form-text">
+                                Replace <code>&lt;exchange&gt;</code> and <code>&lt;MARKET&gt;</code> with a market
+                                that quotes <strong>this contract</strong>. A rule naming another asset's market
+                                prices this contract at that asset's rate.
+                                This line covers invoices priced in @Model.QuoteCurrency, your store's default.
+                                An invoice created in any other currency needs its own rule for that pair, or
+                                RGB will not be offered on it.
+                            </div>
+                        </div>
+
+                        <div class="mb-2">
+                            <label class="form-label">Fixed-rate assertion</label>
+                            <div><code class="user-select-all d-inline-block">@Model.SuggestedPegRule</code></div>
+                            <div class="form-text">
+                                Use only if you are asserting that one unit of this contract is worth
+                                one @Model.QuoteCurrency.
+                            </div>
+                        </div>
+
+                        @if (Model.RateRuleMissing)
+                        {
+                            <div class="alert alert-warning small">
+                                <i class="fa fa-exclamation-triangle"></i>
+                                No rate could be resolved for
+                                <code>@Model.PricingCode@("_")@Model.QuoteCurrency</code>, so RGB payment is
+                                not currently being offered. Either no rate rule matches that pair, or the rate
+                                source is unavailable.
+                                @if (Model.UsesDefaultRules)
+                                {
+                                    <div class="mt-2">
+                                        This store uses BTCPay's default exchange rates, which cannot price an RGB
+                                        contract. A rule naming @Model.PricingCode requires rate scripting.
+                                        Enabling it copies your current default rules into the script, so your other
+                                        payment methods keep pricing — but the script is then a fixed snapshot and
+                                        <strong>no longer tracks BTCPay's future changes to the defaults</strong>.
+                                    </div>
+                                }
+                            </div>
+                        }
+                    }
+
+                    <div class="form-text mb-3">
+                        A wildcard rule (<code>X_...</code>) prices every contract and every payment method alike.
+                        Only a rule naming the pricing code above binds the price to this contract.
                     </div>
 
                     <button type="submit" class="btn btn-primary">

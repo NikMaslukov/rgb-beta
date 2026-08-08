@@ -11,6 +11,9 @@ public sealed class FakeRGBWalletService : IRGBWalletService
     public Task<RGBWallet?> GetWalletForStoreAsync(string storeId, CancellationToken ct = default) =>
         Task.FromResult<RGBWallet?>(null);
 
+    public Task<RGBWallet?> GetWalletAsync(string walletId, CancellationToken ct = default) => throw Reg();
+    public Task<RGBAsset?> GetAssetAsync(string walletId, string assetId, CancellationToken ct = default) => throw Reg();
+
     public Task<RGBWallet> CreateWalletAsync(string storeId, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default) => throw Reg();
     public Task<RGBWallet> RestoreWalletAsync(string storeId, string mnemonic, string selectedNetwork, string? name = null, int? maxAllocationsPerUtxo = null, CancellationToken ct = default) => throw Reg();
     public Task<string> GetAddressAsync(string walletId, CancellationToken ct = default) => throw Reg();

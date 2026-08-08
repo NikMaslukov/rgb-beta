@@ -536,7 +536,7 @@ public class RGBInvoiceListener : IHostedService
                 Id = paymentId,
                 Created = DateTimeOffset.UtcNow,
                 Status = targetStatus,
-                Currency = details.AssetTicker ?? "RGB",
+                Currency = ResolvePaymentCurrency(details),
                 InvoiceDataId = rgbInv.BtcPayInvoiceId,
                 Amount = amountDecimal,
                 PaymentMethodId = RGBPlugin.RGBPaymentMethodId.ToString()
@@ -652,6 +652,13 @@ public class RGBInvoiceListener : IHostedService
                 && i.Status == RGBInvoiceStatus.Pending
                 && i.ExpirationTimestamp != null
                 && i.ExpirationTimestamp > nowUnix;
+
+    // IsNullOrEmpty, not ??: AssetTicker is string? but RGBAsset.Ticker is non-nullable "", so a ??
+    // chain yields "" rather than a usable currency for any prompt this plugin wrote.
+    internal static string ResolvePaymentCurrency(RGBPromptDetails details) =>
+        !string.IsNullOrEmpty(details.PricingCode) ? details.PricingCode
+        : !string.IsNullOrEmpty(details.AssetTicker) ? details.AssetTicker
+        : "RGB";
 
     internal static bool IsAssetMatch(string? invoiceAssetId, string transferAssetId)
     {
