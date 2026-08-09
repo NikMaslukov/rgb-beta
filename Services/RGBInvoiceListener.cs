@@ -353,19 +353,51 @@ public class RGBInvoiceListener : IHostedService
             }
             else if (result.NewStatus.HasValue)
             {
+                var registrationFailed = false;
+                if (result.PaymentStatus.HasValue && !string.IsNullOrEmpty(inv.BtcPayInvoiceId))
+                {
+                    foreach (var t in result.PaymentsToRecord)
+                    {
+                        try
+                        {
+                            if (await RecordOrUpdatePayment(inv, t, result.PaymentStatus.Value, wallet.StoreId, ct)
+                                == PaymentRegistration.Failed)
+                                registrationFailed = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            // WHY caught rather than propagated: one invoice's registration failure must
+                            // not abort the sweep for every other invoice in this wallet. WHY it sets the
+                            // flag: the status advance below would otherwise commit Settled and close the
+                            // only door through which this payment can ever be retried.
+                            _log.LogWarning(ex, "Failed to record payment for invoice {Id} transfer {Idx}", inv.BtcPayInvoiceId, t.Idx);
+                            registrationFailed = true;
+                        }
+                    }
+                }
+
+                // The condition is CALLED, not inlined, so it can be tested as a pure function and
+                // pinned as a call site.
+                if (!ShouldCommitAdvance(result.NewStatus, registrationFailed))
+                {
+                    // LogCritical, not LogWarning, and deliberately repeated every sweep. A held invoice
+                    // is a paid customer whose invoice will not settle — the same customer-visible
+                    // symptom as the bug this change fixes. A deterministic failure holds it forever, and
+                    // a warning logged once per poll is not an alarm. This matches the existing
+                    // zero-amount escalation in this same method.
+                    _log.LogCritical("invoice {Id} held at {Status}: payment registration failed, will retry next sweep",
+                        inv.Id, inv.Status);
+                    continue;
+                }
+
+                // The entity writes come AFTER registration so a blocked advance leaves the row
+                // entirely untouched — no half-written Txid on a status that did not move.
                 inv.Status = result.NewStatus.Value;
                 inv.Txid = result.Txid;
                 inv.ReceivedAmount = result.ReceivedAmount;
                 if (result.NewStatus == RGBInvoiceStatus.Settled)
                     inv.SettledAt = DateTimeOffset.UtcNow;
-                if (result.PaymentStatus.HasValue && !string.IsNullOrEmpty(inv.BtcPayInvoiceId))
-                {
-                    foreach (var t in result.PaymentsToRecord)
-                    {
-                        try { await RecordOrUpdatePayment(inv, t, result.PaymentStatus.Value, wallet.StoreId, ct); }
-                        catch (Exception ex) { _log.LogWarning(ex, "Failed to record payment for invoice {Id} transfer {Idx}", inv.BtcPayInvoiceId, t.Idx); }
-                    }
-                }
+
                 _log.LogInformation("invoice {Id} → {Status} (amount={Amount})", inv.Id, result.NewStatus, result.ReceivedAmount);
             }
         }
@@ -484,27 +516,57 @@ public class RGBInvoiceListener : IHostedService
         if (anyChanged) await ctx.SaveChangesAsync(ct);
     }
 
-    async Task RecordOrUpdatePayment(RGBInvoice rgbInv, RgbTransfer tx, BTCPayServer.Data.PaymentStatus targetStatus, string expectedStoreId, CancellationToken ct)
+    internal enum PaymentRegistration
+    {
+        Recorded,
+        Declined,
+        Failed
+    }
+
+    // WHY a separate function: ProcessTransfers cannot be driven in a unit test (it opens a DB
+    // context), so the decision that governs whether a payment can be lost must live somewhere a
+    // test can reach.
+    internal static bool ShouldCommitAdvance(RGBInvoiceStatus? newStatus, bool registrationFailed)
+        => !(registrationFailed && newStatus == RGBInvoiceStatus.Settled);
+
+    // WHY bounded to Settled: an underpaid invoice never leaves the sweep filter, so an unbounded
+    // republish would emit one event per poll for the life of the invoice.
+    internal static bool ShouldRepublishOnAlreadyRecorded(BTCPayServer.Data.PaymentStatus target)
+        => target == BTCPayServer.Data.PaymentStatus.Settled;
+
+    // WHY re-query rather than trust the null: AddPayment returns null for a failed insert and for a
+    // duplicate alike, and treating the failure as success is the exact defect this gate closes.
+    internal static PaymentRegistration ClassifyNullAddPayment(
+        InvoiceEntity? after, PaymentPrompt? prompt, string paymentId)
+    {
+        if (after is null) return PaymentRegistration.Declined;
+        if (prompt is null) return PaymentRegistration.Declined;
+        return after.GetPayments(false).Any(p => p.Id == paymentId)
+            ? PaymentRegistration.Recorded
+            : PaymentRegistration.Failed;
+    }
+
+    async Task<PaymentRegistration> RecordOrUpdatePayment(RGBInvoice rgbInv, RgbTransfer tx, BTCPayServer.Data.PaymentStatus targetStatus, string expectedStoreId, CancellationToken ct)
     {
         var invoiceEntity = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
         if (invoiceEntity == null)
         {
             _log.LogWarning("BTCPay invoice {Id} not found", rgbInv.BtcPayInvoiceId);
-            return;
+            return PaymentRegistration.Declined;
         }
 
         if (!RGBPaymentMethodHandler.WalletBelongsToStore(invoiceEntity.StoreId, expectedStoreId))
         {
             _log.LogWarning("BTCPay invoice {Id} (store {InvoiceStoreId}) does not belong to wallet store {ExpectedStoreId}; skipping payment record",
                 rgbInv.BtcPayInvoiceId, invoiceEntity.StoreId, expectedStoreId);
-            return;
+            return PaymentRegistration.Declined;
         }
 
         var prompt = invoiceEntity.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
         if (prompt == null)
         {
             _log.LogWarning("No RGB payment prompt on invoice {Id}", rgbInv.BtcPayInvoiceId);
-            return;
+            return PaymentRegistration.Declined;
         }
 
         var details = _handler.ParsePaymentPromptDetails(prompt.Details);
@@ -528,6 +590,15 @@ public class RGBInvoiceListener : IHostedService
                 _log.LogInformation("Updated payment {PaymentId} to {Status} for invoice {InvoiceId}",
                     paymentId, targetStatus, rgbInv.BtcPayInvoiceId);
             }
+            // WHY republish when nothing changed: if a previous attempt inserted the payment and then
+            // lost its event, BTCPay never re-derived the invoice. Asking it to re-derive is a no-op
+            // when nothing was lost and a repair when something was.
+            else if (ShouldRepublishOnAlreadyRecorded(targetStatus))
+            {
+                _events.Publish(new Events.InvoiceNeedUpdateEvent(rgbInv.BtcPayInvoiceId));
+            }
+
+            return PaymentRegistration.Recorded;
         }
         else
         {
@@ -550,15 +621,31 @@ public class RGBInvoiceListener : IHostedService
             });
 
             var payment = await _payments.AddPayment(paymentData);
-            if (payment != null)
+            if (payment == null)
             {
-                invoiceEntity = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
-                if (invoiceEntity != null)
-                    _events.Publish(new InvoiceEvent(invoiceEntity, InvoiceEvent.ReceivedPayment) { Payment = payment });
+                // AddPayment returns null for a missing invoice, a missing prompt/handler AND any
+                // DbUpdateException — so the null cannot be read as "already added". Classify from
+                // observed state instead, against a freshly fetched invoice.
+                var after = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
+                var afterPrompt = after?.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
+                var classified = ClassifyNullAddPayment(after, afterPrompt, paymentId);
 
-                _log.LogInformation("Recorded {Status} payment {PaymentId} for invoice {InvoiceId}: {Amount} {Ticker}",
-                    targetStatus, paymentId, rgbInv.BtcPayInvoiceId, amountDecimal, details.AssetTicker);
+                if (classified == PaymentRegistration.Recorded)
+                    _events.Publish(new Events.InvoiceNeedUpdateEvent(rgbInv.BtcPayInvoiceId));
+
+                _log.LogWarning("AddPayment returned null for {PaymentId} on invoice {InvoiceId}; classified as {Outcome}",
+                    paymentId, rgbInv.BtcPayInvoiceId, classified);
+                return classified;
             }
+
+            invoiceEntity = await _invoices.GetInvoice(rgbInv.BtcPayInvoiceId);
+            if (invoiceEntity != null)
+                _events.Publish(new InvoiceEvent(invoiceEntity, InvoiceEvent.ReceivedPayment) { Payment = payment });
+
+            _log.LogInformation("Recorded {Status} payment {PaymentId} for invoice {InvoiceId}: {Amount} {Ticker}",
+                targetStatus, paymentId, rgbInv.BtcPayInvoiceId, amountDecimal, details.AssetTicker);
+
+            return PaymentRegistration.Recorded;
         }
     }
 
