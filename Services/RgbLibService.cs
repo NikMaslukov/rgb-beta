@@ -24,7 +24,9 @@ public class RgbLibService : IRgbLibService
     readonly FieldInfo _onlineJsonField;
     readonly FieldInfo _resultField;
     readonly FieldInfo _innerField;
-    
+    readonly Action<IntPtr> _stringFree;
+    readonly Func<IntPtr, string?> _marshal;
+
     readonly MethodInfo _blindReceiveMethod;
     readonly MethodInfo _listUnspentsMethod;
     readonly MethodInfo _createUtxosBeginMethod;
@@ -40,15 +42,31 @@ public class RgbLibService : IRgbLibService
         RGBConfiguration config,
         RGBPluginDbContextFactory db,
         ILogger<RgbLibService> log)
+        : this(config, db, log,
+            typeof(RgbLibWallet).Assembly.GetType("RgbLib.CResultString")!,
+            rgblib_string_free,
+            Marshal.PtrToStringUTF8)
+    {
+    }
+
+    internal RgbLibService(
+        RGBConfiguration config,
+        RGBPluginDbContextFactory db,
+        ILogger<RgbLibService> log,
+        Type cResultStringType,
+        Action<IntPtr> stringFree,
+        Func<IntPtr, string?> marshal)
     {
         _config = config;
         _db = db;
         _log = log;
-        
+        _stringFree = stringFree;
+        _marshal = marshal;
+
         var assembly = typeof(RgbLibWallet).Assembly;
         _nativeMethodsType = assembly.GetType("RgbLib.NativeMethods")!;
-        _cResultStringType = assembly.GetType("RgbLib.CResultString")!;
-        
+        _cResultStringType = cResultStringType;
+
         _walletField = typeof(RgbLibWallet).GetField("_wallet", BindingFlags.NonPublic | BindingFlags.Instance)!;
         _onlineJsonField = typeof(RgbLibWallet).GetField("_onlineJson", BindingFlags.NonPublic | BindingFlags.Instance)!;
         _resultField = _cResultStringType.GetField("result")!;
@@ -282,12 +300,8 @@ public class RgbLibService : IRgbLibService
             var args = new object?[] { walletStruct, assetId, assignment, expirationTs, transportEndpoints, minConfirmations.ToString() };
             var result = _blindReceiveMethod.Invoke(null, args);
             
-            var invoiceJson = GetNativeResult(result);
-            if (invoiceJson == null)
-            {
-                throw new RgbLibException(GetNativeError(result) ?? "blind_receive failed");
-            }
-            
+            var invoiceJson = Require(ReadNativeResult(result), "blind_receive");
+
             var invoice = JsonSerializer.Deserialize<BlindReceiveResponse>(invoiceJson);
             return new InvoiceResponse
             {
@@ -312,17 +326,17 @@ public class RgbLibService : IRgbLibService
             var args = new object?[] { walletStruct, onlineJson, false, false };
             var result = _listUnspentsMethod.Invoke(null, args);
             
-            var unspentsJson = GetNativeResult(result);
+            var native = ReadNativeResult(result);
+            var unspentsJson = native.Payload;
             // WHY throw rather than return an empty list: a genuinely empty wallet yields Ok with "[]", so a
             // null payload means the native call FAILED. Returning empty made a failure indistinguishable
             // from "this wallet has no UTXOs", and the replenishment sweep then read zero colorable UTXOs,
             // computed zero free slots, and signed a UTXO-creation transaction because of an error — the
             // false-ACCEPT its own invariant forbids. Observed live on 2026-08-04 against a wallet that had
-            // 23 UTXOs at the time. Six sibling calls in this file already throw on a null payload;
-            // ListBtcTransactionsAsync still returns an empty list on the same failure, which is the shape
-            // removed here. No signing decision reads it, so it is left for its own change.
+            // 23 UTXOs at the time. Seven sibling calls in this file already throw on a null payload;
+            // ListBtcTransactionsAsync was the last one that did not, and was closed under finding G.
             if (unspentsJson == null)
-                throw new RgbLibException(GetNativeError(result) ?? "list_unspents failed");
+                throw new RgbLibException(native.Error ?? "list_unspents failed");
             
             var unspents = JsonSerializer.Deserialize<List<UnspentOutputResponse>>(unspentsJson);
             return unspents?.Select(u => new UnspentOutput(
@@ -355,13 +369,7 @@ public class RgbLibService : IRgbLibService
             var args = new object?[] { walletStruct, onlineJson, false };
             var result = _listTransactionsMethod.Invoke(null, args);
 
-            var json = GetNativeResult(result);
-            if (json == null)
-            {
-                return new List<BtcTransaction>();
-            }
-
-            return JsonSerializer.Deserialize<List<BtcTransaction>>(json) ?? [];
+            return InterpretListBtcTransactions(ReadNativeResult(result));
         }, ct);
     }
 
@@ -380,18 +388,7 @@ public class RgbLibService : IRgbLibService
 
             _walletField.SetValue(wallet, args[0]);
 
-            var psbt = GetNativeResult(result);
-            if (psbt == null)
-            {
-                var error = GetNativeError(result);
-                if (error?.Contains("AlreadyAvailable", StringComparison.OrdinalIgnoreCase) == true)
-                {
-                    return "";
-                }
-                throw new RgbLibException(error ?? "create_utxos_begin failed");
-            }
-            
-            return psbt;
+            return InterpretCreateUtxosBegin(ReadNativeResult(result));
         }, ct);
     }
 
@@ -410,13 +407,7 @@ public class RgbLibService : IRgbLibService
 
             _walletField.SetValue(wallet, args[0]);
 
-            var resultJson = GetNativeResult(result);
-            if (resultJson == null)
-            {
-                throw new RgbLibException(GetNativeError(result) ?? "create_utxos_end failed");
-            }
-            
-            return resultJson;
+            return Require(ReadNativeResult(result), "create_utxos_end");
         }, ct);
     }
 
@@ -513,8 +504,7 @@ public class RgbLibService : IRgbLibService
 
             // WHY: fail-closed — anything other than a confirmed Ok-with-payload (null result,
             // Err, or Ok with a null pointer) must throw so the write-ahead path quarantines.
-            if (GetNativeResult(result) == null)
-                throw new RgbLibException(GetNativeError(result) ?? "refresh failed");
+            Require(ReadNativeResult(result), "refresh");
         }, ct);
     }
 
@@ -572,11 +562,7 @@ public class RgbLibService : IRgbLibService
 
             _walletField.SetValue(wallet, args[0]);
 
-            var psbt = GetNativeResult(result);
-            if (psbt == null)
-                throw new RgbLibException(GetNativeError(result) ?? "send_begin failed");
-
-            return psbt;
+            return Require(ReadNativeResult(result), "send_begin");
         }, ct);
     }
 
@@ -595,9 +581,7 @@ public class RgbLibService : IRgbLibService
 
             _walletField.SetValue(wallet, args[0]);
 
-            var json = GetNativeResult(result);
-            if (json == null)
-                throw new RgbLibException(GetNativeError(result) ?? "send_end failed");
+            var json = Require(ReadNativeResult(result), "send_end");
 
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("txid", out var txidProp))
@@ -646,7 +630,7 @@ public class RgbLibService : IRgbLibService
     [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
     static extern void rgblib_string_free(IntPtr ptr);
 
-    string ReadRgbLibString(CResultString result, string call)
+    internal string ReadRgbLibString(CResultString result, string call)
     {
         try
         {
@@ -658,7 +642,7 @@ public class RgbLibService : IRgbLibService
         finally
         {
             if (result.inner != IntPtr.Zero)
-                rgblib_string_free(result.inner);
+                _stringFree(result.inner);
         }
     }
 
@@ -701,12 +685,7 @@ public class RgbLibService : IRgbLibService
         try
         {
             var dataResult = rgblib_invoice_data(ref invoiceStruct);
-            var json = (string?)null;
-            if (dataResult.result == CResultValue.Ok && dataResult.inner != IntPtr.Zero)
-                json = Marshal.PtrToStringUTF8(dataResult.inner);
-
-            if (json == null)
-                throw new RgbLibException("Failed to decode invoice data");
+            var json = ReadRgbLibString(dataResult, "invoice_data");
 
             _log.LogDebug("Decoded invoice for recipient {RecipientId}",
                 json.Length > 200 ? "(large payload)" : "(ok)");
@@ -749,25 +728,55 @@ public class RgbLibService : IRgbLibService
         };
     }
 
-    string? GetNativeResult(object? result)
+    // Exactly one of Payload / Error is non-null for a well-formed result. Both null means the
+    // native side returned something this binding cannot interpret, which is a failure — never an
+    // empty success.
+    internal readonly record struct NativeCallResult(string? Payload, string? Error)
     {
-        if (result == null) return null;
-        var resultValue = _resultField.GetValue(result);
-        var innerPtr = (IntPtr)_innerField.GetValue(result)!;
-        if (resultValue?.ToString() == "Ok" && innerPtr != IntPtr.Zero)
-            return Marshal.PtrToStringUTF8(innerPtr);
-        return null;
+        internal bool IsOk => Payload != null;
     }
 
-    string? GetNativeError(object? result)
+    internal NativeCallResult ReadNativeResult(object? result)
     {
-        if (result == null) return null;
-        var resultValue = _resultField.GetValue(result);
-        var innerPtr = (IntPtr)_innerField.GetValue(result)!;
-        if (resultValue?.ToString() == "Err" && innerPtr != IntPtr.Zero)
-            return Marshal.PtrToStringUTF8(innerPtr);
-        return null;
+        if (result == null) return default;
+
+        // Defence in depth, not the mechanism: GetValue would already throw on a foreign type.
+        // Making the refusal explicit means an unrecognised shape leaks rather than risking a
+        // foreign free.
+        if (result.GetType() != _cResultStringType) return default;
+
+        var isOk = _resultField.GetValue(result)?.ToString() == "Ok";
+        var ptr = (IntPtr)_innerField.GetValue(result)!;
+        if (ptr == IntPtr.Zero) return default;
+
+        // Zero the box BEFORE freeing: the pointer becomes unreachable through this result, so a
+        // second read frees nothing instead of corrupting the heap.
+        _innerField.SetValue(result, IntPtr.Zero);
+        try
+        {
+            var payload = _marshal(ptr);
+            return isOk ? new NativeCallResult(payload, null) : new NativeCallResult(null, payload);
+        }
+        finally
+        {
+            _stringFree(ptr);
+        }
     }
+
+    internal static string Require(NativeCallResult r, string call)
+        => r.Payload ?? throw new RgbLibException(r.Error ?? $"{call} failed");
+
+    internal static string InterpretCreateUtxosBegin(NativeCallResult r)
+    {
+        if (r.IsOk) return r.Payload!;
+        // WHY the error text: rgb-lib reports "already has enough UTXOs" as a failure, and the
+        // caller treats that as success-with-nothing-to-do.
+        if (r.Error?.Contains("AlreadyAvailable", StringComparison.OrdinalIgnoreCase) == true) return "";
+        throw new RgbLibException(r.Error ?? "create_utxos_begin failed");
+    }
+
+    internal static List<BtcTransaction> InterpretListBtcTransactions(NativeCallResult r)
+        => JsonSerializer.Deserialize<List<BtcTransaction>>(Require(r, "list_transactions")) ?? [];
 
     public void Dispose()
     {

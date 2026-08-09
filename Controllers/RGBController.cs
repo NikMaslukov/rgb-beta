@@ -513,18 +513,9 @@ public class RGBController : Controller
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
         var vm = new RGBSendBtcViewModel { StoreId = storeId };
-        try
-        {
-            var balance = await _wallets.GetBtcBalanceAsync(wallet.Id);
-            var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
-            vm.VanillaBalance = balance.Vanilla.Spendable;
-            vm.ColoredBalance = balance.Colored.Spendable;
-            vm.VanillaUtxoCount = unspents.Count(u => !u.Utxo.Colorable);
-        }
-        catch (Exception ex)
-        {
-            TempData["ErrorMessage"] = $"Failed to load wallet data: {ex.Message}";
-        }
+        var failure = await PopulateSendBtcBalance(wallet, vm);
+        if (failure != null)
+            TempData["ErrorMessage"] = $"Failed to load wallet data: {failure}";
 
         return View(vm);
     }
@@ -568,7 +559,10 @@ public class RGBController : Controller
         }
     }
 
-    async Task PopulateSendBtcBalance(Data.Entities.RGBWallet wallet, RGBSendBtcViewModel model)
+    // Returns null on success, otherwise the failure detail. WHY returned rather than only logged:
+    // the GET handler surfaces the native message to the merchant, and a log-only catch would
+    // silently downgrade that report to nothing.
+    internal async Task<string?> PopulateSendBtcBalance(Data.Entities.RGBWallet wallet, RGBSendBtcViewModel model)
     {
         try
         {
@@ -577,8 +571,14 @@ public class RGBController : Controller
             model.VanillaBalance = balance.Vanilla.Spendable;
             model.ColoredBalance = balance.Colored.Spendable;
             model.VanillaUtxoCount = unspents.Count(u => !u.Utxo.Colorable);
+            return null;
         }
-        catch (Exception ex) { _log.LogWarning(ex, "Failed to populate balance for send form"); }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Failed to populate balance for send form");
+            model.BalanceUnavailable = true;
+            return ex.Message;
+        }
     }
 
     [HttpGet("send-asset")]

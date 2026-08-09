@@ -182,6 +182,10 @@ public class RGBSendBtcViewModel : StoreViewModel
     public long VanillaBalance { get; set; }
     public long ColoredBalance { get; set; }
     public int VanillaUtxoCount { get; set; }
+
+    // WHY: the balance fields default to 0, which a merchant reads as "no funds" rather than
+    // "lookup failed". The view needs to tell those two apart.
+    public bool BalanceUnavailable { get; set; }
 }
 
 public class RGBSendAssetViewModel : StoreViewModel

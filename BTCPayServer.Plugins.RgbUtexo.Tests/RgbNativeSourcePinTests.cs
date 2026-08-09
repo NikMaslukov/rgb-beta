@@ -309,6 +309,225 @@ public class RgbNativeSourcePinTests
         firstArgument(baseDir);
     }
 
+    // ---- G1-T10: the native result is read once, freed once, and every site routes through it ----
+
+    const string RgbLibFile = "Services/RgbLibService.cs";
+    const string RgbLibServiceType = "BTCPayServer.Plugins.RgbUtexo.Services.RgbLibService";
+
+    // The five plain sites: payload or throw. The two seam-B sites branch on the error instead.
+    static readonly (string Method, string Consumer)[] ReflectedSites =
+    [
+        ("BlindReceiveAsync", "Require"),
+        ("CreateUtxosEndAsync", "Require"),
+        ("RefreshAsync", "Require"),
+        ("SendBeginAsync", "Require"),
+        ("SendEndAsync", "Require"),
+        ("CreateUtxosBeginAsync", "InterpretCreateUtxosBegin"),
+        ("ListBtcTransactionsAsync", "InterpretListBtcTransactions"),
+    ];
+
+    [Fact] // G1-T10(a)
+    public void TheNonFreeingReaders_AreGoneFromTheFile()
+    {
+        var tree = PluginCompilation.Shared.Tree(RgbLibFile);
+
+        var survivors = tree.GetRoot().DescendantNodes()
+            .Where(node => node switch
+            {
+                MethodDeclarationSyntax m => m.Identifier.ValueText is "GetNativeResult" or "GetNativeError",
+                IdentifierNameSyntax i => i.Identifier.ValueText is "GetNativeResult" or "GetNativeError",
+                _ => false
+            })
+            .ToList();
+
+        Assert.True(survivors.Count == 0,
+            "GetNativeResult/GetNativeError never freed their payload; leaving either in place leaves a "
+            + $"non-freeing reader for a future edit to reach for, found {survivors.Count} reference(s)");
+    }
+
+    [Theory] // G1-T10(c) and (e) — the five plain sites call Require; the two seam-B sites call their function
+    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
+    [InlineData(4)] [InlineData(5)] [InlineData(6)]
+    public void EachReflectedSite_CallsItsExtractedConsumer(int index)
+    {
+        var (methodName, consumer) = ReflectedSites[index];
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+
+        var method = RoslynPins.Method(tree, "RgbLibService", methodName);
+        RoslynPins.AssertNoLocalShadow(method, consumer, "ReadNativeResult");
+
+        var call = SingleInvocation(RoslynPins.BodyOf(method), consumer);
+        var symbol = Assert.IsAssignableFrom<IMethodSymbol>(RoslynPins.BoundSymbol(plugin, tree, call));
+        Assert.Equal(consumer, symbol.Name);
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
+    }
+
+    [Theory] // G1-T10(g) — and the consumer is fed the READER's output, not a fabricated result
+    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
+    [InlineData(4)] [InlineData(5)] [InlineData(6)]
+    public void EachReflectedSite_FeedsItsConsumerTheReadersOutput(int index)
+    {
+        var (methodName, consumer) = ReflectedSites[index];
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+
+        var method = RoslynPins.Method(tree, "RgbLibService", methodName);
+        var call = SingleInvocation(RoslynPins.BodyOf(method), consumer);
+
+        // Pinning only that the consumer is CALLED leaves Require(new NativeCallResult("", null), …)
+        // green: a synthesised result never reads the native pointer and never frees it, so the site
+        // leaks on every call while every test and pin stays green.
+        var argument = Assert.IsType<InvocationExpressionSyntax>(call.ArgumentList.Arguments[0].Expression);
+        AssertReadsTheNativeResult(plugin, tree, argument);
+    }
+
+    [Fact] // G1-T10(g) for the one site whose statement shape is fixed by P-C8
+    public void ListUnspents_ReadsThroughTheReader_AndKeepsItsPinnedShape()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var body = RoslynPins.BodyOf(RoslynPins.Method(tree, "RgbLibService", "ListUnspentsAsync"));
+
+        // This site cannot use Require: P-C8 pins an `if (<identifier> == null) throw` statement, which
+        // the Require form does not contain. So the reader's output is pinned through its local instead.
+        var native = SingleDeclarator(body, "native");
+        var read = Assert.IsType<InvocationExpressionSyntax>(native.Initializer!.Value);
+        AssertReadsTheNativeResult(plugin, tree, read);
+
+        var payload = SingleDeclarator(body, "unspentsJson");
+        var access = Assert.IsType<MemberAccessExpressionSyntax>(payload.Initializer!.Value);
+        Assert.Equal("Payload", access.Name.Identifier.ValueText);
+        Assert.True(access.Expression is IdentifierNameSyntax { Identifier.ValueText: "native" },
+            $"the payload must come from the reader's result, found '{access.Expression}'");
+
+        var errors = body.DescendantNodes().OfType<MemberAccessExpressionSyntax>()
+            .Where(m => m.Name.Identifier.ValueText == "Error"
+                        && m.Expression is IdentifierNameSyntax { Identifier.ValueText: "native" })
+            .ToList();
+        Assert.True(errors.Count == 1,
+            $"the throw must report the reader's error, found {errors.Count} native.Error reference(s)");
+    }
+
+    [Fact] // G1-T10(f) — the production wiring
+    public void TheProductionConstructor_PassesTheRealStringFree()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+
+        // RoslynPins.Method matches only MethodDeclarationSyntax and BodyOf returns only Body /
+        // ExpressionBody, so neither can see a constructor initializer — this clause is hand-rolled.
+        var constructors = tree.GetRoot().DescendantNodes().OfType<ConstructorDeclarationSyntax>()
+            .Where(c => c.Identifier.ValueText == "RgbLibService"
+                        && c.ParameterList.Parameters.Count == 3)
+            .ToList();
+        Assert.True(constructors.Count == 1,
+            $"expected exactly one three-argument RgbLibService constructor, found {constructors.Count}");
+
+        var initializer = constructors[0].Initializer;
+        Assert.True(initializer != null,
+            "the public constructor must delegate to the internal one so the free delegate is an "
+            + "argument this clause can pin; a field initializer would satisfy the runtime and hide it");
+
+        var arguments = initializer!.ArgumentList.Arguments;
+        Assert.True(arguments.Count == 6,
+            $"expected the reflected type, the free delegate and the marshaller, found {arguments.Count} argument(s)");
+
+        // A no-op lambda here leaves every unit test green — they count the TEST delegate — and ships
+        // the leak unfixed. The argument must name the real deallocator.
+        var free = Assert.IsType<IdentifierNameSyntax>(arguments[4].Expression);
+        Assert.Equal("rgblib_string_free", free.Identifier.ValueText);
+        var symbol = Assert.IsAssignableFrom<IMethodSymbol>(RoslynPins.BoundSymbol(plugin, tree, free));
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
+    }
+
+    [Fact] // G1-T10(b) — no non-freeing reader can exist
+    public void EveryCResultStringPayloadRead_HappensInsideOneOfTheTwoReaders()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var model = plugin.Model(tree);
+        string[] readers = ["ReadNativeResult", "ReadRgbLibString"];
+
+        // Resolved by DECLARING TYPE, not by the identifier: this file also reads `.inner` on a
+        // CResult (the invoice_new path this change deliberately leaves unfreed), and a name-based
+        // clause would redden that correct code.
+        var typed = tree.GetRoot().DescendantNodes().OfType<MemberAccessExpressionSyntax>()
+            .Where(m => m.Name.Identifier.ValueText == "inner")
+            .Where(m => model.GetSymbolInfo(m).Symbol is IFieldSymbol f
+                        && f.ContainingType.ToDisplayString() == "RgbLib.CResultString")
+            .ToList();
+        Assert.True(typed.Count > 0,
+            "no CResultString.inner read bound at all — the clause would pass vacuously");
+
+        foreach (var read in typed)
+        {
+            var enclosing = read.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+            Assert.True(enclosing != null && readers.Contains(enclosing.Identifier.ValueText),
+                $"CResultString.inner is read in '{enclosing?.Identifier.ValueText ?? "<no method>"}'; "
+                + "only the two readers may touch it, because only they free it");
+        }
+
+        // The reflected route to the same field. The constructor resolves the FieldInfo and is the
+        // one place outside a reader that may name it.
+        var reflected = tree.GetRoot().DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(i => i.Identifier.ValueText == "_innerField")
+            .Where(i => i.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault() is not { } m
+                        || !readers.Contains(m.Identifier.ValueText))
+            .ToList();
+        Assert.True(reflected.All(i => i.Ancestors().OfType<ConstructorDeclarationSyntax>().Any()),
+            "_innerField is used outside the two readers and outside the constructor — that is a "
+            + "second reader of the native pointer, which is how the double-free comes back");
+    }
+
+    [Fact] // G1-T10(d)
+    public void DecodeInvoice_RoutesTheInvoiceDataResultThroughTheTypedReader()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var method = RoslynPins.Method(tree, "RgbLibService", "DecodeInvoice");
+        var body = RoslynPins.BodyOf(method);
+        RoslynPins.AssertNoLocalShadow(method, "ReadRgbLibString");
+
+        var read = SingleInvocation(body, "ReadRgbLibString");
+        var symbol = Assert.IsAssignableFrom<IMethodSymbol>(RoslynPins.BoundSymbol(plugin, tree, read));
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
+
+        // The argument is pinned, not merely the call: handing the reader any other CResultString
+        // would leave invoice_data's payload unfreed while this clause stayed green.
+        Assert.True(read.ArgumentList.Arguments[0].Expression
+                is IdentifierNameSyntax { Identifier.ValueText: "dataResult" },
+            $"the reader must be given invoice_data's own result, found '{read.ArgumentList.Arguments[0]}'");
+
+        var declared = SingleDeclarator(body, "dataResult");
+        var call = Assert.IsType<InvocationExpressionSyntax>(declared.Initializer!.Value);
+        Assert.Equal("rgblib_invoice_data", NameOf(call));
+    }
+
+    static void AssertReadsTheNativeResult(PluginCompilation plugin, SyntaxTree tree,
+        InvocationExpressionSyntax read)
+    {
+        Assert.Equal("ReadNativeResult", NameOf(read));
+        var symbol = Assert.IsAssignableFrom<IMethodSymbol>(RoslynPins.BoundSymbol(plugin, tree, read));
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
+
+        Assert.True(read.ArgumentList.Arguments.Count == 1,
+            $"the reader takes the invoked result and nothing else, found {read.ArgumentList.Arguments.Count}");
+        Assert.True(read.ArgumentList.Arguments[0].Expression
+                is IdentifierNameSyntax { Identifier.ValueText: "result" },
+            $"the reader must be given the native call's own result, found '{read.ArgumentList.Arguments[0]}'");
+    }
+
+    static VariableDeclaratorSyntax SingleDeclarator(SyntaxNode body, string name)
+    {
+        var matches = body.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Identifier.ValueText == name)
+            .ToList();
+        Assert.True(matches.Count == 1, $"expected exactly one declaration of '{name}', found {matches.Count}");
+        Assert.NotNull(matches[0].Initializer);
+        return matches[0];
+    }
+
     static InvocationExpressionSyntax AssertExpressionBodiedInvocation(MethodDeclarationSyntax method)
     {
         Assert.Null(method.Body);
