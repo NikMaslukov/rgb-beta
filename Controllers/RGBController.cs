@@ -213,7 +213,7 @@ public class RGBController : Controller
             var store = await _stores.FindStore(storeId);
             if (store != null)
             {
-                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id, MaxAllocationsPerUtxo = maxAlloc };
+                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id };
                 store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
                 var blob = store.GetStoreBlob();
                 blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, true);
@@ -271,7 +271,7 @@ public class RGBController : Controller
             var store = await _stores.FindStore(storeId);
             if (store != null)
             {
-                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id, MaxAllocationsPerUtxo = maxAlloc };
+                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id };
                 store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
                 var blob = store.GetStoreBlob();
                 blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, true);
@@ -367,7 +367,7 @@ public class RGBController : Controller
             var store = await _stores.FindStore(storeId);
             if (store != null)
             {
-                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id, MaxAllocationsPerUtxo = maxAlloc };
+                var config = new RGBPaymentMethodConfig { WalletId = wallet.Id };
                 store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
                 var blob = store.GetStoreBlob();
                 blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, true);
@@ -845,7 +845,6 @@ public class RGBController : Controller
             DefaultAssetId = config?.DefaultAssetId,
             UtxoCount = config?.UtxoCount ?? 4,
             UtxoSize = config?.UtxoSize ?? 1000,
-            MaxAllocationsPerUtxo = config?.MaxAllocationsPerUtxo ?? 10,
             MinConfirmations = config?.MinConfirmations ?? 1
         };
         await PopulateSettingsViewModel(vm, wallet, storeId);
@@ -865,6 +864,9 @@ public class RGBController : Controller
         vm.Network = wallet.Network;
         vm.CreatedAt = wallet.CreatedAt;
         vm.ElectrumUrl = networkSettings.ElectrumUrl;
+        // WHY here and not inside either try: both catches only log, so an assignment inside one is
+        // silently skipped on exactly the degraded paths they exist to tolerate.
+        vm.MaxAllocationsPerUtxo = wallet.MaxAllocationsPerUtxo;
 
         try
         {
@@ -1025,15 +1027,7 @@ public class RGBController : Controller
             return RedirectToAction(nameof(Settings), new { storeId });
         }
 
-        var config = new RGBPaymentMethodConfig
-        {
-            WalletId = wallet.Id,
-            DefaultAssetId = string.IsNullOrEmpty(model.DefaultAssetId) ? null : model.DefaultAssetId,
-            UtxoCount = model.UtxoCount is > 0 and <= 20 ? model.UtxoCount : 4,
-            UtxoSize = model.UtxoSize is >= 546 and <= 100000 ? model.UtxoSize : 1000,
-            MaxAllocationsPerUtxo = model.MaxAllocationsPerUtxo is > 0 and <= 50 ? model.MaxAllocationsPerUtxo : 10,
-            MinConfirmations = model.MinConfirmations is >= 1 and <= 100 ? model.MinConfirmations : 1
-        };
+        var config = BuildSettingsConfig(wallet.Id, model);
 
         store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], config);
 
@@ -1046,6 +1040,21 @@ public class RGBController : Controller
         TempData["SuccessMessage"] = "Settings saved";
         return RedirectToAction(nameof(Settings), new { storeId });
     }
+
+    // WHY extracted: SaveSettings reaches the concrete, non-virtual StoreRepository, so the action
+    // itself cannot be exercised in a unit test. Pulling the initialiser out is what makes the
+    // values it produces assertable.
+    // The ternaries the previous version applied here were unreachable: ModelState.IsValid rejects
+    // out-of-range input first, and the [Range] bounds are identical.
+    internal static RGBPaymentMethodConfig BuildSettingsConfig(string walletId, RGBSettingsViewModel model)
+        => new()
+        {
+            WalletId = walletId,
+            DefaultAssetId = string.IsNullOrEmpty(model.DefaultAssetId) ? null : model.DefaultAssetId,
+            UtxoCount = model.UtxoCount,
+            UtxoSize = model.UtxoSize,
+            MinConfirmations = model.MinConfirmations
+        };
 
     async Task<RGBWallet?> RequireWallet(string storeId)
     {

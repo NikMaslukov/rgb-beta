@@ -84,8 +84,8 @@ public class RGBWalletService : IRGBWalletService
         return w?.NeedsRecovery ?? true;
     }
 
-    public const int MinAllocationsPerUtxo = 1;
-    public const int MaxAllocationsPerUtxoLimit = 50;
+    public const int MinAllocationsPerUtxo = RgbConfigBounds.AllocationsPerUtxoMin;
+    public const int MaxAllocationsPerUtxoLimit = RgbConfigBounds.AllocationsPerUtxoMax;
     public const int DefaultAllocationsPerUtxo = 10;
 
     public static int ResolveAllocationsPerUtxo(int? requested) =>

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using BTCPayServer.Plugins.RgbUtexo.Services;
 using Microsoft.AspNetCore.Http;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Models;
@@ -25,7 +26,7 @@ public class RGBSetupViewModel : StoreViewModel
     public Dictionary<string, NetworkSettingsDto> AllNetworkSettings { get; set; } = new();
 
     [Display(Name = "Max Allocations per UTXO")]
-    [Range(1, 50)]
+    [Range(RgbConfigBounds.AllocationsPerUtxoMin, RgbConfigBounds.AllocationsPerUtxoMax)]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
 
     public bool IsRestore { get; set; }
@@ -227,19 +228,18 @@ public class RGBSettingsViewModel : StoreViewModel
     public string? ConnectionError { get; set; }
 
     [Display(Name = "UTXO Count")]
-    [Range(1, 20)]
+    [Range(RgbConfigBounds.UtxoCountMin, RgbConfigBounds.UtxoCountMax)]
     public int UtxoCount { get; set; } = 4;
 
     [Display(Name = "UTXO Size (sats)")]
-    [Range(546, 100000)]
+    [Range(RgbConfigBounds.UtxoSizeMin, RgbConfigBounds.UtxoSizeMax)]
     public int UtxoSize { get; set; } = 1000;
 
     [Display(Name = "Max Allocations per UTXO")]
-    [Range(1, 50)]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
 
     [Display(Name = "Min Confirmations")]
-    [Range(1, 100)]
+    [Range(RgbConfigBounds.MinConfirmationsMin, RgbConfigBounds.MinConfirmationsMax)]
     public int MinConfirmations { get; set; } = 1;
 
     public string? PricingCode { get; set; }

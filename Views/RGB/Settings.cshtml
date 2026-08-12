@@ -1,3 +1,4 @@
+@using BTCPayServer.Plugins.RgbUtexo.Services
 @model RGBSettingsViewModel
 @{
     ViewData["Title"] = "RGB Wallet Settings";
@@ -106,32 +107,31 @@
                         <div class="col-md-4 mb-3">
                             <label class="form-label">UTXO Count</label>
                             <input type="number" name="UtxoCount" class="form-control" 
-                                   value="@Model.UtxoCount" min="1" max="20" />
+                                   value="@Model.UtxoCount" min="@RgbConfigBounds.UtxoCountMin" max="@RgbConfigBounds.UtxoCountMax" />
                             <div class="form-text">
-                                Number of UTXOs to create (1-20)
+                                Number of UTXOs to create (@RgbConfigBounds.UtxoCountMin-@RgbConfigBounds.UtxoCountMax)
                             </div>
                         </div>
                         <div class="col-md-4 mb-3">
                             <label class="form-label">UTXO Size (sats)</label>
                             <input type="number" name="UtxoSize" class="form-control" 
-                                   value="@Model.UtxoSize" min="546" max="100000" />
+                                   value="@Model.UtxoSize" min="@RgbConfigBounds.UtxoSizeMin" max="@RgbConfigBounds.UtxoSizeMax" />
                             <div class="form-text">
-                                Size of each UTXO in satoshis (min 546)
+                                Size of each UTXO in satoshis (min @RgbConfigBounds.UtxoSizeMin)
                             </div>
                         </div>
                         <div class="col-md-4 mb-3">
                             <label class="form-label">Max Allocations per UTXO</label>
-                            <input type="number" name="MaxAllocationsPerUtxo" class="form-control" 
-                                   value="@Model.MaxAllocationsPerUtxo" min="1" max="50" />
+                            <div class="form-control-plaintext">@Model.MaxAllocationsPerUtxo</div>
                             <div class="form-text">
-                                RGB allocations per UTXO (1-50)
+                                Fixed when the wallet was created.
                             </div>
                         </div>
                     </div>
                     <div class="alert alert-info small">
                         <i class="fa fa-info-circle"></i>
-                        <strong>Note:</strong> Max Allocations applies to newly created wallets only.
-                        Existing wallets retain their original configuration.
+                        <strong>Note:</strong> Max Allocations per UTXO is chosen when the wallet is
+                        created and cannot be changed here. Create a new wallet to use a different value.
                     </div>
 
                     <hr class="my-4" />
@@ -144,7 +144,7 @@
                         <div class="col-md-4 mb-3">
                             <label class="form-label">Min Confirmations</label>
                             <input type="number" name="MinConfirmations" class="form-control"
-                                   value="@Model.MinConfirmations" min="1" max="100" />
+                                   value="@Model.MinConfirmations" min="@RgbConfigBounds.MinConfirmationsMin" max="@RgbConfigBounds.MinConfirmationsMax" />
                             <div class="form-text">
                                 Number of blockchain confirmations required before marking an RGB payment as settled (default: 1)
                             </div>
