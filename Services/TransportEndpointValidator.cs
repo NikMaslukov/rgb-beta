@@ -8,6 +8,15 @@ public static class TransportEndpointValidator
 {
     static readonly string[] AllowedSchemes = ["rpc", "rpcs"];
 
+    // 8 is ~8x observed practice: a real RGB invoice carries one transport endpoint, the proxy.
+    // A list of ten thousand is a bug on any network, so the cap ignores allowPrivateNetworks.
+    public const int MaxTransportEndpoints = 8;
+
+    // The count bounds how many endpoints are tried; only a clock bounds how long that takes,
+    // because the platform resolver cannot be interrupted once getaddrinfo is running.
+    public const int ValidationBudgetSeconds = 5;
+    public const int PerEndpointTimeoutSeconds = 3;
+
     // The seam exists because no test can make the real resolver slow, on demand, deterministically —
     // and slow-but-successful resolution is the vector this class now bounds. internal, never public:
     // production must have no injection point here.
@@ -23,6 +32,10 @@ public static class TransportEndpointValidator
     {
         if (endpoints == null || endpoints.Count == 0)
             throw new InvalidOperationException("No transport endpoints provided");
+
+        if (endpoints.Count > MaxTransportEndpoints)
+            throw new InvalidOperationException(
+                $"Too many transport endpoints: {endpoints.Count} (maximum {MaxTransportEndpoints})");
 
         var validated = new List<string>();
         foreach (var endpoint in endpoints)
