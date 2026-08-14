@@ -44,7 +44,7 @@ public static class TransportEndpointValidator
         foreach (var endpoint in endpoints)
         {
             ThrowIfCancelledOrOverBudget(ct, sw, budget);
-            var pinned = await ValidateAndPinEndpointAsync(endpoint, allowPrivateNetworks, ct);
+            var pinned = await ValidateAndPinEndpointAsync(endpoint, allowPrivateNetworks, ct, sw, budget);
             validated.Add(pinned);
         }
 
@@ -65,7 +65,8 @@ public static class TransportEndpointValidator
         new($"Transport endpoint validation exceeded its {ValidationBudgetSeconds}s time budget");
 
     static async Task<string> ValidateAndPinEndpointAsync(
-        string endpoint, bool allowPrivateNetworks, CancellationToken ct)
+        string endpoint, bool allowPrivateNetworks, CancellationToken ct,
+        Stopwatch sw, TimeSpan budget)
     {
         Uri uri;
         try { uri = new Uri(endpoint); }
@@ -87,16 +88,38 @@ public static class TransportEndpointValidator
             return endpoint;
         }
 
-        using var dnsTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, dnsTimeout.Token);
+        var capSpan = TimeSpan.FromSeconds(PerEndpointTimeoutSeconds);
+        var remaining = budget - sw.Elapsed;
+        // URI parsing and the scheme checks above can carry us past the deadline, and WaitAsync
+        // rejects a negative timeout with ArgumentOutOfRangeException — outside the catch filter
+        // below, so it would escape as an untyped exception instead of a rejection. Exactly -1ms
+        // would be worse still: that value means "wait forever".
+        if (remaining < TimeSpan.Zero) remaining = TimeSpan.Zero;
+        var wait = remaining < capSpan ? remaining : capSpan;
+        // Recorded before the await, never re-derived from the clock afterwards: WaitAsync fires off
+        // the millisecond-truncated timer queue while Stopwatch is a different clock, and 2% of
+        // budget-bound waits end with sw.Elapsed still under budget.
+        var wasBudgetBound = remaining < capSpan;
 
         IPAddress[] addresses;
         try
         {
-            addresses = await Resolver(host, linked.Token);
+            var resolveTask = Resolver(host, ct);
+            // WaitAsync does not observe the source fault, and the source keeps running: the
+            // resolver cannot be interrupted, only abandoned.
+            _ = resolveTask.ContinueWith(static t => _ = t.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            addresses = await resolveTask.WaitAsync(wait, ct);
         }
-        catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or TimeoutException)
         {
+            ct.ThrowIfCancellationRequested();
+            // The flag says WHICH timeout would fire; it says nothing about a non-timeout failure,
+            // so a fast SocketException late in the budget must not be reported as exhaustion.
+            if (ex is TimeoutException && wasBudgetBound)
+                throw BudgetExceeded();
             throw new InvalidOperationException(
                 $"DNS resolution failed for transport endpoint host '{host}'", ex);
         }

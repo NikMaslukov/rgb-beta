@@ -263,4 +263,139 @@ public class TransportEndpointValidatorBoundsTests
         Assert.Equal(cts.Token, ex.CancellationToken);
         Assert.Equal(new[] { HostOf(endpoints[0]) }, resolver.Seen);
     }
+
+    // Never completes and never faults, so nothing here can raise UnobservedTaskException.
+    static Task<IPAddress[]> Hang(CountingResolver resolver, string host, CancellationToken ct)
+    {
+        _ = resolver.Resolve(host, ct);
+        return new TaskCompletionSource<IPAddress[]>().Task;
+    }
+
+    // Every case below whose stub never completes carries an explicit timeout. Without the race, an
+    // await on such a stub does not fail — it HANGS, because the resolver ignores the token. The
+    // timeout is what turns "no bound" into a red test instead of a stuck run, and it is what makes
+    // the ablation sweep's race mutation runnable at all. It works because the collection disables
+    // parallelization.
+    [Fact(Timeout = 12000)]
+    public async Task ResolutionExceedingPerEndpointCap_FailsWithinCap_AsDnsFailure()
+    {
+        var resolver = new CountingResolver();
+        // Succeeds after the delay, on purpose: a stub that THREW would give a token-only
+        // implementation the same DNS-failure message and pass vacuously. This is the only case
+        // that discriminates race from token-only.
+        using var swap = new ResolverSwap(DelayingResolver(resolver, Cap * 20));
+
+        var sw = Stopwatch.StartNew();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(Hostnames(1)));
+        sw.Stop();
+
+        Assert.Contains("DNS resolution failed", ex.Message);
+        Assert.DoesNotContain("time budget", ex.Message);
+        Assert.True(sw.Elapsed < Cap + TimeSpan.FromSeconds(2),
+            $"expected the per-endpoint cap to fire near {Cap}, took {sw.Elapsed}");
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task CallerCancellation_InFlight_PropagatesAsCancellationNotDnsFailure()
+    {
+        var resolver = new CountingResolver(_ => new TaskCompletionSource<IPAddress[]>().Task);
+        using var cts = new CancellationTokenSource();
+        using var swap = new ResolverSwap(resolver.Resolve);
+
+        var pending = TransportEndpointValidator.ValidateAsync(Hostnames(1), ct: cts.Token);
+        await Task.Delay(500);
+        await cts.CancelAsync();
+
+        // Today this surfaces as InvalidOperationException("DNS resolution failed ..."): the catch
+        // swallows OperationCanceledException. That masking is the behaviour this changes.
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        Assert.Equal(cts.Token, ex.CancellationToken);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task LastWaitTruncatedToRemainingBudget()
+    {
+        Assert.True(StepDelay < Cap, "the step delay must stay under the per-endpoint cap");
+
+        var endpoints = Hostnames(3);
+        var resolver = new CountingResolver();
+        var hanging = HostOf(endpoints[2]);
+        var delaying = DelayingResolver(resolver, StepDelay);
+        using var swap = new ResolverSwap((host, ct) =>
+            host == hanging
+                ? Hang(resolver, host, ct)
+                : delaying(host, ct));
+
+        var sw = Stopwatch.StartNew();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints));
+        sw.Stop();
+
+        Assert.Contains("time budget", ex.Message);
+        // Correct: at ~4s elapsed the remainder is ~1s, the third wait truncates to it, and the
+        // call returns at ~5s. With wait = cap it waits the full 3s and returns at ~7s.
+        Assert.True(sw.Elapsed < Budget + TimeSpan.FromSeconds(1),
+            $"expected a return near {Budget}, took {sw.Elapsed}");
+    }
+
+    sealed class AbandonedProbeException : Exception { }
+
+    // Timeout because this case awaits an unbounded signal (`faulted.Task`) rather than a bounded
+    // delay: any mutation that stretches the stub's fault would otherwise hang the sweep instead of
+    // failing it. ~6x the correct-implementation runtime of ~5s.
+    [Fact(Timeout = 30000)]
+    public async Task AbandonedResolverTask_FaultIsObserved()
+    {
+        var faulted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fired = 0;
+
+        void Handler(object? _, UnobservedTaskExceptionEventArgs e)
+        {
+            // The event is process-global; an unfiltered handler attributes unrelated faults to
+            // this test. [Collection] cannot isolate a process-global event, so filtering is the
+            // only fix.
+            if (e.Exception.InnerExceptions.Any(x => x is AbandonedProbeException))
+                Interlocked.Increment(ref fired);
+        }
+
+        static async Task<IPAddress[]> FaultAfterAbandonment(TimeSpan delay)
+        {
+            await Task.Delay(delay);
+            throw new AbandonedProbeException();
+        }
+
+        TaskScheduler.UnobservedTaskException += Handler;
+        try
+        {
+            using (var swap = new ResolverSwap((_, _) =>
+            {
+                var t = FaultAfterAbandonment(Cap + TimeSpan.FromSeconds(2));
+                // Signals without reading t.Exception, so this continuation does not itself observe
+                // the fault.
+                _ = t.ContinueWith(_ => faulted.TrySetResult(),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+                return t;
+            }))
+            {
+                await Assert.ThrowsAsync<InvalidOperationException>(
+                    () => TransportEndpointValidator.ValidateAsync(Hostnames(1)));
+            }
+
+            // The task must be KNOWN to have faulted before the GC runs; collecting first makes the
+            // ablation pass vacuously a quarter of the time.
+            await faulted.Task;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            Assert.Equal(0, Volatile.Read(ref fired));
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= Handler;
+        }
+    }
 }
