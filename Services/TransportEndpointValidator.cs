@@ -37,14 +37,32 @@ public static class TransportEndpointValidator
             throw new InvalidOperationException(
                 $"Too many transport endpoints: {endpoints.Count} (maximum {MaxTransportEndpoints})");
 
+        var budget = TimeSpan.FromSeconds(ValidationBudgetSeconds);
+        var sw = Stopwatch.StartNew();
+
         var validated = new List<string>();
         foreach (var endpoint in endpoints)
         {
+            ThrowIfCancelledOrOverBudget(ct, sw, budget);
             var pinned = await ValidateAndPinEndpointAsync(endpoint, allowPrivateNetworks, ct);
             validated.Add(pinned);
         }
+
+        // The literal-IP and allowPrivateNetworks paths consult no clock, so without this the call
+        // can return success with the budget already violated — a false-ACCEPT.
+        ThrowIfCancelledOrOverBudget(ct, sw, budget);
         return validated;
     }
+
+    static void ThrowIfCancelledOrOverBudget(CancellationToken ct, Stopwatch sw, TimeSpan budget)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (sw.Elapsed >= budget)
+            throw BudgetExceeded();
+    }
+
+    static InvalidOperationException BudgetExceeded() =>
+        new($"Transport endpoint validation exceeded its {ValidationBudgetSeconds}s time budget");
 
     static async Task<string> ValidateAndPinEndpointAsync(
         string endpoint, bool allowPrivateNetworks, CancellationToken ct)

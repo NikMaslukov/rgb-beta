@@ -128,4 +128,139 @@ public class TransportEndpointValidatorBoundsTests
         Assert.Contains("Too many transport endpoints", ex.Message);
         Assert.Equal(0, resolver.Count);
     }
+
+    // Must exceed the budget, since it is the only thing consuming it. The extra second covers
+    // timer granularity on a loaded machine.
+    static readonly TimeSpan OverBudgetBlock = Budget + TimeSpan.FromSeconds(1);
+
+    // Two full resolutions must leave >= 1s of budget (so the third endpoint clears the loop-top
+    // gate) AND leave the remainder >= 1s below the per-endpoint cap (so the third wait is visibly
+    // truncated once Task 4 adds truncation). Both margins are 1s at the shipped constants. Earlier
+    // revisions left one margin at ~195ms and flaked against the CORRECT implementation.
+    static readonly TimeSpan StepDelay = (Budget - TimeSpan.FromSeconds(1)) / 2;
+
+    static Func<string, CancellationToken, Task<IPAddress[]>> DelayingResolver(
+        CountingResolver resolver, TimeSpan delay) =>
+        async (host, ct) =>
+        {
+            var pending = resolver.Resolve(host, ct);
+            // No token passed to Task.Delay, deliberately: real getaddrinfo does not honour one
+            // mid-flight, and a cooperative stub would let a token-only implementation pass.
+            await Task.Delay(delay);
+            return await pending;
+        };
+
+    // Blocks SYNCHRONOUSLY, before returning its task. That is the only stub shape that burns
+    // budget outside the WaitAsync race: an overrun that happens inside the returned task is cut
+    // short by the race and throws from the catch, so control never returns to a loop top with the
+    // budget already spent.
+    static Func<string, CancellationToken, Task<IPAddress[]>> BlockingBefore(
+        string blockingHost, TimeSpan block, CountingResolver resolver, Action? afterBlock = null)
+    {
+        return (host, ct) =>
+        {
+            var pending = resolver.Resolve(host, ct);
+            if (host == blockingHost)
+            {
+                Thread.Sleep(block);
+                afterBlock?.Invoke();
+            }
+            return pending;
+        };
+    }
+
+    static string HostOf(string endpoint) => new Uri(endpoint).Host;
+
+    [Fact]
+    public async Task BudgetSpentByEarlyEndpoint_TailNotResolved()
+    {
+        var endpoints = Hostnames(4);
+        var resolver = new CountingResolver();
+        using var swap = new ResolverSwap(
+            BlockingBefore(HostOf(endpoints[0]), OverBudgetBlock, resolver));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints));
+
+        Assert.Equal(
+            $"Transport endpoint validation exceeded its " +
+            $"{TransportEndpointValidator.ValidationBudgetSeconds}s time budget",
+            ex.Message);
+        // The discriminating observable is work-not-done: the loop-top gate is a cost bound, and
+        // without it the post-loop gate still produces the right message after walking the tail.
+        Assert.Equal(new[] { HostOf(endpoints[0]) }, resolver.Seen);
+    }
+
+    [Fact]
+    public async Task BudgetSpentByLastEndpoint_RejectedWithBudgetMessage()
+    {
+        var endpoints = Hostnames(2);
+        var resolver = new CountingResolver();
+        using var swap = new ResolverSwap(
+            BlockingBefore(HostOf(endpoints[1]), OverBudgetBlock, resolver));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints));
+
+        Assert.Contains("time budget", ex.Message);
+        Assert.Equal(2, resolver.Count);
+    }
+
+    [Fact]
+    public async Task BudgetAlreadySpent_HostnameEndpoint_ReportsBudgetNotDnsFailure()
+    {
+        var endpoints = Hostnames(2);
+        var resolver = new CountingResolver(host =>
+            host == HostOf(endpoints[1])
+                ? Task.FromException<IPAddress[]>(new SocketException(11001))
+                : Task.FromResult(OnePublicAddress));
+        using var swap = new ResolverSwap(
+            BlockingBefore(HostOf(endpoints[0]), OverBudgetBlock, resolver));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints));
+
+        // Without the loop-top gate the second endpoint resolves and fails, and the operator is
+        // told "DNS resolution failed" for what is actually budget exhaustion. The two have
+        // different remedies.
+        Assert.Contains("time budget", ex.Message);
+        Assert.DoesNotContain("DNS resolution failed", ex.Message);
+    }
+
+    [Fact]
+    public async Task SlowButSuccessfulResolutions_RejectedWithBudgetMessage()
+    {
+        Assert.True(StepDelay < Cap, "the step delay must stay under the per-endpoint cap");
+
+        var endpoints = Hostnames(TransportEndpointValidator.MaxTransportEndpoints);
+        var resolver = new CountingResolver();
+        using var swap = new ResolverSwap(DelayingResolver(resolver, StepDelay));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints));
+
+        Assert.Contains("time budget", ex.Message);
+        Assert.True(resolver.Count < TransportEndpointValidator.MaxTransportEndpoints,
+            $"expected fewer than {TransportEndpointValidator.MaxTransportEndpoints} resolutions, saw {resolver.Count}");
+    }
+
+    [Fact]
+    public async Task CallerCancellation_AtLoopTop_OutranksAnAlreadySpentBudget()
+    {
+        var endpoints = Hostnames(2);
+        var resolver = new CountingResolver();
+        using var cts = new CancellationTokenSource();
+        using var swap = new ResolverSwap(
+            BlockingBefore(HostOf(endpoints[0]), OverBudgetBlock, resolver, cts.Cancel));
+
+        // Both conditions hold at the second loop top: the budget is spent AND ct is cancelled.
+        // ThrowsAnyAsync, not ThrowsAsync: the gate helper throws a plain OperationCanceledException
+        // while WaitAsync throws the TaskCanceledException subclass, and the test's subject is the
+        // token the exception carries, not which of the two it is.
+        var ex = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => TransportEndpointValidator.ValidateAsync(endpoints, ct: cts.Token));
+
+        Assert.Equal(cts.Token, ex.CancellationToken);
+        Assert.Equal(new[] { HostOf(endpoints[0]) }, resolver.Seen);
+    }
 }
