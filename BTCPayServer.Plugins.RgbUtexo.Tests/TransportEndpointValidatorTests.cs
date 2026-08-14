@@ -2,6 +2,7 @@ using BTCPayServer.Plugins.RgbUtexo.Services;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
+[Collection(TransportEndpointValidatorCollection.Name)]
 public class TransportEndpointValidatorTests
 {
     static Task<List<string>> Validate(string endpoint, bool allowPrivate = false) =>

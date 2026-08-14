@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -6,6 +7,15 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public static class TransportEndpointValidator
 {
     static readonly string[] AllowedSchemes = ["rpc", "rpcs"];
+
+    // The seam exists because no test can make the real resolver slow, on demand, deterministically —
+    // and slow-but-successful resolution is the vector this class now bounds. internal, never public:
+    // production must have no injection point here.
+    static readonly Func<string, CancellationToken, Task<IPAddress[]>> RealResolver = Dns.GetHostAddressesAsync;
+
+    internal static Func<string, CancellationToken, Task<IPAddress[]>> Resolver { get; set; } = RealResolver;
+
+    internal static void ResetResolver() => Resolver = RealResolver;
 
     public static async Task<List<string>> ValidateAsync(
         List<string> endpoints, bool allowPrivateNetworks = false,
@@ -52,7 +62,7 @@ public static class TransportEndpointValidator
         IPAddress[] addresses;
         try
         {
-            addresses = await Dns.GetHostAddressesAsync(host, linked.Token);
+            addresses = await Resolver(host, linked.Token);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException)
         {
