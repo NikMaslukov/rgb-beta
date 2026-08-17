@@ -113,7 +113,7 @@ public class RgbNativeSelfCheckDefaultSinkTests
     static string CaptureConsoleError(Action act)
     {
         var original = Console.Error;
-        var captured = new StringWriter();
+        using var captured = new StringWriter();
         try
         {
             Console.SetError(captured);

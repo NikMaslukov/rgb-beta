@@ -7,21 +7,30 @@ public class RgbRestoreHelperTests
     [Fact]
     public void MissingArgs_ReturnsNonZero()
     {
-        var rc = Program.Run(new[] { "only-one-arg" }, new StringReader("pw\n"), new StringWriter());
+        using var stdin = new StringReader("pw\n");
+        using var stderr = new StringWriter();
+
+        var rc = Program.Run(new[] { "only-one-arg" }, stdin, stderr);
         Assert.NotEqual(0, rc);
     }
 
     [Fact]
     public void ClosedStdin_ReturnsNonZero_DoesNotHang()
     {
-        var rc = Program.Run(new[] { "bk", "dir" }, new StringReader(""), new StringWriter());
+        using var stdin = new StringReader("");
+        using var stderr = new StringWriter();
+
+        var rc = Program.Run(new[] { "bk", "dir" }, stdin, stderr);
         Assert.NotEqual(0, rc);
     }
 
     [Fact]
     public void EmptyPasswordLine_ReturnsNonZero()
     {
-        var rc = Program.Run(new[] { "bk", "dir" }, new StringReader("\n"), new StringWriter());
+        using var stdin = new StringReader("\n");
+        using var stderr = new StringWriter();
+
+        var rc = Program.Run(new[] { "bk", "dir" }, stdin, stderr);
         Assert.NotEqual(0, rc);
     }
 
@@ -31,7 +40,10 @@ public class RgbRestoreHelperTests
         RgbRestoreNative.NativeInvoke = (_, _, _) => (true, "");
         try
         {
-            var rc = Program.Run(new[] { "bk", "dir" }, new StringReader("pw\n"), new StringWriter());
+            using var stdin = new StringReader("pw\n");
+            using var stderr = new StringWriter();
+
+            var rc = Program.Run(new[] { "bk", "dir" }, stdin, stderr);
             Assert.Equal(0, rc);
         }
         finally { RgbRestoreNative.ResetNativeInvoke(); }
@@ -43,10 +55,12 @@ public class RgbRestoreHelperTests
         RgbRestoreNative.NativeInvoke = (_, _, _) => (false, "boom");
         try
         {
-            var err = new StringWriter();
-            var rc = Program.Run(new[] { "bk", "dir" }, new StringReader("pw\n"), err);
+            using var stdin = new StringReader("pw\n");
+            using var stderr = new StringWriter();
+
+            var rc = Program.Run(new[] { "bk", "dir" }, stdin, stderr);
             Assert.NotEqual(0, rc);
-            Assert.Contains("boom", err.ToString());
+            Assert.Contains("boom", stderr.ToString());
         }
         finally { RgbRestoreNative.ResetNativeInvoke(); }
     }
@@ -57,9 +71,11 @@ public class RgbRestoreHelperTests
         RgbRestoreNative.NativeInvoke = (_, _, _) => (false, "boom");
         try
         {
-            var err = new StringWriter();
-            Program.Run(new[] { "bk", "dir" }, new StringReader("SECRET-PW\n"), err);
-            Assert.DoesNotContain("SECRET-PW", err.ToString());
+            using var stdin = new StringReader("SECRET-PW\n");
+            using var stderr = new StringWriter();
+
+            Program.Run(new[] { "bk", "dir" }, stdin, stderr);
+            Assert.DoesNotContain("SECRET-PW", stderr.ToString());
         }
         finally { RgbRestoreNative.ResetNativeInvoke(); }
     }

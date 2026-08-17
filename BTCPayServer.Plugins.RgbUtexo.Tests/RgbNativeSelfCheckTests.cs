@@ -36,7 +36,7 @@ public class RgbNativeSelfCheckTests
 
         var exports = new RecordingExports(SelfCheckTokens.RequiredExports);
         var logger = new RecordingLoggerFactory();
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         RgbNativeSelfCheck.Verify(logger, writer,
             SelfCheckProbes.Loading((IntPtr)7, SelfCheckCases.LoadedElsewhere, SelfCheckCases.Searched, existedButFailed),
@@ -48,7 +48,7 @@ public class RgbNativeSelfCheckTests
 
         var logOnlyExports = new RecordingExports(SelfCheckTokens.RequiredExports);
         var logOnlyLogger = new RecordingLoggerFactory();
-        var logOnlyWriter = new StringWriter();
+        using var logOnlyWriter = new StringWriter();
 
         var healthy = RgbNativeSelfCheck.VerifyOrLog(logOnlyLogger, logOnlyWriter,
             SelfCheckProbes.Loading((IntPtr)7, SelfCheckCases.LoadedElsewhere, SelfCheckCases.Searched, existedButFailed),
@@ -67,7 +67,7 @@ public class RgbNativeSelfCheckTests
     {
         var state = presentButUnloadable ? SelfCheckState.PresentButUnloadable : SelfCheckState.Absent;
         var reported = SelfCheckCases.Build(state);
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         var thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(null, writer, reported.Probe, reported.HasExport));
@@ -98,7 +98,7 @@ public class RgbNativeSelfCheckTests
 
         var exports = new RecordingExports(
             SelfCheckTokens.RequiredExports.Where(name => name != missing).ToArray());
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         var thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(null, writer,
@@ -116,7 +116,7 @@ public class RgbNativeSelfCheckTests
     {
         var reported = SelfCheckCases.Build(state, exportCheckThrows);
         var logger = new RecordingLoggerFactory();
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         var thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(logger, writer, reported.Probe, reported.HasExport));
@@ -136,7 +136,7 @@ public class RgbNativeSelfCheckTests
     [Fact]
     public void Verify_FaultingReportingDependency_StillThrowsTheActionableException()
     {
-        var brokenCreateLogger = new StringWriter();
+        using var brokenCreateLogger = new StringWriter();
         var viaBrokenFactory = SelfCheckCases.Build(SelfCheckState.Absent);
         var thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(new ThrowingLoggerFactory(throwOnCreate: true), brokenCreateLogger,
@@ -144,7 +144,7 @@ public class RgbNativeSelfCheckTests
         SelfCheckCases.AssertReported(thrown.Message, SelfCheckState.Absent, viaBrokenFactory);
         SelfCheckCases.AssertReported(brokenCreateLogger.ToString(), SelfCheckState.Absent, viaBrokenFactory);
 
-        var brokenLog = new StringWriter();
+        using var brokenLog = new StringWriter();
         var viaBrokenLog = SelfCheckCases.Build(SelfCheckState.Absent);
         thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(new ThrowingLoggerFactory(throwOnCreate: false), brokenLog,
@@ -163,7 +163,7 @@ public class RgbNativeSelfCheckTests
 
         // A throwing provider leaves no factory, so only the sink can carry the message — but the
         // thrown type must still be the actionable one, never the provider's exception.
-        var brokenProviderSink = new StringWriter();
+        using var brokenProviderSink = new StringWriter();
         var viaBrokenProvider = SelfCheckCases.Build(SelfCheckState.Absent);
         thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(new ThrowingServiceProvider(), viaBrokenProvider.Probe,
@@ -179,7 +179,7 @@ public class RgbNativeSelfCheckTests
     {
         var logOnly = SelfCheckCases.Build(SelfCheckState.SelfCheckFailed, exportCheckThrows);
         var logOnlyLogger = new RecordingLoggerFactory();
-        var logOnlyWriter = new StringWriter();
+        using var logOnlyWriter = new StringWriter();
 
         Assert.False(RgbNativeSelfCheck.VerifyOrLog(logOnlyLogger, logOnlyWriter,
             logOnly.Probe, logOnly.HasExport));
@@ -189,7 +189,7 @@ public class RgbNativeSelfCheckTests
 
         var hardFail = SelfCheckCases.Build(SelfCheckState.SelfCheckFailed, exportCheckThrows);
         var hardFailLogger = new RecordingLoggerFactory();
-        var hardFailWriter = new StringWriter();
+        using var hardFailWriter = new StringWriter();
 
         var thrown = Assert.Throws<RgbNativeUnavailableException>(() =>
             RgbNativeSelfCheck.Verify(hardFailLogger, hardFailWriter, hardFail.Probe, hardFail.HasExport));
@@ -209,7 +209,7 @@ public class RgbNativeSelfCheckTests
     {
         var reported = SelfCheckCases.Build(state, exportCheckThrows);
         var logger = new RecordingLoggerFactory();
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         Assert.False(RgbNativeSelfCheck.VerifyOrLog(logger, writer, reported.Probe, reported.HasExport));
 
@@ -239,7 +239,7 @@ public class RgbNativeSelfCheckTests
     public void VerifyOrLog_DiscardingLogger_StillLeavesTheMessageInTheSink(SelfCheckState state, bool exportCheckThrows)
     {
         var reported = SelfCheckCases.Build(state, exportCheckThrows);
-        var writer = new StringWriter();
+        using var writer = new StringWriter();
 
         Assert.False(RgbNativeSelfCheck.VerifyOrLog(NullLoggerFactory.Instance, writer,
             reported.Probe, reported.HasExport));
@@ -252,13 +252,13 @@ public class RgbNativeSelfCheckTests
     [Fact]
     public void VerifyOrLog_FaultingSinks_FailIndependently()
     {
-        var brokenCreateLogger = new StringWriter();
+        using var brokenCreateLogger = new StringWriter();
         var viaBrokenFactory = SelfCheckCases.Build(SelfCheckState.Absent);
         Assert.False(RgbNativeSelfCheck.VerifyOrLog(new ThrowingLoggerFactory(throwOnCreate: true),
             brokenCreateLogger, viaBrokenFactory.Probe, viaBrokenFactory.HasExport));
         SelfCheckCases.AssertReported(brokenCreateLogger.ToString(), SelfCheckState.Absent, viaBrokenFactory);
 
-        var brokenLog = new StringWriter();
+        using var brokenLog = new StringWriter();
         var viaBrokenLog = SelfCheckCases.Build(SelfCheckState.Absent);
         Assert.False(RgbNativeSelfCheck.VerifyOrLog(new ThrowingLoggerFactory(throwOnCreate: false),
             brokenLog, viaBrokenLog.Probe, viaBrokenLog.HasExport));
