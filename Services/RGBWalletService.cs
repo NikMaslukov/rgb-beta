@@ -50,6 +50,18 @@ public class RGBWalletService : IRGBWalletService
             _sendLocks, SetNeedsRecoveryAsync, ClearNeedsRecoveryAsync, id => _rgbLib.UnloadWallet(id));
     }
 
+    // internal, not private: the sweep's non-blocking acquisition (CleanupExpiredTransfersAsync,
+    // RefreshWalletAsync) is only observable from a test that can hold the same per-wallet semaphore the
+    // coordinator uses, so the tests take it through here via InternalsVisibleTo. It must return the LIVE
+    // instance out of _sendLocks: a fresh SemaphoreSlim would leave the test holding a lock the coordinator
+    // never consults, so the test would not be exercising the skip path at all. A production caller that
+    // acquires the lock this way owes the wallet a write-ahead; there is no single convention to copy, because
+    // the direct acquisition sites in this file pair with several different write-ahead treatments — one uses
+    // WriteAheadInlineAsync, one hand-rolls set/clear, two rely on the row being born quarantined and two do
+    // nothing (audit H2c-lite D4/R1).
+    internal SemaphoreSlim SendLockFor(string walletId)
+        => _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+
     async Task SetNeedsRecoveryAsync(string walletId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
@@ -473,9 +485,24 @@ public class RGBWalletService : IRGBWalletService
     const int RgbLibTransferStatusWaitingConfirmations = 1;
     const int RgbLibTransferStatusFailed = 4;
 
-    public Task<int> CleanupExpiredTransfersAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct = default)
-        => _sendCoordinator.WithSendLockAsync(walletId,
-            () => CleanupExpiredTransfersInternalAsync(walletId, walletNetwork, masterFingerprint, ct), ct);
+    public async Task CleanupExpiredTransfersAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct = default)
+    {
+        // Background sweep, so it skips a busy wallet instead of blocking on it, exactly as
+        // RefreshWalletAsync does: this call sits in RefreshAllWallets' sequential per-wallet loop, so
+        // blocking here stalls the wallets after this one for as long as the holder keeps the lock. The
+        // holder is whatever operation currently holds this wallet's send lock; the unbounded case is an RGB
+        // asset send, which holds it across an uncancellable upload to a remote endpoint (audit H2c). Skipping
+        // cannot settle an invoice wrongly — that needs a status-3 transfer either way — and what it skips is a
+        // REJECTION, so withholding it is the permitted direction. It is not free, and it is not merely
+        // postponed: the predicate matches status 1 only, so a refresh that advances the row voids it
+        // permanently. Meanwhile ProcessTransfers keeps matching the status-1 transfer, so a Pending invoice can
+        // advance to WaitingConfirmations and record a Processing payment this flip would have suppressed, which
+        // nothing in this plugin ever invalidates; and the wallet's Transfers page reads "Waiting Confirmations"
+        // for as long as the row sits at status 1 or 2 (audit H2c-lite R10, R11).
+        if (!await _sendCoordinator.TryWithSendLockAsync(walletId,
+                () => CleanupExpiredTransfersInternalAsync(walletId, walletNetwork, masterFingerprint, ct), ct))
+            _log.LogDebug("Expired-transfer cleanup skipped for wallet {WalletId}: the send lock is held", walletId);
+    }
 
     async Task<int> CleanupExpiredTransfersInternalAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct)
     {
