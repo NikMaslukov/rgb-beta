@@ -72,8 +72,7 @@ public class RGBInvoiceListener : IHostedService
     Task OnInvoice(InvoiceEvent e)
     {
         if (e.Name != InvoiceEvent.Created) return Task.CompletedTask;
-        _cache.Remove($"rgb:inv:{e.Invoice.Id}");
-        _queue.Writer.TryWrite(e.Invoice.Id);
+        if (ShouldEnqueue(e.Invoice)) _queue.Writer.TryWrite(e.Invoice.Id);
         return Task.CompletedTask;
     }
 
@@ -82,7 +81,7 @@ public class RGBInvoiceListener : IHostedService
         var pending = await _invoices.GetMonitoredInvoices(RGBPlugin.RGBPaymentMethodId, ct);
         foreach (var inv in pending)
         {
-            if (inv.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId)?.Details == null) continue;
+            if (!ShouldEnqueue(inv)) continue;
             _queue.Writer.TryWrite(inv.Id);
             _cache.Set($"rgb:inv:{inv.Id}", inv, ComputeExpiry(inv));
         }
@@ -672,6 +671,20 @@ public class RGBInvoiceListener : IHostedService
         }
     }
 
+    // The subscription is server-wide, so without this every invoice created anywhere on the instance
+    // costs a queue slot, a GetInvoice round-trip and a cached InvoiceEntity before being discarded as
+    // irrelevant. Deliberately broader than the check CheckSingleInvoice applies: it asks only whether an
+    // RGB prompt exists, because a lazily-activated invoice is published with a prompt whose Details is
+    // still null and gains them later without republishing Created, and the queue carries the id alone —
+    // nothing has cached such an invoice yet, so the drain re-fetches and processes it if activation landed
+    // first. What the width buys is exactly that: the window between Created and this one entry draining.
+    // It does not rescue an activation that lands after the drain — no path re-enqueues within the process,
+    // so that invoice waits for the sweep or a restart, and a wallet whose post-refresh durability flush
+    // throws is never swept. The window is still worth having, and testing Details here would give it up
+    // for nothing. Fail open here; fail closed there.
+    internal static bool ShouldEnqueue(InvoiceEntity inv) =>
+        inv.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId) != null;
+
     internal static SettlementDecision EvaluateTransfer(int transferStatus, long transferAmount, long? invoiceAmount)
     {
         if (transferStatus is 1 or 2)
@@ -812,7 +825,9 @@ public class RGBInvoiceListener : IHostedService
         return new InvoiceProcessingResult(null, null, null, Array.Empty<RgbTransfer>(), null, null);
     }
 
-    static DateTimeOffset ComputeExpiry(InvoiceEntity inv)
+    // internal so the pre-warm's expiry has CONTRACT tests: the source pins bind this callee but cannot see
+    // what it returns, and an elapsed instant here evicts every pre-warmed entry before the drain reads it.
+    internal static DateTimeOffset ComputeExpiry(InvoiceEntity inv)
     {
         var left = inv.ExpirationTime - DateTimeOffset.UtcNow;
         return DateTimeOffset.UtcNow + (left > TimeSpan.FromMinutes(5) ? left : TimeSpan.FromMinutes(5));
