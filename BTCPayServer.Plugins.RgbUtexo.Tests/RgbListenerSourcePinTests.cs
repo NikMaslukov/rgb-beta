@@ -19,6 +19,9 @@ public class RgbListenerSourcePinTests
     const string ListenerFile = "Services/RGBInvoiceListener.cs";
     const string RgbLibFile = "Services/RgbLibService.cs";
     const string ListenerType = "RGBInvoiceListener";
+    // Fully qualified for symbol comparison: a same-simple-named type in another namespace, inherited
+    // by the listener, supplies members that pass a simple-name compare — measured.
+    const string ListenerFullType = "BTCPayServer.Plugins.RgbUtexo.Services.RGBInvoiceListener";
     const string Replenish = "ReplenishUtxosAsync";
 
     static MethodDeclarationSyntax ReplenishMethod(PluginCompilation plugin) =>
@@ -801,5 +804,770 @@ public class RgbListenerSourcePinTests
         Assert.True(block.Statements.OfType<ContinueStatementSyntax>().Any(),
             $"{what} must end in an unconditional `continue`; found "
             + $"[{string.Join("; ", block.Statements.Select(st => st.Kind().ToString()))}]");
+    }
+
+    /// <summary>
+    /// The predicate's answer is HEEDED: <paramref name="operation"/> happens when and only when
+    /// <paramref name="predicate"/> says so. Three clauses, each written after a compiling counter-example
+    /// defeated a weaker version — and clause C added last, after the others were found to constrain only
+    /// what comes at or after the gate.
+    ///
+    /// A — the condition IS the invocation (positive gate) or IS its negation (negated early exit), and
+    /// nothing else. It once admitted a top-level `&amp;&amp;`/`||` chain containing the invocation, on the
+    /// rationale that narrowing is safe; narrowing is NOT safe at ingress, because a suppressed enqueue on
+    /// a wallet the periodic sweep skips is a lost payment. Defeated otherwise:
+    /// `ShouldEnqueue(inv); TryWrite(...)` (result discarded), `var ok = ...; if (other)` (gate reads
+    /// something else), `if (P || x)` (widened), `if (P &amp;&amp; x)` (narrowed — suppresses every enqueue).
+    ///
+    /// B — the operation occurs exactly once TEXTUALLY, the guard dominates it, AND the write is reached
+    /// whenever the guard admits: it is a direct statement of the admitted branch with nothing exiting
+    /// before it. Dominance alone proves the predicate NECESSARY, never SUFFICIENT — a nested condition or
+    /// an early `return` inside the accepted branch narrows the filter again while every other clause
+    /// passes. "Exactly once" counts occurrences, not executions — a write inside a `foreach` is one
+    /// occurrence and is correct.
+    ///
+    /// C — nothing unpinned precedes the gate ANYWHERE on the path from the method body down to it, nothing
+    /// but blocks and loops encloses it, and any enclosing loop both iterates the collection itself
+    /// (`pending.Take(1)` drops invoices before the predicate sees them) and runs to completion (a `break`
+    /// after the pre-warm queues only the first). Counting the preamble in the gate's own block alone leaves
+    /// the statement that produces the collection unguarded. A narrowing early exit ABOVE it, or a `using`/
+    /// `try`/`lock` wrapped AROUND it, suppresses the write while clauses A and B stay green. Only INERT
+    /// local declarations are exempt — an identifier, or a single member access on one; an arbitrary chain
+    /// still evaluates property getters that can throw. The caller declares how many branching statements
+    /// may legitimately precede the gate, and pins their shape itself.
+    /// </summary>
+    static InvocationExpressionSyntax AssertGuardedBy(PluginCompilation plugin, MethodDeclarationSyntax method,
+        string predicate, string operation, string queueField, int allowedPreamble)
+    {
+        var tree = plugin.Tree(ListenerFile);
+        var body = RoslynPins.BodyOf(method);
+        var where = $"{method.Identifier.ValueText}";
+
+        // Rule 2(b): a local function or local named like the predicate would satisfy every node
+        // assertion below while the real predicate never runs.
+        // The FIELD is shadowable too, and that was measured GREEN before this line named it: `var _queue =
+        // somethingElse;` is an identifier-initialised declaration, so `Inert` exempts it from the preamble
+        // count AND from AssertShape, and every remaining clause then verifies a write to a dead object.
+        // Enqueueing onto a local channel nobody drains is residual R6 with a green suite. Shadowing the
+        // predicate name was already pinned; shadowing the receiver was not.
+        RoslynPins.AssertNoLocalShadow(method, predicate, queueField);
+
+        // Not `Single(...)`: its "found 0" message reads like the pin is broken when the real cause is a
+        // spelling this rule deliberately excludes, and a maintainer who believes a pin is broken deletes it.
+        var calls = InvocationsNamed(body, predicate);
+        Assert.True(calls.Count == 1,
+            $"{where}: '{predicate}' must be INVOKED exactly once, inline in the condition of the `if` that "
+            + $"guards '{operation}'; found {calls.Count}. Spellings that move the decision elsewhere are not "
+            + $"admitted — a method group (`pending.Where({predicate})`), or a local bound first and gated on "
+            + "later — because admitting them means additionally pinning that the value the gate consumes is "
+            + "the one the predicate produced. The inline form costs nothing; use it.");
+        var call = calls[0];
+
+        // KIND, not just name and containing type. A delegate-typed local reports both identically to the
+        // static method it shadows, so the earlier two-field check accepted `out var ShouldEnqueue` in the
+        // fetch's argument list — a local returning false, every enqueue suppressed, whole suite green.
+        RoslynPins.AssertBindsToMemberOf(plugin, tree, call.Expression,
+            SymbolKind.Method, ListenerFullType, predicate, where);
+
+        // The RECEIVER too: `InvocationsNamed` matches the member name alone, so a `TryWrite` on any other
+        // channel would satisfy every operand and dominance clause while enqueueing onto nothing.
+        var writes = InvocationsNamed(body, operation)
+            .Where(i => i.Expression is MemberAccessExpressionSyntax m
+                        && RootOf(m.Expression) == queueField)
+            .ToList();
+        // A local function is a DECLARATION, so its body can sit late in the block while its invocation runs
+        // early: `Enqueue(); if (!ShouldEnqueue(inv)) continue; void Enqueue() => TryWrite(inv.Id);` satisfies
+        // every structural check below — one textual write, in a later sibling of the guard's own block — while
+        // the write executes BEFORE the predicate is consulted. Source order only tracks execution order for
+        // straight-line statements, so the write must not be hidden inside one.
+        // ...and the same is true of every OTHER deferred body. `Action enqueue = () => TryWrite(id);` inside
+        // the guarded branch satisfies containment and the write count while enqueueing NOTHING, because the
+        // lambda is never invoked. Local functions, lambdas and anonymous methods all decouple where a write
+        // is WRITTEN from whether it RUNS, which is the only thing these clauses can see.
+        // WHITELIST, not blacklist — the same lesson `Inert` above already records, relearned here the hard
+        // way. Enumerating the node kinds that decouple "written" from "run" does not terminate: the list
+        // began as local functions and lambdas, and reviewers then produced a ternary, a switch expression,
+        // `&&`/`||` short-circuit and `??`, each of which keeps the enclosing ExpressionStatement so every
+        // other clause — count, operand, dominance, nothing-between, both shape pins — stays green while the
+        // write runs for some invoices only. That is residual R6 on the very write this finding exists to
+        // guarantee. One positive rule closes the whole family: the write's parent must BE the statement.
+        //
+        // SCOPE, stated exactly, because an earlier version of this comment over-claimed. This clause rejects
+        // every EXPRESSION-shaped decoupling — expression-bodied lambdas and local functions, ternary, switch
+        // expression, `&&`/`||`/`??` — measured on all of them. It does NOT reject a BLOCK-bodied deferred
+        // body: in `Action a = () => { TryWrite(id); };` the call's parent is the inner ExpressionStatement,
+        // so it passes here and is caught below, by dominance and same-block, because that statement is not a
+        // member of the guarded branch. Both halves have ablation rows. Saying "this subsumes lambdas" would
+        // have been the same closing over-generalisation that has cost this finding five review rounds.
+        var notPlain = writes.Where(w => PlainStatementOf(w) is null).ToList();
+        Assert.True(notPlain.Count == 0,
+            $"{where}: '{operation}' must be a plain expression statement — its parent must be the statement "
+            + "itself, not a lambda, local function, ternary, switch expression, or `&&`/`||`/`??` operand. "
+            + "Every one of those decouples where the write is WRITTEN from whether it RUNS, which is the "
+            + "only thing a syntactic pin can see; found it under a "
+            + $"{(notPlain.Count > 0 ? notPlain[0].Parent?.Kind().ToString() : "-")}.");
+
+        Assert.True(writes.Count == 1,
+            $"{where}: '{operation}' must occur exactly once; found {writes.Count}. A second occurrence "
+            + "is unguarded no matter what the condition says.");
+        var write = writes[0];
+
+        // The receiver was matched by SPELLING alone above. Bind it: `out var _queue` of channel type in the
+        // fetch's argument list gives the write a receiver with the right name that nothing ever drains.
+        RoslynPins.AssertBindsToMemberOf(plugin, tree,
+            LeftmostIdentifierOf(((MemberAccessExpressionSyntax)write.Expression).Expression),
+            SymbolKind.Field, ListenerFullType, queueField, where);
+
+        var gates = method.DescendantNodes().OfType<IfStatementSyntax>()
+            .Where(i => i.Condition.Contains(call))
+            .ToList();
+        Assert.True(gates.Count == 1,
+            $"{where}: '{predicate}' must be invoked in the condition of exactly one `if`, found "
+            + $"{gates.Count} — binding it to a local and gating on something else is the shape this rejects");
+        var gate = gates[0];
+
+        // Clause A used to admit a top-level `&&` chain (positive) or `||` chain (negated exit), on the
+        // inherited rationale that narrowing "can only reduce what the sweep acts on". **That rationale is
+        // dead here.** `if (ShouldEnqueue(e.Invoice) && e.Invoice.Id.Length == 0) TryWrite(...)` keeps the
+        // conjunct, suppresses every enqueue, and stays green — and on a wallet the sweep skips (M4a) a
+        // suppressed enqueue is a lost payment, which is exactly what killed residuals R6 and R8. At ingress
+        // the predicate must be the SOLE gate, so the condition is the invocation or its negation, nothing
+        // else. This also makes Conjuncts/Disjuncts unnecessary here.
+        var condition = Unwrap(gate.Condition);
+        var positive = condition == call;
+        var negated = condition is PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.LogicalNotExpression } not
+                      && Unwrap(not.Operand) == call;
+
+        Assert.True(positive ^ negated,
+            $"{where}: the guard's condition must be exactly '{predicate}(…)' or exactly '!{predicate}(…)', "
+            + $"with nothing ANDed or ORed onto it; found '{gate.Condition}'. Narrowing is not safe at ingress: "
+            + "a suppressed enqueue on a wallet the periodic sweep skips is a lost payment, not a delay.");
+
+        // The call is pinned; the OPERAND was not. `if (ShouldEnqueue(new InvoiceEntity())) TryWrite(e.Invoice.Id);`
+        // satisfies every clause above while enqueueing nothing, because the predicate is asked about the wrong
+        // object. Comparing only the leftmost identifier is not enough either — `TryWrite(e.Invoice.StoreId)`
+        // roots on the same `e`. The write must be exactly the subject's `.Id`.
+        // Compared with SyntaxFactory.AreEquivalent, not rendered text: `ToString()` keeps interior trivia,
+        // so a line-broken or commented member access would false-red on correct code.
+        var subjectExpr = Unwrap(call.ArgumentList.Arguments[0].Expression);
+        var writtenExpr = Unwrap(write.ArgumentList.Arguments[0].Expression);
+        var expected = SyntaxFactory.ParseExpression(subjectExpr.ToString() + ".Id");
+        var subject = subjectExpr.ToString();
+        var written = writtenExpr.ToString();
+        Assert.True(SyntaxFactory.AreEquivalent(writtenExpr, expected),
+            $"{where}: '{operation}' must write the id of the very object '{predicate}' was asked about — "
+            + $"expected '{subject}.Id', found '{written}'. A different object, a different member, or a "
+            + "freshly constructed entity satisfies every other clause while the guard decides nothing.");
+
+        // NECESSARY is not SUFFICIENT. Every clause so far proves the predicate must say yes before the
+        // write can run; none proves the write runs WHENEVER it says yes. Nest a second condition around the
+        // write — `if (ShouldEnqueue(e.Invoice)) { if (e.Invoice.GetPaymentPrompt(pmi)?.Details != null)
+        // TryWrite(...); }` — and every clause passes while the lazily-activated invoices this predicate
+        // exists to admit are dropped again. That is R6, restored, with a green suite. So the write must be a
+        // DIRECT statement of the branch the guard admits, never nested in a further conditional.
+        // Sufficiency is also defeated from ABOVE. `if (e.Invoice.Id.Length == 0) return …;` placed before
+        // the gate suppresses enqueues with every other clause green. The gate must therefore be the first
+        // statement of its block, except for a preamble the caller pins explicitly — `OnInvoice` legitimately
+        // has one, the `e.Name != InvoiceEvent.Created` early return, and P-H1 pins that separately.
+        // Only INERT local declarations are exempt. `var invoice = e.Invoice;` cannot suppress the write and
+        // spec §8 mandates it stays green — but `var x = Validate(e.Invoice);` can throw, so exempting every
+        // declaration reopens the hole this clause exists to close. Inert = the initializer invokes nothing,
+        // constructs nothing and awaits nothing.
+        // WHITELIST, not blacklist. Listing the node kinds that can throw is open-ended — a cast, an element
+        // access, a property getter, a `throw` expression and `??` all can, and the previous blacklist missed
+        // every one. An initializer is inert only if it is an identifier or a plain member-access chain rooted
+        // at one: `e.Invoice`, `inv`. Anything else counts toward the preamble.
+        // Depth-ONE only. An arbitrary chain still evaluates property getters — `e.Invoice.Metadata.ItemCode`
+        // can throw before the gate — so recursing through member accesses was still too permissive. The one
+        // shape §8's refactor B needs is `var invoice = e.Invoice;`: an identifier, or a single member access
+        // on an identifier. Anything deeper counts toward the preamble.
+        static bool InertInitializer(ExpressionSyntax? e) => e switch
+        {
+            IdentifierNameSyntax => true,
+            MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax } => true,
+            _ => false
+        };
+
+        static bool Inert(StatementSyntax st) =>
+            st is LocalDeclarationStatementSyntax local
+            && local.Declaration.Variables.All(v => InertInitializer(v.Initializer?.Value));
+
+        // Counting only the gate's own block is not enough: wrap the gate in `using (Logger.Scope()) { … }`
+        // and the preamble budget is spent inside that block while the `using`'s own initialiser — and any
+        // statement beside it in the outer block — runs first, unseen. Everything enclosing the gate up to the
+        // method body must therefore be a plain block or a loop.
+        var enclosingChain = gate.Ancestors().TakeWhile(n => n != method).ToList();
+        var illegalEnclosure = enclosingChain.FirstOrDefault(n =>
+            n is not (BlockSyntax or ForEachStatementSyntax or ForStatementSyntax
+                      or WhileStatementSyntax or DoStatementSyntax));
+        Assert.True(illegalEnclosure == null,
+            $"{where}: the guard may only be enclosed by blocks and loops up to the method body — found it "
+            + $"inside a {illegalEnclosure?.Kind()}. A `using`, `try`, `lock`, `if` or `switch` around the "
+            + "gate runs code before it that no preamble count can see.");
+
+        // ...and, where the guard sits in a loop, the loop's SOURCE. `foreach (var inv in pending.Take(1))`
+        // passes every clause below while silently abandoning every later pending invoice — an edit someone
+        // makes while debugging and forgets. The source must be the bare collection identifier.
+        // Every loop kind, not just `foreach`: the enclosure clause admits `for`/`while`/`do`, so pinning only
+        // `foreach` left the same holes one rewrite away.
+        foreach (var loop in enclosingChain.Where(n =>
+                     n is ForEachStatementSyntax or ForStatementSyntax or WhileStatementSyntax
+                          or DoStatementSyntax))
+        {
+            if (loop is ForEachStatementSyntax each)
+                Assert.True(each.Expression is IdentifierNameSyntax,
+                    $"{where}: the loop feeding the guard must iterate the collection itself, not a projection "
+                    + $"of it — found '{each.Expression}'. `.Take(…)`, `.Where(…)` or `.Skip(…)` there drops "
+                    + "invoices before the predicate ever sees them.");
+
+            // ...and it must run to completion. A `break;` after the pre-warm satisfies every other clause and
+            // queues only the first invoice. Each transfer is resolved to its ACTUAL target: a `switch`'s own
+            // `break`, a lambda's `return` and an inner loop's `break` do not leave this loop, and rejecting
+            // them would be a false red on ordinary code.
+            var loopBody = ((StatementSyntax)loop).ChildNodes().OfType<StatementSyntax>().Last();
+            var truncations = loopBody.DescendantNodesAndSelf().Where(n =>
+            {
+                if (n is not (BreakStatementSyntax or ReturnStatementSyntax or GotoStatementSyntax)) return false;
+                foreach (var up in n.Ancestors())
+                {
+                    if (up == loop) return true;
+                    if (up is LocalFunctionStatementSyntax or AnonymousFunctionExpressionSyntax) return false;
+                    if (n is BreakStatementSyntax && up is SwitchStatementSyntax) return false;
+                    if (n is BreakStatementSyntax && up is ForEachStatementSyntax or ForStatementSyntax
+                            or WhileStatementSyntax or DoStatementSyntax) return false;
+                }
+                return false;
+            }).ToList();
+            Assert.True(truncations.Count == 0,
+                $"{where}: the loop must run to completion — found {truncations.Count} statement(s) that leave "
+                + "it early. Anything that exits queues a prefix of the pending set and abandons the rest, "
+                + "which every other clause is blind to. (`continue` is the guard's own exit and is allowed; a "
+                + "`switch`'s own `break`, a lambda's `return` and an inner loop's `break` are not counted.)");
+        }
+
+        // Counted along the WHOLE PATH from the method body down to the gate, not just the gate's own block.
+        // With a gate inside a `foreach`, counting only the loop body leaves everything above the loop
+        // unguarded — including the statement that produces the collection. Both of these passed every clause:
+        //   var pending = (await _invoices.GetMonitoredInvoices(pmi, ct)).Take(1).ToArray();
+        //   if (pending.Length > 200) return;
+        // the same forgotten-debug truncation as `.Take(1)` in the loop header, one statement further up.
+        var preamble = 0;
+        SyntaxNode onPath = gate;
+        foreach (var ancestor in enclosingChain)
+        {
+            if (ancestor is BlockSyntax b)
+                preamble += b.Statements.TakeWhile(st => st != onPath).Count(st => !Inert(st));
+            onPath = ancestor;
+        }
+        Assert.True(preamble == allowedPreamble,
+            $"{where}: exactly {allowedPreamble} statement(s) may precede the guard; found {preamble}. A "
+            + "narrowing early exit above the gate suppresses enqueues while every clause below still passes.");
+
+        var writeStatement = write.FirstAncestorOrSelf<StatementSyntax>();
+        Assert.True(writeStatement != null, $"{where}: '{operation}' is not inside a statement");
+
+        if (positive)
+        {
+            var admitted = gate.Statement is BlockSyntax consequence
+                ? consequence.Statements.Contains(writeStatement!)
+                : gate.Statement == writeStatement;
+            Assert.True(admitted,
+                $"{where}: '{operation}' must be a direct statement of the guarded branch — found it wrapped "
+                + $"in '{writeStatement!.Parent}'. Any statement around the write — a further condition, a "
+                + "`try`, a `lock`, a `using` — makes the predicate necessary but not sufficient, which is how "
+                + "a filter silently narrows again.");
+
+            // NOTHING may stand between the guard's yes and the write — not an exit, not a call. An earlier
+            // clause only rejected explicit `return`/`continue`/`break`/`throw`/`goto`, and a plain
+            // `Validate(inv);` that throws for some prompt-bearing invoice walked straight through it. No
+            // syntactic rule can tell whether a call throws, so the branch must simply contain the write and
+            // nothing else.
+            var branchStatements = gate.Statement is BlockSyntax consequenceBlock
+                ? consequenceBlock.Statements.ToList()
+                : [gate.Statement];
+            Assert.True(branchStatements[0] == writeStatement,
+                $"{where}: '{operation}' must be the FIRST statement of the guarded branch — found "
+                + $"'{branchStatements[0]}' before it. Anything ahead of the write can suppress it (an early "
+                + "exit, or simply a call that throws), which makes the predicate necessary but not "
+                + "sufficient. Statements AFTER the write are fine: they cannot un-enqueue it.");
+
+        }
+        else
+        {
+            var inLoop = gate.Ancestors().TakeWhile(n => n != method)
+                .Any(n => n is ForEachStatementSyntax or ForStatementSyntax or WhileStatementSyntax
+                               or DoStatementSyntax);
+            Assert.True(LeavesTheBlockUnconditionally(gate.Statement, inLoop),
+                $"{where}: the negated guard must leave unconditionally — "
+                + (inLoop ? "`continue`, not `return`: inside a loop a `return` abandons every remaining "
+                          + "item rather than skipping one"
+                          : "`continue` or `return`")
+                + $"; found '{gate.Statement}'");
+            // Dominance must be STRUCTURAL, not "some enclosing block happens to contain both". Asking
+            // only for the nearest enclosing BlockSyntax lets the guard sit on a branch the write does not
+            // depend on: a `switch` section is not a BlockSyntax, and neither is an unbraced nested `if`,
+            // so in both cases the search walks past the branch to the method's own block, finds the write
+            // there, sees it later in source order, and passes — while every other path reaches the write
+            // without ever consulting the predicate. Requiring the guard to be a DIRECT statement of a
+            // block, and the write to live in that same statement list after it, is what makes "the write
+            // follows the guard" true on every path rather than merely in source order.
+            // A counted clause, not a precondition. An earlier draft called it unreachable and stopped
+            // ablating it; that was wrong, and relabelling an unproven guard is worse than leaving it
+            // unproven. An UNBRACED loop body makes `gate.Parent` a `ForEachStatementSyntax` — an enclosure
+            // the clause above explicitly allows — with the write intact, so it is reachable and has a row.
+            var block = gate.Parent as BlockSyntax;
+            Assert.True(block != null,
+                $"{where}: the early-exit guard must be a direct statement of a block; found it inside a "
+                + $"{gate.Parent?.Kind()}. A guard nested in a branch — a switch section, an unbraced "
+                + $"`if` — skips nothing on the paths that branch does not cover.");
+
+            // Same on this polarity: the write's own statement must be a direct member of the block, not
+            // something nested inside a later conditional in it.
+            var sibling = block!.Statements.FirstOrDefault(st => st == writeStatement);
+            Assert.True(sibling != null,
+                $"{where}: '{operation}' must be a DIRECT statement of the same block as the guard — found it "
+                + "wrapped in another statement. Any wrapper — a further condition, a `try`, a `lock`, a "
+                + "`using` — makes the predicate necessary but not sufficient and silently narrows the filter.");
+
+            // ...and nothing may stand between the guard and the write here either, for the same reason.
+            var between = block.Statements
+                .SkipWhile(st => st != gate).Skip(1).TakeWhile(st => st != writeStatement).ToList();
+            Assert.True(between.Count == 0,
+                $"{where}: nothing may stand between the guard and '{operation}' — found {between.Count} "
+                + "statement(s). An early exit, or a call that throws, suppresses the write while every other "
+                + "clause still passes.");
+
+        }
+
+        return write;
+    }
+
+    // `return` is accepted only OUTSIDE a loop. Inside `EnqueuePendingInvoices`' `foreach`, an early
+    // `return` abandons every remaining invoice rather than skipping one — a far larger false-REJECT than
+    // the guard is for, and it satisfied every other clause. The file's own
+    // AssertLeavesTheIterationUnconditionally already required `continue` for this reason.
+    static bool LeavesTheBlockUnconditionally(StatementSyntax statement, bool inLoop)
+    {
+        bool Exits(StatementSyntax s) => inLoop
+            ? s is ContinueStatementSyntax
+            : s is ContinueStatementSyntax or ReturnStatementSyntax;
+        return statement switch
+        {
+            BlockSyntax block => block.Statements.Any(Exits),
+            _ => Exits(statement)
+        };
+    }
+
+    /// <summary>
+    /// The WHOLE SHAPE of a method, as a sequence of statement kinds with inert local declarations removed.
+    ///
+    /// Three separate loop-integrity defects reached the same conclusion by different routes — a projected
+    /// loop source, a `break` in the body, a truncating fetch above the loop — and each was closed by adding
+    /// a clause for that POSITION. Positions are unbounded; the shape is not. If the method is exactly the
+    /// statements it is supposed to be, there is nowhere for a fourth position to hide.
+    ///
+    /// Inert declarations are skipped so §8's refactor B (`var invoice = e.Invoice;`) stays green.
+    /// </summary>
+    static void AssertShape(MethodDeclarationSyntax method, params SyntaxKind[] expected)
+    {
+        static bool Inert(StatementSyntax st) =>
+            st is LocalDeclarationStatementSyntax local
+            && local.Declaration.Variables.All(v => v.Initializer?.Value is IdentifierNameSyntax
+                or MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax });
+
+        var actual = ((BlockSyntax)method.Body!).Statements.Where(st => !Inert(st)).ToList();
+        Assert.True(actual.Count == expected.Length
+                    && actual.Select(st => st.Kind()).SequenceEqual(expected),
+            $"{method.Identifier.ValueText}: the method's shape is pinned — expected "
+            + $"[{string.Join(", ", expected)}], found [{string.Join(", ", actual.Select(st => st.Kind()))}]. "
+            + "An extra statement anywhere on the path to the enqueue can suppress it, and the clause-level "
+            + "guards see only the position they were written for.");
+    }
+
+    /// <summary>
+    /// The first statement that can actually do something — inert local declarations skipped, exactly as
+    /// <see cref="AssertShape"/> and AssertGuardedBy's preamble count skip them.
+    ///
+    /// The two caller-pinned preamble clauses used to read `Statements[0]` raw, so hoisting the very shape
+    /// the inert exemption exists for (`var invoice = e.Invoice;` above the event filter) reddened them
+    /// while every other clause accepted it. A guard that exempts a shape in one place and rejects it in
+    /// another is not pinning a property; it is pinning where you happened to put it.
+    /// </summary>
+    static StatementSyntax FirstMeaningful(MethodDeclarationSyntax method)
+    {
+        static bool Inert(StatementSyntax st) =>
+            st is LocalDeclarationStatementSyntax local
+            && local.Declaration.Variables.All(v => v.Initializer?.Value is IdentifierNameSyntax
+                or MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax });
+
+        return ((BlockSyntax)method.Body!).Statements.First(st => !Inert(st));
+    }
+
+    /// <summary>The same, for the body of the single loop a method is allowed to contain.</summary>
+    static void AssertLoopShape(MethodDeclarationSyntax method, params SyntaxKind[] expected)
+    {
+        var loops = method.DescendantNodes().OfType<ForEachStatementSyntax>().ToList();
+        Assert.True(loops.Count == 1, $"{method.Identifier.ValueText}: expected exactly one `foreach`, "
+            + $"found {loops.Count}");
+        var body = ((BlockSyntax)loops[0].Statement).Statements.ToList();
+        Assert.True(body.Select(st => st.Kind()).SequenceEqual(expected),
+            $"{method.Identifier.ValueText}: the loop body's shape is pinned — expected "
+            + $"[{string.Join(", ", expected)}], found [{string.Join(", ", body.Select(st => st.Kind()))}].");
+    }
+
+    /// <summary>
+    /// The statement a call runs as, if it runs unconditionally as one: either the call IS the statement,
+    /// or it is the whole right-hand side of a discard assignment that is the statement.
+    ///
+    /// The discard form is admitted because this codebase writes it (`TransportEndpointValidator`,
+    /// `RGBController`), so `_ = _queue.Writer.TryWrite(inv.Id);` is an ordinary spelling here, semantically
+    /// identical, and rejecting it would be the kind of false red that gets a pin deleted. It is admitted
+    /// STRUCTURALLY, not by name: the call must be the assignment's entire RHS, so any conditional wrapping
+    /// (`_ = cond ? TryWrite(id) : false;`, a switch expression, `&amp;&amp;`) puts a node in between and is still
+    /// rejected — which the ablation rows for those shapes demonstrate.
+    /// </summary>
+    static ExpressionStatementSyntax? PlainStatementOf(SyntaxNode call) => call.Parent switch
+    {
+        ExpressionStatementSyntax statement => statement,
+        AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } assignment
+            when assignment.Right == call
+                 && assignment.Left is IdentifierNameSyntax { Identifier.ValueText: "_" }
+            => assignment.Parent as ExpressionStatementSyntax,
+        _ => null
+    };
+
+    /// <summary>The leftmost identifier a member-access chain roots on: `_queue.Writer` → "_queue".</summary>
+    // `this.` roots there too. Without that arm `this._queue.Writer.TryWrite(inv.Id)` — what several IDE
+    // "qualify member access" settings produce automatically — was filtered out of the write list entirely
+    // and reported as "found 0", blaming a missing write rather than the qualifier. A maintainer who reads
+    // that message concludes the pin is broken, and a pin believed broken gets deleted. Since the binding
+    // assertion now checks the symbol, admitting the spelling costs nothing.
+    static string RootOf(ExpressionSyntax expression) => Unwrap(expression) switch
+    {
+        IdentifierNameSyntax id => id.Identifier.ValueText,
+        MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax n }
+            => n.Identifier.ValueText,
+        MemberAccessExpressionSyntax m => RootOf(m.Expression),
+        _ => string.Empty
+    };
+
+    /// <summary>The same node rather than its spelling, so the receiver can be bound and not merely read.</summary>
+    static IdentifierNameSyntax LeftmostIdentifierOf(ExpressionSyntax expression) => Unwrap(expression) switch
+    {
+        IdentifierNameSyntax id => id,
+        MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax n } => n,
+        MemberAccessExpressionSyntax m => LeftmostIdentifierOf(m.Expression),
+        var other => throw new InvalidOperationException(
+            $"'{other}' roots on no identifier; callers reach this only after RootOf matched one")
+    };
+
+    /// <summary>
+    /// The mirror of <see cref="AssertNeverTouches"/>: a cache write that MUST be present. The startup
+    /// pre-warm is a fund-safety property, not tidiness — without it the drain must hit the database, its
+    /// catch swallows a failure, and the queue entry is a one-shot already consumed, so on a wallet whose
+    /// sweep is broken by a failing durability flush the invoice is never processed. A "uniform cache
+    /// provenance" refactor deleted it once; nothing else would stop that recurring with a green suite.
+    ///
+    /// Accepts `Set` and nothing else, and pins the key and the value as well as the call. `CreateEntry`
+    /// caches nothing until Value is assigned and the entry disposed; `GetOrCreate`/`GetOrCreateAsync` cache
+    /// whatever the factory returns, including null. Each of those, and a right-call/wrong-key or
+    /// right-key/null-value write, was measured to keep an earlier version of this clause green while the
+    /// pre-warm was effectively gone.
+    /// </summary>
+    // Accepted member list of ONE, on an effect argument rather than a spelling preference: `Set` is the
+    // only member that unconditionally caches the value handed to it. `CreateEntry` caches nothing until
+    // Value is assigned and the entry disposed; `GetOrCreate`/`GetOrCreateAsync` cache whatever the factory
+    // returns, including null. Either would let this clause stay green while the pre-warm is gone.
+    static void AssertCachesOn(PluginCompilation plugin, MethodDeclarationSyntax method, string receiver,
+        string keyFragment, string enqueueSubject, InvocationExpressionSyntax enqueueWrite)
+    {
+        var tree = plugin.Tree(ListenerFile);
+
+        // Same shadow hole as the queue receiver: `var _cache = someOtherCache;` is inert, so it slips past
+        // the preamble count and AssertShape while every clause below verifies a pre-warm into an object the
+        // drain never reads — R8 with a green suite.
+        // `ComputeExpiry` too: a local function of that name would satisfy the expiry clause while returning
+        // an already-elapsed instant. Without this it died on AssertShape instead, with a message about the
+        // method's shape rather than the pre-warm — a misdiagnosis of the kind that gets pins deleted.
+        // Kept for its message: it names the offender precisely for the two forms it does see. The binding
+        // assertions below are what make these names safe against the local declaration forms no clause
+        // enumerates, and against an inherited member of a same-simple-named type. Neither rule reaches the
+        // callee's BODY — see the expiry clause, and R11 in the spec.
+        RoslynPins.AssertNoLocalShadow(method, receiver, "ComputeExpiry");
+
+        // `this.`-qualified here TOO. Round 9 fixed the queue write's receiver match and left this one
+        // keyed on a bare identifier — the same half-applied fix the queue write suffered at round 3, and
+        // the campaign's refactor E caught it: `this._cache.Set(...)` reported "found 0", blaming a deleted
+        // pre-warm for a qualifier. Deliberately not `RootOf`: that would also admit `_cache.Inner.Set(...)`.
+        var writes = RoslynPins.BodyOf(method).DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression is MemberAccessExpressionSyntax m
+                        && m.Name.Identifier.ValueText == "Set"
+                        && (m.Expression is IdentifierNameSyntax id && id.Identifier.ValueText == receiver
+                            || m.Expression is MemberAccessExpressionSyntax
+                               { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax q }
+                               && q.Identifier.ValueText == receiver))
+            .ToList();
+        Assert.True(writes.Count == 1,
+            $"{method.Identifier.ValueText}: must call {receiver}.Set exactly once; found {writes.Count}. "
+            + "Removing the startup pre-warm reinstates a permanent-false-REJECT path — see spec §5.2. "
+            + "`CreateEntry`, `GetOrCreate`/`GetOrCreateAsync` and extraction into a helper are excluded "
+            + "deliberately: the first caches nothing until Value is set and disposed, the second two cache "
+            + "whatever the factory returns including null, and the third is invisible here. If you rewrite "
+            + "the pre-warm, update this clause in the same commit.");
+
+        // The receiver was matched by SPELLING alone above, exactly as the queue receiver was: bind it.
+        RoslynPins.AssertBindsToMemberOf(plugin, tree,
+            ((MemberAccessExpressionSyntax)writes[0].Expression).Expression,
+            SymbolKind.Field, ListenerFullType, receiver, method.Identifier.ValueText);
+
+        // ...and the SUBJECT and the PATH. Caching `pending[0]`, correctly keyed to itself, satisfies the key
+        // and value clauses for every admitted `inv` while leaving almost every queued invoice cold — R8
+        // again. The pre-warm must cache the same identifier the enqueue writes, in the same block as it.
+        //
+        // WRITTEN is not RUN — the same necessary/sufficient gap, one guard over. `Action prewarm = () =>
+        // _cache.Set(key, inv, …);` keeps every clause below green while no invoice is ever pre-warmed, and
+        // R8 returns. Codex's no-deferred-body fix was applied to the queue write and never propagated here.
+        //
+        // DEFERRED BODIES, AND EXPRESSION-SHAPED CONDITIONALS. The distinction is STATEMENT vs EXPRESSION,
+        // and getting it wrong cost a round each way.
+        //
+        // This clause once rejected any enclosing `if`/`switch` STATEMENT too. That half was harmful: on the
+        // positive polarity, which AssertGuardedBy deliberately supports, the enclosing `if` IS the guard, so
+        // a stock IDE "invert if" reddened here with a message misdiagnosing it as a conditional pre-warm —
+        // and a guard whose message sends a maintainer hunting the wrong defect is worse than one that stays
+        // silent. It was also redundant, because a statement-shaped wrapper always reparents the `Set`, so the
+        // same-block clause below catches it. Measured: the `if`-wrapped ablation row reddens there.
+        //
+        // But "redundant" holds ONLY for statement-shaped wrappers, and removing the expression kinds with
+        // them was a real hole. A switch expression or a ternary keeps the enclosing ExpressionStatement, so
+        // `_ = cond switch { true => _cache.Set(key, inv, …), _ => inv };` sits directly in the loop block with
+        // the right parent, nothing between it and the enqueue, and the loop shape intact — every clause green
+        // while the pre-warm runs for some invoices only, which is R8 again. An expression can never be the
+        // guard, so rejecting these two costs nothing and reintroduces no false red.
+        // Same WHITELIST as the queue write, and for the same reason — this clause went through a blacklist
+        // of node kinds twice (round 1 removed the `if`/`switch` statement kinds, round 2 restored the two
+        // expression kinds it had removed with them) before the enumeration was recognised as the defect
+        // rather than its contents. `Parent is ExpressionStatementSyntax` covers lambdas, local functions,
+        // ternaries, switch expressions and `&&`/`||`/`??` operands at once.
+        //
+        // Statement-shaped wrappers are deliberately NOT rejected here: `if (cond) { _cache.Set(…); }`
+        // reparents the Set, so the same-block clause below catches it with an accurate message, whereas
+        // rejecting `if` here misdiagnosed the positive-polarity guard — where the enclosing `if` IS the
+        // guard — as a conditional pre-warm.
+        var setStatement = PlainStatementOf(writes[0]);
+        Assert.True(setStatement != null,
+            $"{method.Identifier.ValueText}: the pre-warm must be a plain expression statement — its parent "
+            + "must be the statement itself, not a lambda, local function, ternary, switch expression, or "
+            + "`&&`/`||`/`??` operand. Written is not run: a deferred pre-warm may never be invoked, and an "
+            + "expression-shaped conditional runs it for some invoices only — either way the drain hits the "
+            + "database, and on a wallet the periodic sweep skips that is a lost payment (spec §5.2, residual "
+            + $"R8); found it under a {writes[0].Parent?.Kind()}.");
+
+        // The KEY and the VALUE, tied to each other. Pinning them separately is not enough:
+        // `_cache.Set($"rgb:inv:{inv.StoreId}", inv, …)` has a well-formed key and the right value and still
+        // leaves `rgb:inv:{inv.Id}` — the key CheckSingleInvoice actually reads — cold, so the drain misses,
+        // hits the database, and R8 is back. The value must be an identifier, and the key must interpolate
+        // exactly that identifier's `.Id`.
+        var cached = writes[0].ArgumentList.Arguments[1].Expression;
+        Assert.True(cached is IdentifierNameSyntax,
+            $"{method.Identifier.ValueText}: the pre-warm must cache the invoice entity itself, as a plain "
+            + $"identifier; found '{cached}'. Caching null, an id, or an expression leaves the drain's lookup "
+            + "useless while every other clause stays green.");
+        var subject = ((IdentifierNameSyntax)cached).Identifier.ValueText;
+        Assert.True(subject == enqueueSubject,
+            $"{method.Identifier.ValueText}: the pre-warm must cache the same invoice the enqueue writes — "
+            + $"the queue writes '{enqueueSubject}.Id' and the cache stores '{subject}'. Caching a different "
+            + "entity leaves every other queued invoice cold while every clause here stays green.");
+
+        var enqueueStatement = enqueueWrite.FirstAncestorOrSelf<StatementSyntax>();
+        Assert.True(setStatement!.Parent == enqueueStatement!.Parent,
+            $"{method.Identifier.ValueText}: the pre-warm must sit in the same block as the enqueue, so it "
+            + "runs on exactly the invoices that are queued — found them in different blocks.");
+
+        // ...and nothing may stand between them. `if (inv.Type == BTCPayServer.Client.Models.InvoiceType.TopUp) continue;` after the
+        // enqueue and before the `Set` leaves the one-shot queue entry un-pre-warmed, which is R8 for exactly
+        // those invoices, while every clause above stays green.
+        var enclosing = (BlockSyntax)setStatement.Parent!;
+        var betweenWriteAndSet = enclosing.Statements
+            .SkipWhile(st => st != enqueueStatement).Skip(1).TakeWhile(st => st != setStatement).ToList();
+        Assert.True(betweenWriteAndSet.Count == 0,
+            $"{method.Identifier.ValueText}: nothing may stand between the enqueue and the pre-warm — found "
+            + $"{betweenWriteAndSet.Count} statement(s). An exit there queues the invoice and leaves it cold.");
+
+        var key = writes[0].ArgumentList.Arguments[0].Expression;
+        var interpolated = key as InterpolatedStringExpressionSyntax;
+        var texts = interpolated?.Contents.OfType<InterpolatedStringTextSyntax>()
+            .Select(t => t.TextToken.ValueText) ?? [];
+        var holes = interpolated?.Contents.OfType<InterpolationSyntax>()
+            .Select(i => Unwrap(i.Expression).ToString()).ToList() ?? [];
+        // EQUALITY, not containment. `$"v2:rgb:inv:{inv.Id}"`, `$"rgb:inv:{inv.Id}-v2"` and
+        // `$"rgb:inv:{inv.Id,10}"` all *contain* the fragment and interpolate the right expression, and all
+        // three leave `CheckSingleInvoice`'s key cold — R8 again. The key must be exactly two contents: the
+        // literal fragment, then the interpolation, with no alignment or format clause.
+        var interpolation = interpolated?.Contents.OfType<InterpolationSyntax>().FirstOrDefault();
+        Assert.True(interpolated != null
+                    && interpolated.Contents.Count == 2
+                    && texts.Count() == 1 && texts.First() == keyFragment
+                    && holes.Count == 1 && holes[0] == subject + ".Id"
+                    && interpolation is { AlignmentClause: null, FormatClause: null },
+            $"{method.Identifier.ValueText}: the pre-warm must be keyed on an interpolated string containing "
+            + $"'{keyFragment}' and interpolating exactly '{subject}.Id' — the key CheckSingleInvoice reads; "
+            + $"found '{key}'. A key bound to a local first, or built from a shared constant or helper, is not "
+            + "admitted: proving it produces the same key would require tracing it.");
+
+        // ...and the EXPIRY. Right receiver, right key, right value — and an already-elapsed third argument
+        // makes the entry evict before the drain ever reads it, so the drain misses on every invoice and R8
+        // returns with every clause above green. Measured: `_cache.Set(key, inv, <any expiry>)` was accepted.
+        // Pinned as `ComputeExpiry(<the same subject>)`, the one expression whose contract is "this invoice's
+        // remaining lifetime, floored" — a literal, a local, or ComputeExpiry of a different invoice all fail.
+        var expiry = writes[0].ArgumentList.Arguments.Count > 2
+            ? Unwrap(writes[0].ArgumentList.Arguments[2].Expression) as InvocationExpressionSyntax
+            : null;
+        Assert.True(expiry != null
+                    // BARE identifier, not `X.ComputeExpiry(...)`. Measured at round 7: the clause was
+                    // name-keyed, so `CacheKeys.ComputeExpiry(inv)` — some other type's method returning an
+                    // arbitrary instant — passed it. The claim that stood here at round 7 — that a bare
+                    // identifier could only be the listener's own method, because a same-named local is
+                    // rejected by the shadow clause above — was measured FALSE at round 8: an `out var
+                    // ComputeExpiry` of delegate type is bare, is no local DECLARATION the shadow clause
+                    // counts, and made the pre-warm expire an already-elapsed entry with the suite green.
+                    // The binding assertion after this one is what closes that; the syntactic form stays
+                    // because it is what rejects the qualified spelling. Neither reaches the callee's BODY:
+                    // `ComputeExpiry` returning an elapsed instant passes every clause here and evicts every
+                    // pre-warmed entry before the drain reads it. That is closed BEHAVIOURALLY, by the
+                    // contract tests on `ComputeExpiry`, not by any source pin — a syntactic pin cannot see
+                    // what a method returns.
+                    && expiry.Expression is IdentifierNameSyntax
+                    && NameOf(expiry) == "ComputeExpiry"
+                    && expiry.ArgumentList.Arguments.Count == 1
+                    && Unwrap(expiry.ArgumentList.Arguments[0].Expression) is IdentifierNameSyntax expirySubject
+                    && expirySubject.Identifier.ValueText == subject,
+            $"{method.Identifier.ValueText}: the pre-warm's expiry must be `ComputeExpiry({subject})` — the "
+            + "invoice's own remaining lifetime. An already-elapsed constant, or the expiry of a different "
+            + "invoice, evicts the entry before the drain reads it and reinstates R8. The "
+            + "`MemoryCacheEntryOptions { AbsoluteExpiration = ComputeExpiry(inv) }` overload is a "
+            + "deliberately EXCLUDED spelling, not an oversight: admitting it would mean also pinning that "
+            + $"no other option on that object shortens the entry's life. Found "
+            + $"'{(writes[0].ArgumentList.Arguments.Count > 2 ? writes[0].ArgumentList.Arguments[2].ToString() : "<no third argument>")}'.");
+
+        RoslynPins.AssertBindsToMemberOf(plugin, tree, expiry!.Expression,
+            SymbolKind.Method, ListenerFullType, "ComputeExpiry", method.Identifier.ValueText);
+    }
+
+    /// <summary>
+    /// The identifier does not appear in the method at all. Stated as absence-of-identifier rather than
+    /// absence-of-`Set`, because `_cache.CreateEntry(key)` with Value/AbsoluteExpiration set is the literal
+    /// desugaring of `Set`, `GetOrCreate` caches too, and `var c = _cache; c.Set(...)` evades any
+    /// receiver-keyed rule. A name-keyed absence pin is pinned to a spelling.
+    /// </summary>
+    static void AssertNeverTouches(MethodDeclarationSyntax method, string identifier)
+    {
+        var uses = RoslynPins.BodyOf(method).DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => id.Identifier.ValueText == identifier)
+            .ToList();
+        Assert.True(uses.Count == 0,
+            $"{method.Identifier.ValueText}: must not touch '{identifier}' ({uses.Count} use(s): "
+            + $"{string.Join("; ", uses.Select(u => u.Parent?.ToString()))}). An enqueue path that caches "
+            + "retains a full InvoiceEntity for at least five minutes per invoice, with no bound.");
+    }
+
+    // P-H1 (finding H2b). The subscription is server-wide: it fires for every invoice created anywhere on
+    // the instance. Nothing pinned that OnInvoice heeds the predicate, and nothing pinned that it keeps its
+    // hands off the shared cache — the two together are the whole finding.
+    [Fact]
+    public void PH1_OnInvoiceEnqueuesOnlyRgbInvoicesAndNeverCaches()
+    {
+        var plugin = PluginCompilation.Shared;
+        var onInvoice = RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, "OnInvoice");
+
+        AssertGuardedBy(plugin, onInvoice, "ShouldEnqueue", "TryWrite", "_queue", allowedPreamble: 1);
+
+        // The one allowed preamble statement, pinned: OnInvoice's event filter. Anything else there would be
+        // an unpinned narrowing above the gate.
+        // Structural, not string containment: `if (e.Name != InvoiceEvent.Created || e.Invoice.Type ==
+        // InvoiceType.TopUp) return …;` *contains* the right text and narrows ingress on top of it. The
+        // condition must be exactly the one comparison, with no further operands.
+        var preambleStatement = FirstMeaningful(onInvoice);
+        Assert.True(preambleStatement is IfStatementSyntax { Statement: ReturnStatementSyntax } head
+                    && head.Condition is BinaryExpressionSyntax
+                        { RawKind: (int)SyntaxKind.NotEqualsExpression } cmp
+                    && cmp.Left is MemberAccessExpressionSyntax name
+                    && name.Name.Identifier.ValueText == "Name"
+                    && cmp.Right is MemberAccessExpressionSyntax created
+                    && created.Name.Identifier.ValueText == "Created"
+                    && RoslynPins.BoundSymbol(plugin, plugin.Tree(ListenerFile), created)
+                        .ContainingType?.Name == "InvoiceEvent",
+            $"OnInvoice: the only statement allowed before the guard is the bare "
+            + $"`if (e.Name != InvoiceEvent.Created) return …;` early return, with nothing ANDed or ORed onto "
+            + $"it; found '{preambleStatement}'. Extra operands there narrow ingress above the guard — and "
+            + "BOTH sides are pinned: `e.Invoice.Id != InvoiceEvent.Created` also compiles and would suppress "
+            + "every enqueue while matching the operator and the right-hand side.");
+        AssertNeverTouches(onInvoice, "_cache");
+
+        // Whole-shape pin: the event filter, the gate, the return. Nothing else.
+        AssertShape(onInvoice,
+            SyntaxKind.IfStatement, SyntaxKind.IfStatement, SyntaxKind.ReturnStatement);
+    }
+
+    // P-H2 (finding H2b). The sibling path. Its inline copy of the predicate is the one that was RIGHT while
+    // OnInvoice's was missing; routing both through one declaration is what stops them diverging again.
+    // The cache clause here is POSITIVE, unlike P-H1's: this path's _cache.Set is deliberately kept, because
+    // pre-warming is what spares the drain a database fetch whose failure would spend the one-shot queue entry
+    // with no sweep to rescue it. It was deleted once for tidiness; this is what stops that recurring.
+    [Fact]
+    public void PH2_EnqueuePendingInvoicesUsesTheSamePredicateAndKeepsItsPreWarm()
+    {
+        var plugin = PluginCompilation.Shared;
+        var enqueue = RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, "EnqueuePendingInvoices");
+
+        var write = AssertGuardedBy(plugin, enqueue, "ShouldEnqueue", "TryWrite", "_queue", allowedPreamble: 1);
+
+        // The one allowed preamble statement on this path, pinned the way P-H1 pins OnInvoice's event filter:
+        // the fetch that produces the collection. Leaving it unpinned let `(await …).Take(1).ToArray()` and a
+        // `if (pending.Length > 200) return;` beside it pass every clause.
+        var fetch = FirstMeaningful(enqueue);
+        Assert.True(fetch is LocalDeclarationStatementSyntax decl
+                    && decl.Declaration.Variables.Count == 1
+                    && Unwrap(decl.Declaration.Variables[0].Initializer!.Value) is InvocationExpressionSyntax call
+                    && NameOf(call) == "GetMonitoredInvoices",
+            $"EnqueuePendingInvoices: the only statement allowed before the loop is the bare "
+            + $"`var pending = await _invoices.GetMonitoredInvoices(…)` fetch; found '{fetch}'. A projection or "
+            + "an early return there drops invoices before the predicate ever sees them.");
+
+        // ...and the loop must iterate THAT local. The fetch was pinned and the loop header was required to
+        // be an identifier, but nothing tied the two: adding a field `readonly InvoiceEntity[] _none = [];`
+        // and writing `foreach (var inv in _none)` left the fetch, the log and both shape pins untouched
+        // while the startup path enqueued nothing at all — measured GREEN before this clause. Tied by
+        // SYMBOL, not by spelling, so a same-named field or local cannot stand in for the fetch's result.
+        var tree = plugin.Tree(ListenerFile);
+        var fetchLocal = plugin.Model(tree)
+            .GetDeclaredSymbol(((LocalDeclarationStatementSyntax)fetch!).Declaration.Variables[0]);
+        var loop = write.FirstAncestorOrSelf<ForEachStatementSyntax>();
+        Assert.True(loop != null
+                    && SymbolEqualityComparer.Default.Equals(
+                        RoslynPins.BoundSymbol(plugin, tree, loop.Expression), fetchLocal),
+            "EnqueuePendingInvoices: the loop containing the enqueue must iterate the local the fetch "
+            + $"declares; found '{(loop == null ? "<no enclosing foreach>" : loop.Expression.ToString())}'. "
+            + "Iterating anything else enqueues none of the pending invoices while every other clause, "
+            + "including both shape pins, stays green.");
+
+        // ORDER IS LOAD-BEARING, and was established by running the ablation campaign rather than by
+        // reading it. With the shape pins first, six mutations — deleting the pre-warm, caching the wrong
+        // invoice, deferring it into a lambda, wrapping it in an `if` or a bare block, and an exit between
+        // the enqueue and the pre-warm — all died on AssertLoopShape, leaving four AssertCachesOn clauses
+        // (unconditional, subject, same-block, nothing-between) never exercised by any row while the map
+        // recorded them as proven. The specific clause must get first refusal so its message is what a
+        // maintainer reads; the shape pins remain as the backstop for positions no clause anticipates.
+        AssertCachesOn(plugin, enqueue, "_cache", "rgb:inv:",
+            Unwrap(write.ArgumentList.Arguments[0].Expression) is MemberAccessExpressionSyntax m
+                ? m.Expression.ToString() : "<not a member access>", write);
+
+        // Whole-shape pins: the fetch, the loop, the log — and inside the loop, the gate, the write, the
+        // pre-warm. These subsume the position-by-position clauses above for these two methods; the clauses
+        // stay because they carry the diagnostic messages and apply to any future call site.
+        AssertShape(enqueue,
+            SyntaxKind.LocalDeclarationStatement, SyntaxKind.ForEachStatement, SyntaxKind.ExpressionStatement);
+        AssertLoopShape(enqueue,
+            SyntaxKind.IfStatement, SyntaxKind.ExpressionStatement, SyntaxKind.ExpressionStatement);
     }
 }

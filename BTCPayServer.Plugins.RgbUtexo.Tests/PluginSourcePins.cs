@@ -190,7 +190,10 @@ internal static class RoslynPins
         "ReplenishUtxosAsync", "ActivePendingInvoicePredicate",
         "EvaluateReplenishEligibility", "EvaluateReplenishDemand",
         "ReplenishCooldownTracker", "NextEligibleAt", "RecordAttemptSucceeded",
-        "RecordAttemptFailed", "RecordNoActionNeeded", "Prune"
+        "RecordAttemptFailed", "RecordNoActionNeeded", "Prune",
+        // Finding H2b: the listener's ingress predicate. The finding WAS this expression duplicated across
+        // two call sites with one copy wrong, so a second declaration is a regression of the root cause.
+        "ShouldEnqueue"
     ];
 
     internal static readonly Dictionary<string, int> RepoWideMandatedTotals = new()
@@ -211,6 +214,7 @@ internal static class RoslynPins
         ["RecordAttemptFailed"] = 1,
         ["RecordNoActionNeeded"] = 1,
         ["Prune"] = 1,
+        ["ShouldEnqueue"] = 1,
     };
 
     internal static SyntaxNode BodyOf(BaseMethodDeclarationSyntax method)
@@ -287,6 +291,11 @@ internal static class RoslynPins
 
     // Rule 2(b) — a local function shadowing a class member compiles without a warning, satisfies
     // every node assertion verbatim, and the real helper never runs.
+    // Coverage is three declaration forms and no more: local declarations, local functions, and the
+    // method's own parameters. Measured by a Roslyn probe, it does NOT see a foreach variable, a pattern
+    // or out variable, a lambda parameter, a deconstruction, a catch declaration, a query range variable
+    // or a switch-case pattern. A caller that needs those excluded must block them itself; this helper
+    // does not, and its failure message therefore names what it found rather than how the node binds.
     internal static void AssertNoLocalShadow(BaseMethodDeclarationSyntax method, params string[] names)
     {
         var body = BodyOf(method);
@@ -299,8 +308,39 @@ internal static class RoslynPins
                 _ => false
             }) + method.ParameterList.Parameters.Count(p => p.Identifier.ValueText == name);
             Assert.True(shadows == 0,
-                $"'{name}' is shadowed inside {Describe(method)} — the asserted node would bind to the shadow");
+                $"'{name}' is redeclared as a local, local function or parameter inside {Describe(method)}; "
+                + "a name this pin asserts on may not be redeclared there");
         }
+    }
+
+    // Rule 2(b) done POSITIVELY, and the reason AssertNoLocalShadow is not sufficient on its own.
+    // Enumerating the syntax that can introduce a shadow is the construction this file already rejects for
+    // `Inert` and for the "written is not run" clauses, relearned a third time: an `out var ShouldEnqueue`
+    // declared inside an argument list no clause parses rebinds the pinned call to a delegate local that
+    // returns false — every enqueue suppressed, whole suite green (measured). Binding is what the clauses
+    // actually need, so assert binding: a local reports the same Name and ContainingType as the member it
+    // shadows and differs only in Kind. That covers every LOCAL declaration form at once rather than a list
+    // of them — and only those; two further families needed their own discriminators, below.
+    // ORDINARY, because SymbolKind alone is not enough for a method: a LOCAL FUNCTION is an IMethodSymbol
+    // whose ContainingType is the enclosing type, so it reports Kind, Name and ContainingType exactly as the
+    // member it shadows and would pass a Kind-only rule. MethodKind is what separates them.
+    // FULLY QUALIFIED containing type, because the simple name is not enough either: a class of the same
+    // simple name in another namespace, inherited by the pinned type, supplies an inherited member that
+    // reports the same Kind, Name and ContainingType.Name — measured GREEN against a simple-name compare.
+    // The predicate has a second line of defence in the repo-wide declaration count; `ComputeExpiry` and the
+    // two field receivers have none, which is why this comparison and not that count is what makes them safe.
+    internal static void AssertBindsToMemberOf(PluginCompilation plugin, SyntaxTree tree, SyntaxNode node,
+        SymbolKind kind, string containingType, string name, string where)
+    {
+        var symbol = BoundSymbol(plugin, tree, node);
+        var methodKind = (symbol as IMethodSymbol)?.MethodKind;
+        var actualType = symbol.ContainingType?.ToDisplayString();
+        Assert.True(symbol.Kind == kind && symbol.Name == name && actualType == containingType
+                    && methodKind is null or MethodKind.Ordinary,
+            $"{where}: '{node}' must bind to the {kind} {containingType}.{name}; it binds to the "
+            + $"{symbol.Kind}{(methodKind is null ? "" : $"/{methodKind}")} {actualType}.{symbol.Name}. "
+            + "A shadow, or an inherited member of a same-named type, that reaches this point satisfies "
+            + "every syntactic clause while the pinned member never runs.");
     }
 
     // Rule 3 — a node assertion pins what the tree says, not what the value is: `probe ??= Fake;`
