@@ -89,7 +89,7 @@ public class SendLockCoordinatorTests
         var r = new Recorder();
         var c = r.Build();
         var gate = new TaskCompletionSource();
-        var started = new CountdownEvent(2);
+        using var started = new CountdownEvent(2);
         Task Op()
         {
             started.Signal();
