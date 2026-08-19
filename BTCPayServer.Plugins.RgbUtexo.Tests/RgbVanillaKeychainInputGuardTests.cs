@@ -100,6 +100,30 @@ public class RgbVanillaKeychainInputGuardTests
         Assert.Equal(rgbColoredXpub, Master().Derive(new KeyPath(RgbColoredAccount)).Neuter().ToString(Net));
     }
 
+    // The mainnet arm of the same tie-in. The regtest gate above probes the guard empirically, but it
+    // can only speak for testnet coin types; mainnet is where real value sits, and an inverted mapping
+    // there would be discovered by users rather than by tests. Ties mainnet to rgb-lib's own output
+    // instead of restating the constants the guard already uses.
+    [Fact]
+    public void Gate_MainnetAccountsMatchWhatRgbLibReturns()
+    {
+        var keysJson = RgbLibWallet.RestoreKeys("Mainnet", TestMnemonic);
+        using var doc = JsonDocument.Parse(keysJson);
+        var rgbVanillaXpub = doc.RootElement.GetProperty("account_xpub_vanilla").GetString();
+        var rgbColoredXpub = doc.RootElement.GetProperty("account_xpub_colored").GetString();
+
+        using var signer = new MemoryWalletSigner(TestMnemonic, Network.Main);
+        Assert.True(signer.TryClassifyAccount(new KeyPath("86'/0'/0'/0/0"), out var accepted));
+        Assert.Equal(MemoryWalletSigner.PrevoutAccount.RgbLibVanilla, accepted);
+        Assert.True(signer.TryClassifyAccount(new KeyPath("86'/827166'/0'/0/0"), out var refused));
+        Assert.Equal(MemoryWalletSigner.PrevoutAccount.RgbLibColored, refused);
+
+        Assert.Equal(rgbVanillaXpub,
+            Master().Derive(new KeyPath("m/86'/0'/0'")).Neuter().ToString(Network.Main));
+        Assert.Equal(rgbColoredXpub,
+            Master().Derive(new KeyPath("m/86'/827166'/0'")).Neuter().ToString(Network.Main));
+    }
+
     // TEST 1 — the burn the audit describes: a co-spent input carrying another contract's allocation.
     // Its claimed colored path is TRUTHFUL, so only the account check stops it.
     [Fact]
