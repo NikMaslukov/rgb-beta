@@ -252,14 +252,15 @@ public class MemoryWalletSigner : IRgbWalletSigner
                 $"PSBT total to destination ({totalToDest} sat) does not match expected ({policy.ExpectedAmountSats.Value} sat)");
 
         long totalInputValue = 0;
-        var globalInputs = psbt.GetGlobalTransaction().Inputs;
-        for (int j = 0; j < psbt.Inputs.Count; j++)
+        // Resolve every input through GetTxOut(), which is the same accessor NBitcoin signs from.
+        // It prefers NonWitnessUtxo, so reading WitnessUtxo first let a PSBT producer declare an
+        // understated input value: the fee computed here stayed under MaxFeeSats while the sighash
+        // committed to the real, larger amount, and the difference was paid to miners.
+        foreach (var input in psbt.Inputs)
         {
-            var input = psbt.Inputs[j];
-            if (input.WitnessUtxo != null)
-                totalInputValue += input.WitnessUtxo.Value.Satoshi;
-            else if (input.NonWitnessUtxo != null)
-                totalInputValue += input.NonWitnessUtxo.Outputs[globalInputs[j].PrevOut.N].Value.Satoshi;
+            var prevOut = input.GetTxOut();
+            if (prevOut != null)
+                totalInputValue += prevOut.Value.Satoshi;
         }
 
         if (totalInputValue == 0 && psbt.Inputs.Count > 0)
