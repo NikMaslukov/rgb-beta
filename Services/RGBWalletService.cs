@@ -47,7 +47,8 @@ public class RGBWalletService : IRGBWalletService
         _log = log;
         _restoreExecutor = restoreExecutor;
         _sendCoordinator = new SendLockCoordinator(
-            _sendLocks, SetNeedsRecoveryAsync, ClearNeedsRecoveryAsync, id => _rgbLib.UnloadWallet(id));
+            _sendLocks, SetNeedsRecoveryAsync, ClearNeedsRecoveryAsync, id => _rgbLib.UnloadWallet(id),
+            FsyncStockAsync);
     }
 
     // internal, not private: the sweep's non-blocking acquisition (CleanupExpiredTransfersAsync,
@@ -62,14 +63,18 @@ public class RGBWalletService : IRGBWalletService
     internal SemaphoreSlim SendLockFor(string walletId)
         => _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
 
-    async Task SetNeedsRecoveryAsync(string walletId, CancellationToken ct)
+    // Returns whether THIS call set the flag, which is what lets the coordinator restore the pre-operation
+    // state rather than discharge a quarantine it never established. False means the wallet was already
+    // quarantined on entry; the polarity is pinned, because inverting it defeats the write-ahead entirely.
+    async Task<bool> SetNeedsRecoveryAsync(string walletId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
         var w = await ctx.RGBWallets.FindAsync([walletId], ct)
             ?? throw new KeyNotFoundException($"wallet {walletId} not found");
-        if (w.NeedsRecovery) return;
+        if (w.NeedsRecovery) return false;
         w.NeedsRecovery = true;
         await ctx.SaveChangesAsync(ct);
+        return true;
     }
 
     async Task ClearNeedsRecoveryAsync(string walletId, CancellationToken ct)
@@ -78,15 +83,43 @@ public class RGBWalletService : IRGBWalletService
         var w = await ctx.RGBWallets.FindAsync([walletId], ct)
             ?? throw new KeyNotFoundException($"wallet {walletId} not found");
 
+        // Nothing to make durable if the flag is already clear, and RefreshWalletAsync now discharges inside
+        // the coordinator's delegate, so the coordinator's own clear reaches this method with the flag already
+        // false on every healthy poll — fsyncing first would cost three file syncs per wallet per cycle.
+        if (!w.NeedsRecovery) return;
+
         // Fsync the Stock .dat files BEFORE clearing so that cleared implies the accepted
         // state is durable on disk; a crash after fsync but before the commit only re-quarantines.
-        var stockDir = RgbStockDurability.ResolveStockDir(
-            _rgbLib.GetWalletDataDir(walletId, w.Network), w.MasterFingerprint);
-        RgbStockDurability.FsyncStockDats(stockDir);
+        RgbStockDurability.FsyncStockDats(RgbStockDurability.ResolveStockDir(
+            _rgbLib.GetWalletDataDir(walletId, w.Network), w.MasterFingerprint));
 
-        if (!w.NeedsRecovery) return;
         w.NeedsRecovery = false;
         await ctx.SaveChangesAsync(ct);
+    }
+
+    // The coordinator calls this instead of the clear when the write-ahead did NOT set the flag. It exists
+    // because ClearNeedsRecoveryAsync was the only fsync on that path, so making the clear conditional would
+    // silently drop it. The operation on that path MAY have mutated the Stock — IssueAssetAsync does, and
+    // commits its RGBAssets row after the coordinator returns, so without this a crash could leave an asset
+    // row whose Stock issuance never reached disk; the cleanup sweep's zero-row and missing-file exits touch
+    // nothing, and for them this is simply a cheap no-op. The coordinator cannot tell the two apart, which is
+    // why the barrier is unconditional rather than per-caller. Must not swallow: on the
+    // paths where the flag is still set, propagating leaves it set, which is the safe direction.
+    //
+    // Two callers reach here and they differ. From IssueAssetAsync or the cleanup sweep the quarantine is
+    // still set and this is the operation's only durability barrier. From RefreshWalletAsync the delegate's
+    // own ClearNeedsRecoveryAsync has already fsynced and discharged, so this is a redundant second fsync —
+    // harmless, once per wallet per poll, and the price of the coordinator not needing to know which is which.
+    async Task FsyncStockAsync(string walletId, CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        var w = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"wallet {walletId} not found");
+
+        RgbStockDurability.FsyncStockDats(RgbStockDurability.ResolveStockDir(
+            _rgbLib.GetWalletDataDir(walletId, w.Network), w.MasterFingerprint));
+
+        _log.LogDebug("Fsynced Stock for wallet {WalletId} on the write-ahead path that does not discharge", walletId);
     }
 
     async Task<bool> IsNeedsRecoveryAsync(string walletId, CancellationToken ct)
@@ -256,6 +289,13 @@ public class RGBWalletService : IRGBWalletService
     async Task<int> CreateColorableUtxosInternalAsync(string walletId, int count, int size, CancellationToken ct)
     {
         var wallet = await GetWalletOrThrow(walletId, ct);
+        // A quarantined wallet is one whose Stock and rgb-lib database may disagree, because send_end writes
+        // both together — so refuse to sign a transaction spending its UTXOs until a refresh has reconciled
+        // it. This sits after GetWalletOrThrow so an unknown wallet still surfaces KeyNotFoundException, and
+        // it is the authoritative refusal: the listener's eligibility pre-filter only avoids the rgb-lib work.
+        if (await IsNeedsRecoveryAsync(walletId, ct))
+            throw new RgbWalletQuarantinedException(
+                "wallet is quarantined pending recovery — refusing to create UTXOs");
         var network = NetworkHelper.GetNetwork(wallet.Network);
 
         try
@@ -472,6 +512,14 @@ public class RGBWalletService : IRGBWalletService
         await _sendCoordinator.TryWithSendLockAsync(walletId, async () =>
         {
             await _rgbLib.RefreshAsync(walletId, ct);
+            // The one place a quarantine this call did not set is discharged, and the reason both halves of
+            // its position are load-bearing. INSIDE the delegate: the coordinator releases the send lock
+            // before returning, so a clear placed after the call would commit unlocked, and because
+            // SetNeedsRecoveryAsync early-returns on an already-set flag, a holder that marked in that window
+            // is invisible — the clear would discharge ITS quarantine mid-mutation. IMMEDIATELY AFTER the
+            // refresh: RefreshAsync is what reconciles the Stock, so gating the discharge on anything further
+            // lets an unrelated failure hold the quarantine open with nothing left to lift it.
+            await ClearNeedsRecoveryAsync(walletId, ct);
             await _rgbLib.GetBtcBalanceAsync(walletId, ct, sync: true);
         }, ct);
     }

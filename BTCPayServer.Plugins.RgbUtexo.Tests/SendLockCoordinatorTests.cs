@@ -11,11 +11,19 @@ public class SendLockCoordinatorTests
         public readonly HashSet<string> Marked = new();
         public readonly ConcurrentDictionary<string, SemaphoreSlim> Locks = new();
 
-        public SendLockCoordinator Build() => new(
+        // The Marked write stays inside lock (Events): WithSendLock_DifferentWallets_RunConcurrently drives
+        // two wallets at once, so an unlocked Add would race the locked Remove.
+        public SendLockCoordinator Build(Func<string, CancellationToken, Task>? fsync = null) => new(
             Locks,
-            (id, _) => { lock (Events) { Events.Add($"mark:{id}"); Marked.Add(id); } return Task.CompletedTask; },
+            (id, _) =>
+            {
+                bool added;
+                lock (Events) { Events.Add($"mark:{id}"); added = Marked.Add(id); }
+                return Task.FromResult(added);
+            },
             (id, _) => { lock (Events) { Events.Add($"clear:{id}"); Marked.Remove(id); } return Task.CompletedTask; },
-            id => { lock (Events) { Events.Add($"evict:{id}"); } });
+            id => { lock (Events) { Events.Add($"evict:{id}"); } },
+            fsync ?? ((id, _) => { lock (Events) { Events.Add($"fsync:{id}"); } return Task.CompletedTask; }));
     }
 
     [Fact]
@@ -61,6 +69,67 @@ public class SendLockCoordinatorTests
         Assert.Contains("w", r.Marked);
         Assert.Contains("evict:w", r.Events);
         Assert.DoesNotContain("clear:w", r.Events);
+    }
+
+    // T1. The regression test for the audit finding: a successful operation on an ALREADY-quarantined wallet
+    // must not discharge it. Pre-populating Marked is the discriminating input — it makes mark report that it
+    // did not set the flag, which is the only thing the coordinator reads to make this decision.
+    [Fact]
+    public async Task WriteAhead_PreexistingMark_OpSucceeds_FsyncsButDoesNotClear()
+    {
+        var r = new Recorder();
+        r.Marked.Add("w");
+        var c = r.Build();
+        await c.WithSendLockAsync("w", () => { lock (r.Events) r.Events.Add("op:w"); return Task.CompletedTask; });
+        Assert.Equal(new[] { "mark:w", "op:w", "fsync:w" }, r.Events);
+        Assert.DoesNotContain("clear:w", r.Events);
+        Assert.Contains("w", r.Marked);
+    }
+
+    // T3. Through the non-blocking entry point, and it additionally pins that "the op ran" and "the quarantine
+    // was discharged" are now separate facts — the bool says the first, the events say the second.
+    [Fact]
+    public async Task TryWithSendLock_PreexistingMark_RunsOpButDoesNotClear()
+    {
+        var r = new Recorder();
+        r.Marked.Add("w");
+        var c = r.Build();
+        var acquired = await c.TryWithSendLockAsync("w",
+            () => { lock (r.Events) r.Events.Add("op:w"); return Task.CompletedTask; });
+        Assert.True(acquired);
+        Assert.Equal(new[] { "mark:w", "op:w", "fsync:w" }, r.Events);
+        Assert.DoesNotContain("clear:w", r.Events);
+        Assert.Contains("w", r.Marked);
+    }
+
+    // T4. Through the inline entry point, which takes no lock because its callers already hold one.
+    [Fact]
+    public async Task InlineWriteAhead_PreexistingMark_DoesNotClear()
+    {
+        var r = new Recorder();
+        r.Marked.Add("w");
+        var c = r.Build();
+        await c.WriteAheadInlineAsync("w",
+            () => { lock (r.Events) r.Events.Add("inline:w"); return Task.CompletedTask; });
+        Assert.Equal(new[] { "mark:w", "inline:w", "fsync:w" }, r.Events);
+        Assert.DoesNotContain("clear:w", r.Events);
+        Assert.Contains("w", r.Marked);
+    }
+
+    // T10. A failing durability barrier must propagate rather than be swallowed. No eviction: the fsync call
+    // sits after the try/catch, exactly as the clear does, so this matches the existing behaviour for _clear.
+    [Fact]
+    public async Task WriteAhead_FsyncThrows_Propagates_LeavesMarked()
+    {
+        var r = new Recorder();
+        r.Marked.Add("w");
+        var c = r.Build(fsync: (_, _) => throw new IOException("fsync failed"));
+        await Assert.ThrowsAsync<IOException>(() =>
+            c.WithSendLockAsync("w", () => { lock (r.Events) r.Events.Add("op:w"); return Task.CompletedTask; }));
+        // The exact list, not just the absences: asserting only "no clear, still marked" would stay green if
+        // the fsync were moved BEFORE the op, since Marked is pre-seeded and only clear removes from it.
+        Assert.Equal(new[] { "mark:w", "op:w" }, r.Events);
+        Assert.Contains("w", r.Marked);
     }
 
     [Fact]

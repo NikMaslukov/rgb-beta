@@ -5,20 +5,27 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public sealed class SendLockCoordinator
 {
     readonly ConcurrentDictionary<string, SemaphoreSlim> _locks;
-    readonly Func<string, CancellationToken, Task> _mark;
+    readonly Func<string, CancellationToken, Task<bool>> _mark;
     readonly Func<string, CancellationToken, Task> _clear;
     readonly Action<string> _evict;
+    readonly Func<string, CancellationToken, Task> _fsync;
 
+    // evict sits between clear and fsync deliberately: those two are the only mutually-substitutable
+    // parameters, so separating them means a swap of neighbours does not compile. That is friction, not a
+    // guarantee — mark still converts into the clear slot by Task<bool>->Task return covariance — so the
+    // construction site is pinned by argument identity in RgbQuarantineDischargeSourcePinTests.
     public SendLockCoordinator(
         ConcurrentDictionary<string, SemaphoreSlim> locks,
-        Func<string, CancellationToken, Task> mark,
+        Func<string, CancellationToken, Task<bool>> mark,
         Func<string, CancellationToken, Task> clear,
-        Action<string> evict)
+        Action<string> evict,
+        Func<string, CancellationToken, Task> fsync)
     {
         _locks = locks;
         _mark = mark;
         _clear = clear;
         _evict = evict;
+        _fsync = fsync;
     }
 
     public async Task<T> WithSendLockAsync<T>(string walletId, Func<Task<T>> op, CancellationToken ct = default)
@@ -55,7 +62,7 @@ public sealed class SendLockCoordinator
 
     async Task<T> WriteAheadAsync<T>(string walletId, Func<Task<T>> op, CancellationToken ct)
     {
-        await _mark(walletId, ct);
+        var marked = await _mark(walletId, ct);
         T result;
         try
         {
@@ -66,7 +73,12 @@ public sealed class SendLockCoordinator
             try { _evict(walletId); } catch { }
             throw;
         }
-        await _clear(walletId, ct);
+        // Restore only the state this write-ahead changed. A quarantine that predates it records an
+        // incompleteness this operation did not reconcile, and no fsync can supply state that was never
+        // written — only a reconciling refresh can, and that is RefreshWalletAsync's job, not the
+        // coordinator's. Either way the Stock is left durable: the clear fsyncs before committing.
+        if (marked) await _clear(walletId, ct);
+        else await _fsync(walletId, ct);
         return result;
     }
 }

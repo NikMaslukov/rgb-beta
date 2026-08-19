@@ -263,6 +263,13 @@ public class RGBInvoiceListener : IHostedService
                         walletId: w.Id, count: decision.RequestCount, size: decision.UtxoSize, ct: ct);
                     _cooldowns.RecordAttemptSucceeded(w.Id, DateTimeOffset.UtcNow);
                 }
+                catch (RgbWalletQuarantinedException ex)
+                {
+                    // Stamp nothing and do not rethrow, so this agrees exactly with the SkipQuarantined
+                    // pre-filter above. A quarantine normally clears on the next refresh, so treating it as a
+                    // failed attempt would replace a one-cycle wait with a 30-minute doubling backoff.
+                    _log.LogDebug(ex, "Wallet {WalletId}: skipping UTXO replenishment (quarantined)", w.Id);
+                }
                 catch
                 {
                     // Scoped to the creation call, so the failures the sweep does before it — the store
