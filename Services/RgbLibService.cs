@@ -240,7 +240,11 @@ public class RgbLibService : IRgbLibService
         return await handle.ExecuteAsync(wallet =>
         {
             ct.ThrowIfCancellationRequested();
-            var balanceJson = wallet.GetBtcBalance(sync);
+            // rgb-lib's parameter is skipSync, so it is the INVERSE of this method's `sync`. Passing `sync`
+            // straight through — as this line did — silently reversed every caller: the three that ask for a
+            // sync got none, and the page loads that take the `sync: false` default were the only ones
+            // syncing, on the request path. Named argument and negation, so the next reader sees the flip.
+            var balanceJson = wallet.GetBtcBalance(skipSync: !sync);
             var balance = JsonSerializer.Deserialize<BtcBalanceResponse>(balanceJson);
 
             return new BtcBalance(

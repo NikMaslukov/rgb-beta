@@ -188,6 +188,39 @@ public class RgbQuarantineDischargeSourcePinTests
             + "before it certifies a wallet nothing has reconciled.");
     }
 
+    // P7. rgb-lib's GetBtcBalance takes skipSync, the INVERSE of this plugin's `sync`. Passing `sync` straight
+    // through shipped in production and reversed every caller silently: the three sites asking for a sync got
+    // none, while the page loads taking the `sync: false` default were the only ones syncing. Nothing could
+    // observe it — the balance is still returned, just from unsynced state — so the only guard available is on
+    // the shape of the call. Pinned as "the argument is a negation of the method's own sync parameter", because
+    // the plausible regression is a future reader "simplifying" the `!` away.
+    [Fact]
+    public void P7_BtcBalanceNegatesSyncIntoSkipSync()
+    {
+        var plugin = PluginCompilation.Shared;
+        const string file = "Services/RgbLibService.cs";
+        var tree = plugin.Tree(file);
+        var method = RoslynPins.Method(tree, "RgbLibService", "GetBtcBalanceAsync");
+        var body = RoslynPins.BodyOf(method);
+
+        var calls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetBtcBalance" })
+            .ToList();
+        Assert.True(calls.Count == 1, $"expected one GetBtcBalance call in {file}, found {calls.Count}");
+
+        var args = calls[0].ArgumentList.Arguments;
+        Assert.True(args.Count == 1, $"GetBtcBalance must be passed exactly one argument, found {args.Count}");
+        Assert.Equal("skipSync", args[0].NameColon?.Name.Identifier.ValueText);
+
+        Assert.True(args[0].Expression is PrefixUnaryExpressionSyntax
+                    {
+                        RawKind: (int)SyntaxKind.LogicalNotExpression,
+                        Operand: IdentifierNameSyntax { Identifier.ValueText: "sync" }
+                    },
+            $"the skipSync argument must be `!sync` — rgb-lib's flag is the inverse of this method's, so passing "
+            + $"`sync` unchanged reverses every caller silently; found '{args[0].Expression}'.");
+    }
+
     // P6 clause 1. SetNeedsRecoveryAsync's return polarity. WriteAheadAsync's `if (marked)` requires "true means
     // THIS call set the flag"; inverting the two literals compiles, is invisible to every test, and produces the
     // exact false-ACCEPT the change exists to close — a pre-quarantined wallet reports true, so the coordinator
