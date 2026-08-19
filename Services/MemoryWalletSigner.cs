@@ -70,6 +70,8 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
         CalibrateIndexCeiling(psbt);
         PopulateInputKeyPaths(psbt, network);
+        if (policy.RequireRgbVanillaKeychainInputs)
+            EnsureInputsOnRgbVanillaAccount(psbt, network, cancellationToken);
         ValidateOutputs(psbt, network, policy);
         RgbSighashGuard.EnsureAllInputsAllowed(psbt);
 
@@ -277,6 +279,118 @@ public class MemoryWalletSigner : IRgbWalletSigner
             if (fee > maxFee)
                 throw new InvalidOperationException(
                     $"PSBT fee ({fee} sat) exceeds max allowed {maxFee} sat");
+        }
+    }
+
+    // rgb-lib's keychain names, NOT this class's members, which are misleading: the keychain rgb-lib
+    // calls "vanilla" — spendable BTC that never carries an allocation — is _coloredAccountKey, and the
+    // one it calls "colored", where every RGB allocation lives, is _rgbColoredAccountKey. The BIP84
+    // account this class also derives is vestigial: rgb-lib is handed its own generated xpubs and never
+    // produces a descriptor for it.
+    internal enum PrevoutAccount { RgbLibVanilla, RgbLibColored, UnusedBip84 }
+
+    // Mirrors IsAllowedAccountPath's constraints so a path this classifies is exactly one SignInput
+    // could derive a signing key from.
+    internal bool TryClassifyAccount(KeyPath path, out PrevoutAccount account)
+    {
+        account = PrevoutAccount.UnusedBip84;
+        if (_allowedAccountPrefixes == null || path.Indexes.Length != 5) return false;
+        var chain = path.Indexes[3];
+        var index = path.Indexes[4];
+        if (chain > 1) return false;
+        if ((index & 0x80000000) != 0 || index > MaxReasonableIndex) return false;
+
+        var accountIndexes = path.Indexes.AsSpan()[..3];
+        if (accountIndexes.SequenceEqual(_allowedAccountPrefixes[1].Indexes.AsSpan()))
+        {
+            account = PrevoutAccount.RgbLibVanilla;
+            return true;
+        }
+        if (accountIndexes.SequenceEqual(_allowedAccountPrefixes[2].Indexes.AsSpan()))
+        {
+            account = PrevoutAccount.RgbLibColored;
+            return true;
+        }
+        if (accountIndexes.SequenceEqual(_allowedAccountPrefixes[0].Indexes.AsSpan()))
+        {
+            account = PrevoutAccount.UnusedBip84;
+            return true;
+        }
+        return false;
+    }
+
+    // Verifies a claimed derivation instead of searching for one: derive exactly the claimed path and
+    // test it against the prevout script. A claim that verifies is true whoever supplied it, and a claim
+    // that does not is grounds for refusal — so this needs one derivation per entry rather than a scan.
+    internal bool TryVerifyClaimedPath(Script script, KeyPath claimed, Network network, out PrevoutAccount account)
+    {
+        if (!TryClassifyAccount(claimed, out account)) return false;
+        if (_masterKey == null) return false;
+
+        var pubKey = _masterKey.Derive(claimed).GetPublicKey();
+        return pubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script
+            || pubKey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == script;
+    }
+
+    void EnsureInputsOnRgbVanillaAccount(PSBT psbt, Network network, CancellationToken cancellationToken)
+    {
+        for (int i = 0; i < psbt.Inputs.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var input = psbt.Inputs[i];
+
+            // GetTxOut() is the accessor NBitcoin itself signs from, so resolving through it is what
+            // guarantees this guard inspects the txout the sighash will commit to.
+            var prevOut = input.GetTxOut();
+            if (prevOut == null)
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} has an unresolvable prevout — refusing to sign");
+
+            // NBitcoin prefers NonWitnessUtxo and never checks the two fields agree, so a disagreeing
+            // pair would let a producer show this guard one txout while the signature commits to another.
+            if (input.WitnessUtxo != null && input.NonWitnessUtxo != null)
+            {
+                var n = input.PrevOut.N;
+                var declared = n < input.NonWitnessUtxo.Outputs.Count
+                    ? input.NonWitnessUtxo.Outputs[(int)n]
+                    : null;
+                if (declared == null
+                    || declared.ScriptPubKey != input.WitnessUtxo.ScriptPubKey
+                    || declared.Value != input.WitnessUtxo.Value)
+                    throw new InvalidOperationException(
+                        $"PSBT input #{i} has conflicting utxo fields — refusing to sign");
+            }
+
+            // Witness programs only: the pre-segwit sighash algorithm does not commit to the input
+            // amount, so the commitment that makes a forged prevout harmless would not hold there.
+            var script = prevOut.ScriptPubKey;
+            if (!script.IsScriptType(ScriptType.P2WPKH) && !script.IsScriptType(ScriptType.Taproot))
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} prevout is not a witness program — refusing to sign");
+
+            // Exactly the entries SignInput can derive a signing key from. Foreign fingerprints grant
+            // no capability, so ignoring them keeps this set a superset of the signable one.
+            var claimed = new List<KeyPath>();
+            foreach (var kp in input.HDKeyPaths)
+                if (kp.Value.MasterFingerprint.ToString().Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
+                    claimed.Add(kp.Value.KeyPath);
+            foreach (var kp in input.HDTaprootKeyPaths)
+                if (kp.Value.RootedKeyPath.MasterFingerprint.ToString().Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
+                    claimed.Add(kp.Value.RootedKeyPath.KeyPath);
+
+            if (claimed.Count == 0)
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} carries no qualifying key path for this wallet — refusing to sign");
+
+            foreach (var path in claimed)
+            {
+                if (!TryVerifyClaimedPath(script, path, network, out var account))
+                    throw new InvalidOperationException(
+                        $"PSBT input #{i} key path does not match its prevout script — refusing to sign");
+                if (account != PrevoutAccount.RgbLibVanilla)
+                    throw new InvalidOperationException(
+                        $"PSBT input #{i} is on the {account} account, not rgb-lib's vanilla keychain — refusing to sign");
+            }
         }
     }
 

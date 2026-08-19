@@ -311,7 +311,8 @@ public class RGBWalletService : IRGBWalletService
                     MaxUnknownOutputSats = 0,
                     MaxFeeSats = EstimateTaprootFee(count, count + 1, 2.0f) * 3,
                     AllowedScripts = new HashSet<Script> { ownAddr.ScriptPubKey },
-                    MaxOutputCount = count + 1
+                    MaxOutputCount = count + 1,
+                    RequireRgbVanillaKeychainInputs = true
                 }, ct);
             await _rgbLib.CreateUtxosEndAsync(walletId, signed, ct);
             return count;
@@ -883,7 +884,8 @@ public class RGBWalletService : IRGBWalletService
             MaxFeeSats = fee,
             AllowedScripts = new HashSet<Script> { changeAddress.ScriptPubKey },
             MaxOutputCount = hasChange ? 2 : 1,
-            StrictAllowedScriptsOnly = true
+            StrictAllowedScriptsOnly = true,
+            RequireRgbVanillaKeychainInputs = true
         };
 
         var signedBase64 = await signer.SignPsbtAsync(psbt.ToBase64(), network, policy, ct);

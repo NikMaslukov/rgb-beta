@@ -20,6 +20,20 @@ public class SigningPolicy
     /// emit wallet-derived outputs at indices not known in advance (e.g. SendAsset, CreateUtxos).
     /// </summary>
     public bool StrictAllowedScriptsOnly { get; set; }
+
+    /// <summary>
+    /// When true, every PSBT input must be provably owned by rgb-lib's VANILLA keychain
+    /// (the account rgb-lib returns as AccountXpubVanilla), proven by re-deriving from this
+    /// wallet's own keys against the input's prevout script. Inputs on rgb-lib's colored
+    /// keychain — the only place RGB allocations live — are refused, and the refusal aborts the
+    /// whole PSBT because SignWithKeys applies a key to every input, so per-input refusal is not
+    /// expressible.
+    /// Use on paths that sign a PSBT they did not build and that must never spend an
+    /// allocation-bearing UTXO (CreateUtxos, SendBtc). Do NOT use on SendAsset, whose whole
+    /// purpose is spending colored inputs and which is protected instead by the pre-sign intent
+    /// gate's independent Stock scan.
+    /// </summary>
+    public bool RequireRgbVanillaKeychainInputs { get; set; }
 }
 
 public interface IRgbWalletSigner : IDisposable
