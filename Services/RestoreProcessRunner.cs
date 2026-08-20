@@ -157,6 +157,7 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         var psi = new ProcessStartInfo
         {
             RedirectStandardInput = true,
+            RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
         };
@@ -187,7 +188,7 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         return psi;
     }
 
-    static string? ResolvePrlimitPath()
+    internal static string? ResolvePrlimitPath()
     {
         foreach (var p in new[] { "/usr/bin/prlimit", "/bin/prlimit" })
             if (File.Exists(p)) return p;
@@ -232,15 +233,17 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         return new StagingUsage(bytes, entries);
     }
 
-    sealed class RealChildHandle : IChildHandle
+    internal sealed class RealChildHandle : IChildHandle
     {
         const int StdErrCapChars = 8192;
 
         readonly Process _p;
+        readonly Task<string> _stdout;
         readonly Task<string> _stderr;
-        public RealChildHandle(ProcessStartInfo psi)
+        public RealChildHandle(ProcessStartInfo psi, int stdOutCapChars = StdErrCapChars)
         {
             _p = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned null");
+            _stdout = DrainCappedAsync(_p.StandardOutput, stdOutCapChars);
             // Drain stderr concurrently from the start so a child that writes more than the OS pipe
             // buffer cannot block mid-restore (which would convert every restore into a timeout kill).
             // Retain only a capped prefix so a noisy child cannot shift the DoS into parent memory by
@@ -275,11 +278,13 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             catch (OperationCanceledException) { return _p.HasExited; }
         }
         public Task<string> ReadStdErrAsync() => _stderr;
-        public Task WriteStdinLineAndCloseAsync(string line)
+        public Task<string> ReadStdOutAsync() => _stdout;
+        public async Task WriteStdinLineAndCloseAsync(string line)
         {
             try
             {
-                _p.StandardInput.WriteLine(line);
+                await _p.StandardInput.WriteLineAsync(line);
+                await _p.StandardInput.FlushAsync();
                 _p.StandardInput.Close();
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -287,7 +292,6 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
                 // Child already exited (broken pipe): the supervise loop observes HasExited and
                 // reports the real exit code — do not fault the whole restore on a closed stdin.
             }
-            return Task.CompletedTask;
         }
         public void Dispose()
         {

@@ -3,7 +3,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public interface IRgbLibService : IDisposable
 {
     Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default);
-    void UnloadWallet(string walletId);
+    bool UnloadWallet(string walletId);
     string GetWalletDataDir(string walletId, string walletNetwork);
     
     Task<string> GetAddressAsync(string walletId, CancellationToken ct = default);

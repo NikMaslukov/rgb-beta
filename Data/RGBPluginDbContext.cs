@@ -34,6 +34,9 @@ public class RGBPluginDbContext : DbContext
             entity.Property(e => e.MasterFingerprint).IsRequired();
             entity.Property(e => e.MaxAllocationsPerUtxo).HasDefaultValue(10);
             entity.Property(e => e.NeedsRecovery).HasDefaultValue(false);
+            entity.Property(e => e.InvoiceScanCursor);
+            entity.Property(e => e.DiscoveryScanCursor);
+            entity.Property(e => e.DiscoveryAssetPage).HasDefaultValue(0);
         });
 
         modelBuilder.Entity<RGBInvoice>(entity =>
@@ -64,5 +67,3 @@ public class RGBPluginDbContext : DbContext
         });
     }
 }
-
-

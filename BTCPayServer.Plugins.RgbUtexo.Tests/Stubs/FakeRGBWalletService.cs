@@ -23,7 +23,7 @@ public sealed class FakeRGBWalletService : IRGBWalletService
     public Task<List<UnspentOutput>> ListUnspentsAsync(string walletId, CancellationToken ct = default) => throw Reg();
     public Task<List<BtcTransaction>> ListBtcTransactionsAsync(string walletId, CancellationToken ct = default) => throw Reg();
     public Task<RgbAsset> IssueAssetAsync(string walletId, string ticker, string name, long amt, int precision = 0, CancellationToken ct = default) => throw Reg();
-    public Task RefreshWalletAsync(string walletId, CancellationToken ct = default) => throw Reg();
+    public Task<bool> RefreshWalletAsync(string walletId, CancellationToken ct = default) => throw Reg();
     public Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, CancellationToken ct = default) => throw Reg();
     public Task<List<RgbTransfer>> GetTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default) => throw Reg();
     public Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default) => throw Reg();

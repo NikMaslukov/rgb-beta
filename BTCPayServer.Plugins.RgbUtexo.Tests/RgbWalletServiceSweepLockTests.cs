@@ -44,7 +44,7 @@ public class RgbWalletServiceSweepLockTests
         var mnemonic = new MnemonicProtectionService(new EphemeralDataProtectionProvider(),
             NullLogger<MnemonicProtectionService>.Instance);
         var svc = new RGBWalletService(new FakeRgbLib(cfg), db, cfg, mnemonic, null!, null!, null!,
-            NullLogger<RGBWalletService>.Instance, null!);
+            NullLogger<RGBWalletService>.Instance, null!, null!);
         return (svc, cfg);
     }
 
@@ -94,7 +94,7 @@ public class RgbWalletServiceSweepLockTests
 
                 // Separate from the race: proves the cleanup was SKIPPED rather than run anyway. Running it
                 // would open the fixture database and throw on the missing batch_transfer table.
-                await call;
+                Assert.False(await call);
             }
             finally { sendLock.Release(); }
         }

@@ -39,6 +39,7 @@ public interface IChildHandle : IDisposable
     int ExitCode { get; }
     void Kill(bool entireProcessTree);
     Task<bool> WaitForExitAsync(TimeSpan grace, CancellationToken ct);
+    Task<string> ReadStdOutAsync();
     Task<string> ReadStdErrAsync();
     Task WriteStdinLineAndCloseAsync(string line);
 }

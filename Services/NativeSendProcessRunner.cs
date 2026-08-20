@@ -1,0 +1,158 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Extensions.Logging;
+
+namespace BTCPayServer.Plugins.RgbUtexo.Services;
+
+public sealed record NativeSendLimits(
+    TimeSpan Timeout,
+    long RamCapBytes,
+    TimeSpan CpuLimit,
+    TimeSpan Poll,
+    TimeSpan ReapGrace,
+    int OutputCapChars = 1_048_576);
+
+public enum NativeSendOutcome { Exited, TimedOut, KilledRam }
+
+public sealed record NativeSendRunResult(
+    NativeSendOutcome Outcome,
+    int? ExitCode,
+    string StdOut,
+    string StdErr,
+    bool ChildReaped,
+    TimeSpan Elapsed);
+
+public interface INativeSendProcessRunner
+{
+    Task<NativeSendRunResult> RunAsync(
+        string operation, string requestJson, NativeSendLimits limits, CancellationToken ct);
+}
+
+public sealed class NativeSendProcessRunner : INativeSendProcessRunner
+{
+    readonly ILogger<NativeSendProcessRunner> _log;
+    readonly Func<ProcessStartInfo, IChildHandle> _handleFactory;
+    readonly Func<string> _resolveHelperDll;
+    readonly Func<string> _resolveDotnetHost;
+
+    public NativeSendProcessRunner(ILogger<NativeSendProcessRunner> log,
+        Func<ProcessStartInfo, IChildHandle>? handleFactory = null,
+        Func<string>? resolveHelperDll = null,
+        Func<string>? resolveDotnetHost = null)
+    {
+        _log = log;
+        _handleFactory = handleFactory ?? (psi => new RestoreProcessRunner.RealChildHandle(psi, 1_048_576));
+        _resolveHelperDll = resolveHelperDll ?? (() => Path.Combine(
+            Path.GetDirectoryName(typeof(NativeSendProcessRunner).Assembly.Location)!,
+            "RgbRestoreHelper.dll"));
+        _resolveDotnetHost = resolveDotnetHost ?? (() => RestoreProcessRunner.ResolveDotnetHost(
+            Environment.ProcessPath,
+            RuntimeEnvironment.GetRuntimeDirectory(),
+            Environment.GetEnvironmentVariable("DOTNET_ROOT"),
+            File.Exists,
+            OperatingSystem.IsWindows()));
+    }
+
+    public async Task<NativeSendRunResult> RunAsync(
+        string operation, string requestJson, NativeSendLimits limits, CancellationToken ct)
+    {
+        if (operation is not ("send-begin" or "send-end"))
+            throw new ArgumentOutOfRangeException(nameof(operation));
+        var helperDll = _resolveHelperDll();
+        if (!File.Exists(helperDll))
+            throw new InvalidOperationException($"Native send helper not found at {helperDll}");
+
+        var psi = BuildStartInfo(helperDll, operation, limits);
+        var sw = Stopwatch.StartNew();
+        IChildHandle child;
+        try { child = _handleFactory(psi); }
+        catch (Exception ex) { throw new InvalidOperationException("Failed to launch native send helper", ex); }
+
+        using (child)
+        {
+            var outcome = NativeSendOutcome.TimedOut;
+            var killed = false;
+            var inputTask = child.WriteStdinLineAndCloseAsync(requestJson);
+            try
+            {
+                var remainingForInput = limits.Timeout - sw.Elapsed;
+                if (remainingForInput <= TimeSpan.Zero) killed = true;
+                else await inputTask.WaitAsync(remainingForInput, ct);
+            }
+            catch (OperationCanceledException) { killed = true; }
+            catch (TimeoutException) { killed = true; }
+            while (!child.HasExited)
+            {
+                if (killed) break;
+                if (sw.Elapsed >= limits.Timeout) { killed = true; break; }
+                try
+                {
+                    if (child.WorkingSet64 > limits.RamCapBytes)
+                    {
+                        outcome = NativeSendOutcome.KilledRam;
+                        killed = true;
+                        break;
+                    }
+                }
+                catch { }
+
+                var remaining = limits.Timeout - sw.Elapsed;
+                if (remaining <= TimeSpan.Zero) { killed = true; break; }
+                try { await Task.Delay(remaining < limits.Poll ? remaining : limits.Poll, ct); }
+                catch (OperationCanceledException) { killed = true; break; }
+            }
+
+            if (!killed)
+            {
+                var reaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
+                return new NativeSendRunResult(
+                    NativeSendOutcome.Exited,
+                    child.ExitCode,
+                    await child.ReadStdOutAsync(),
+                    await child.ReadStdErrAsync(),
+                    reaped,
+                    sw.Elapsed);
+            }
+
+            child.Kill(entireProcessTree: true);
+            var childReaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
+            try { await inputTask.WaitAsync(limits.ReapGrace, CancellationToken.None); } catch { }
+            if (!childReaped)
+                _log.LogCritical("Native RGB send child could not be confirmed reaped");
+            return new NativeSendRunResult(outcome, null, "", "", childReaped, sw.Elapsed);
+        }
+    }
+
+    ProcessStartInfo BuildStartInfo(string helperDll, string operation, NativeSendLimits limits)
+    {
+        var dotnet = _resolveDotnetHost();
+        var psi = new ProcessStartInfo
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        var prlimit = RuntimeInformation.IsOSPlatform(OSPlatform.Linux)
+            ? RestoreProcessRunner.ResolvePrlimitPath()
+            : null;
+        if (prlimit != null)
+        {
+            psi.FileName = prlimit;
+            psi.ArgumentList.Add($"--cpu={(int)limits.CpuLimit.TotalSeconds}");
+            psi.ArgumentList.Add("--");
+            psi.ArgumentList.Add(dotnet);
+        }
+        else
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+                _log.LogWarning("prlimit unavailable; native send CPU is bounded by the wall-clock kill");
+            psi.FileName = dotnet;
+        }
+        psi.ArgumentList.Add("exec");
+        psi.ArgumentList.Add(helperDll);
+        psi.ArgumentList.Add(operation);
+        psi.ArgumentList.Add(Math.Clamp((int)Math.Ceiling(limits.Timeout.TotalMilliseconds), 100, 600_000).ToString());
+        return psi;
+    }
+}

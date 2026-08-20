@@ -65,7 +65,7 @@ public class RestoreGateTests
             NullLogger<MnemonicProtectionService>.Instance);
         var exec = new RestoreExecutor(runner, cfg, NullLogger<RestoreExecutor>.Instance);
         return new RGBWalletService(rgbLib, db, cfg, mnemonic, null!, null!, null!,
-            NullLogger<RGBWalletService>.Instance, exec);
+            NullLogger<RGBWalletService>.Instance, exec, null!);
     }
 
     const string Mnemonic = "trophy hire lady move shuffle quit explain track praise twenty walnut awful";

@@ -58,7 +58,7 @@ public class RgbLibServiceUnloadTests
         Assert.True(factoryEntered.Wait(TimeSpan.FromSeconds(2)));
 
         var sw = Stopwatch.StartNew();
-        RgbLibService.UnloadFromCache(wallets, "w", null);
+        Assert.False(RgbLibService.UnloadFromCache(wallets, "w", null));
         sw.Stop();
 
         Assert.True(sw.ElapsedMilliseconds < 1000, "UnloadWallet blocked on in-flight construction");
@@ -88,7 +88,7 @@ public class RgbLibServiceUnloadTests
         var construction = Task.Run(() => { _ = lazy.Value; });
         Assert.True(factoryEntered.Wait(TimeSpan.FromSeconds(2)));
 
-        RgbLibService.UnloadFromCache(wallets, "w", null);
+        Assert.False(RgbLibService.UnloadFromCache(wallets, "w", null));
 
         release.Set();
         construction.Wait(TimeSpan.FromSeconds(2));
@@ -104,7 +104,7 @@ public class RgbLibServiceUnloadTests
         var wallets = new ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>>();
         wallets["w"] = Created(out var handle);
 
-        RgbLibService.UnloadFromCache(wallets, "w", null);
+        Assert.True(RgbLibService.UnloadFromCache(wallets, "w", null));
 
         Assert.True(handle.IsDisposed);
         Assert.True(handle.NativeDisposeCalled);
@@ -120,7 +120,7 @@ public class RgbLibServiceUnloadTests
         wallets["w"] = lazy;
         try { _ = lazy.Value; } catch (InvalidOperationException) { }
 
-        RgbLibService.UnloadFromCache(wallets, "w", null);
+        Assert.False(RgbLibService.UnloadFromCache(wallets, "w", null));
 
         Assert.True(SpinUntil(() => !wallets.ContainsKey("w")));
     }
@@ -140,7 +140,7 @@ public class RgbLibServiceUnloadTests
         }));
         await opStarted.Task;
 
-        RgbLibService.UnloadFromCache(wallets, "w", null);
+        Assert.False(RgbLibService.UnloadFromCache(wallets, "w", null));
 
         Assert.False(handle.NativeWalletFreed);
         Assert.True(wallets.ContainsKey("w"));
@@ -161,7 +161,7 @@ public class RgbLibServiceUnloadTests
     public void Unload_MissingWallet_IsNoOp()
     {
         var wallets = new ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>>();
-        RgbLibService.UnloadFromCache(wallets, "absent", null);
+        Assert.True(RgbLibService.UnloadFromCache(wallets, "absent", null));
         Assert.False(wallets.ContainsKey("absent"));
     }
 }

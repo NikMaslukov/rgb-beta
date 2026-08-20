@@ -16,7 +16,7 @@ public interface IRGBWalletService
     Task<List<UnspentOutput>> ListUnspentsAsync(string walletId, CancellationToken ct = default);
     Task<List<BtcTransaction>> ListBtcTransactionsAsync(string walletId, CancellationToken ct = default);
     Task<RgbAsset> IssueAssetAsync(string walletId, string ticker, string name, long amt, int precision = 0, CancellationToken ct = default);
-    Task RefreshWalletAsync(string walletId, CancellationToken ct = default);
+    Task<bool> RefreshWalletAsync(string walletId, CancellationToken ct = default);
     Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, CancellationToken ct = default);
     Task<List<RgbTransfer>> GetTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default);
     Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default);

@@ -165,25 +165,34 @@ public class RgbQuarantineDischargeSourcePinTests
             "the coordinator call must be given a lambda: passing a method group or a pre-built Task moves the "
             + "work outside the region the write-ahead covers.");
 
-        var clears = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+        var reconciliationCalls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => plugin.Model(tree).GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "ReconcileWalletRecoveryAsync",
+                ContainingType.Name: WalletType
+            })
+            .ToList();
+        Assert.True(reconciliationCalls.Count == 1,
+            $"RefreshWalletAsync must reconcile exactly once, found {reconciliationCalls.Count}");
+        Assert.True(reconciliationCalls[0].Ancestors().Contains(delegateArg!),
+            "reconciliation must sit INSIDE the coordinator's delegate — outside it the send lock is already "
+            + "released, so it can clear a quarantine another holder just set.");
+
+        var reconcileMethod = RoslynPins.Method(tree, WalletType, "ReconcileWalletRecoveryAsync");
+        var reconcileBody = RoslynPins.BodyOf(reconcileMethod);
+        var clears = reconcileBody.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Where(i => plugin.Model(tree).GetSymbolInfo(i).Symbol is IMethodSymbol
             {
                 Name: "ClearNeedsRecoveryAsync",
                 ContainingType.Name: WalletType
             })
             .ToList();
-        Assert.True(clears.Count == 1,
-            $"RefreshWalletAsync must discharge exactly once, found {clears.Count}: a second clear outside the "
-            + "delegate commits with the send lock released.");
-        Assert.True(clears[0].Ancestors().Contains(delegateArg!),
-            "the discharge must sit INSIDE the coordinator's delegate — outside it the send lock is already "
-            + "released, so it can clear a quarantine another holder just set.");
-
-        var refreshes = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+        Assert.True(clears.Count == 1, $"reconciliation must discharge exactly once, found {clears.Count}");
+        var refreshes = reconcileBody.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Where(i => plugin.Model(tree).GetSymbolInfo(i).Symbol is IMethodSymbol { Name: "RefreshAsync" })
             .ToList();
-        Assert.True(refreshes.Count == 1, $"expected one RefreshAsync, found {refreshes.Count}");
-        Assert.True(refreshes[0].SpanStart < clears[0].SpanStart,
+        Assert.NotEmpty(refreshes);
+        Assert.True(refreshes.All(r => r.SpanStart < clears[0].SpanStart),
             "the discharge must follow RefreshAsync: that call is what reconciles the Stock, so discharging "
             + "before it certifies a wallet nothing has reconciled.");
     }

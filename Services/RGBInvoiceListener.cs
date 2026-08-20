@@ -1,5 +1,5 @@
 using System.Linq.Expressions;
-using System.Threading.Channels;
+using System.Diagnostics;
 using BTCPayServer.Data;
 using BTCPayServer.Events;
 using BTCPayServer.Plugins.RgbUtexo.Data;
@@ -19,7 +19,6 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public class RGBInvoiceListener : IHostedService
 {
     static readonly Newtonsoft.Json.JsonSerializer _blobSerializer = BlobSerializer.CreateSerializer().Serializer;
-    readonly IMemoryCache _cache;
     readonly InvoiceRepository _invoices;
     readonly RGBPaymentMethodHandler _handler;
     readonly RGBWalletService _wallets;
@@ -31,7 +30,15 @@ public class RGBInvoiceListener : IHostedService
     readonly ReplenishCooldownTracker _cooldowns;
     readonly ILogger<RGBInvoiceListener> _log;
 
-    readonly Channel<string> _queue = Channel.CreateUnbounded<string>();
+    // The channel is a latency hint only; RGBInvoices + each wallet's rgb-lib database are the durable
+    // source of settlement work. Overflow requests a full wallet sweep instead of retaining more memory.
+    internal const int InvoiceQueueCapacity = 256;
+    internal const int InvoiceDrainBatchSize = 64;
+    internal const int DurableInvoicePageSize = 64;
+    internal const int DurableWalletPageSize = 64;
+    internal const int DurableAssetPageSize = 64;
+    internal static readonly TimeSpan InvoiceDrainBudget = TimeSpan.FromSeconds(1);
+    readonly BoundedInvoiceWorkQueue _queue = new(InvoiceQueueCapacity);
     CompositeDisposable _subs = new();
     CancellationTokenSource? _cts;
     Task? _worker;
@@ -46,19 +53,24 @@ public class RGBInvoiceListener : IHostedService
         EventAggregator events, PaymentService payments, StoreRepository stores, RGBConfiguration cfg,
         ILogger<RGBInvoiceListener> log)
     {
-        _cache = cache; _invoices = invoices; _handler = handler; _wallets = wallets;
+        _ = cache; // Kept in the public constructor for plugin/ABI compatibility; invoice entities are no longer cached.
+        _invoices = invoices; _handler = handler; _wallets = wallets;
         _db = db; _events = events; _payments = payments; _stores = stores; _cfg = cfg; _log = log;
         _cooldowns = new ReplenishCooldownTracker(
             baseCooldown: TimeSpan.FromMinutes(_cfg.AutoUtxoCooldownMinutes),
             maxBackoff: TimeSpan.FromMinutes(_cfg.AutoUtxoMaxBackoffMinutes));
     }
 
-    public async Task StartAsync(CancellationToken ct)
+    public Task StartAsync(CancellationToken ct)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        await EnqueuePendingInvoices(ct);
+        // Subscribe first. Events racing the backlog query can be duplicated, which is harmless; subscribing
+        // second permanently missed invoices created between the query and the subscription. A durable sweep
+        // replaces the old all-at-once backlog materialization, which itself was unbounded.
         _subs.Add(_events.SubscribeAsync<InvoiceEvent>(OnInvoice));
+        _queue.RequestRecovery();
         _worker = PollLoop(_cts.Token);
+        return Task.CompletedTask;
     }
 
     public async Task StopAsync(CancellationToken ct)
@@ -72,20 +84,8 @@ public class RGBInvoiceListener : IHostedService
     Task OnInvoice(InvoiceEvent e)
     {
         if (e.Name != InvoiceEvent.Created) return Task.CompletedTask;
-        if (ShouldEnqueue(e.Invoice)) _queue.Writer.TryWrite(e.Invoice.Id);
+        if (ShouldEnqueue(e.Invoice)) _queue.TryWrite(e.Invoice.Id);
         return Task.CompletedTask;
-    }
-
-    async Task EnqueuePendingInvoices(CancellationToken ct)
-    {
-        var pending = await _invoices.GetMonitoredInvoices(RGBPlugin.RGBPaymentMethodId, ct);
-        foreach (var inv in pending)
-        {
-            if (!ShouldEnqueue(inv)) continue;
-            _queue.Writer.TryWrite(inv.Id);
-            _cache.Set($"rgb:inv:{inv.Id}", inv, ComputeExpiry(inv));
-        }
-        _log.LogDebug("queued {N} pending rgb invoices", pending.Length);
     }
 
     async Task PollLoop(CancellationToken ct)
@@ -95,9 +95,11 @@ public class RGBInvoiceListener : IHostedService
         {
             try
             {
-                if (DateTimeOffset.UtcNow - lastPoll > TimeSpan.FromSeconds(PollSeconds))
+                var recovery = _queue.TryClaimRecovery();
+                if (recovery.HasValue || DateTimeOffset.UtcNow - lastPoll > TimeSpan.FromSeconds(PollSeconds))
                 {
-                    await RefreshAllWallets(ct);
+                    var recovered = await RefreshAllWallets(ct);
+                    if (recovery.HasValue) _queue.CompleteRecovery(recovery.Value, recovered);
                     lastPoll = DateTimeOffset.UtcNow;
                 }
                 if (DateTimeOffset.UtcNow - _lastUtxoCheck > TimeSpan.FromMinutes(UtxoCheckMinutes))
@@ -105,10 +107,15 @@ public class RGBInvoiceListener : IHostedService
                     await ReplenishUtxosAsync(ct);
                     _lastUtxoCheck = DateTimeOffset.UtcNow;
                 }
-                while (_queue.Reader.TryRead(out var id))
+                var drainClock = Stopwatch.StartNew();
+                var drained = 0;
+                while (drained < InvoiceDrainBatchSize
+                       && drainClock.Elapsed < InvoiceDrainBudget
+                       && _queue.TryDequeue(out var id))
                 {
                     if (ct.IsCancellationRequested) break;
                     await CheckSingleInvoice(id, ct);
+                    drained++;
                 }
                 await Task.Delay(5000, ct);
             }
@@ -121,40 +128,61 @@ public class RGBInvoiceListener : IHostedService
         }
     }
 
-    async Task RefreshAllWallets(CancellationToken ct)
+    async Task<bool> RefreshAllWallets(CancellationToken ct)
     {
         _log.LogInformation("RefreshAllWallets starting...");
         await using var ctx = _db.CreateContext();
-        var wallets = await ctx.RGBWallets.Where(w => w.IsActive).ToListAsync(ct);
-        _log.LogInformation("Found {Count} active RGB wallets", wallets.Count);
-        foreach (var w in wallets)
+        var allRecovered = true;
+        string? walletCursor = null;
+        while (true)
         {
-            try
+            var walletPage = await ctx.RGBWallets.AsNoTracking()
+                .Where(w => w.IsActive && (walletCursor == null || string.Compare(w.Id, walletCursor) > 0))
+                .OrderBy(w => w.Id)
+                .Take(DurableWalletPageSize)
+                .ToListAsync(ct);
+            if (walletPage.Count == 0) break;
+            walletCursor = walletPage[^1].Id;
+            foreach (var w in walletPage)
             {
-                _log.LogInformation("Refreshing wallet {WalletId}...", w.Id);
-                await _wallets.RefreshWalletAsync(w.Id);
-                await CleanupExpiredTransfers(w, ct);
-                _log.LogInformation("Wallet {WalletId} refreshed, processing transfers...", w.Id);
-                await ProcessTransfers(w.Id, w.StoreId, ct);
-                await ProcessAssetDiscoveryInvoices(w.Id, ct);
-            }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex, "Failed to refresh wallet {WalletId}", w.Id);
+                try
+                {
+                    _log.LogInformation("Refreshing wallet {WalletId}...", w.Id);
+                    if (!await _wallets.RefreshWalletAsync(w.Id, ct))
+                    {
+                        allRecovered = false;
+                        continue;
+                    }
+                    if (!await CleanupExpiredTransfers(w, ct))
+                    {
+                        allRecovered = false;
+                        continue;
+                    }
+                    _log.LogInformation("Wallet {WalletId} refreshed, processing transfers...", w.Id);
+                    if (!await ProcessTransfers(w.Id, w.StoreId, ct)) allRecovered = false;
+                    if (!await ProcessAssetDiscoveryInvoices(w.Id, ct)) allRecovered = false;
+                }
+                catch (Exception ex)
+                {
+                    allRecovered = false;
+                    _log.LogWarning(ex, "Failed to refresh wallet {WalletId}", w.Id);
+                }
             }
         }
         _log.LogInformation("RefreshAllWallets completed");
+        return allRecovered;
     }
 
-    async Task CleanupExpiredTransfers(RGBWallet wallet, CancellationToken ct)
+    async Task<bool> CleanupExpiredTransfers(RGBWallet wallet, CancellationToken ct)
     {
         try
         {
-            await _wallets.CleanupExpiredTransfersAsync(wallet.Id, wallet.Network, wallet.MasterFingerprint, ct);
+            return await _wallets.CleanupExpiredTransfersAsync(wallet.Id, wallet.Network, wallet.MasterFingerprint, ct);
         }
         catch (Exception ex)
         {
             _log.LogDebug(ex, "Failed to cleanup expired transfers for wallet {WalletId}", wallet.Id);
+            return false;
         }
     }
 
@@ -201,7 +229,10 @@ public class RGBInvoiceListener : IHostedService
                     needsRecovery: w.NeedsRecovery,
                     maxAllocationsPerUtxo: w.MaxAllocationsPerUtxo,
                     paymentMethodEnabled: enabled,
-                    configuredWalletId: config?.WalletId,
+                    // The wallet row's StoreId is authoritative. RGBPaymentMethodHandler uses the same
+                    // mapping, so a replacement-style Greenfield PUT that omits walletId cannot disable
+                    // either invoice creation or automatic replenishment.
+                    configuredWalletId: w.Id,
                     now: now,
                     nextEligibleAt: _cooldowns.NextEligibleAt(w.Id));
                 if (skip.HasValue)
@@ -289,31 +320,50 @@ public class RGBInvoiceListener : IHostedService
         }
     }
 
-    async Task ProcessTransfers(string walletId, string expectedStoreId, CancellationToken ct)
+    async Task<bool> ProcessTransfers(string walletId, string expectedStoreId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
 
         var wallet = await ctx.RGBWallets.FindAsync(walletId);
-        if (wallet == null) return;
+        if (wallet == null) return true;
 
         if (!RGBPaymentMethodHandler.WalletBelongsToStore(wallet.StoreId, expectedStoreId))
         {
             _log.LogWarning("ProcessTransfers: wallet {WalletId} (store {WalletStoreId}) does not belong to expected store {ExpectedStoreId}; skipping",
                 walletId, wallet.StoreId, expectedStoreId);
-            return;
+            return true;
         }
 
-        var allInvoices = await ctx.RGBInvoices.Where(i => i.WalletId == walletId).ToListAsync(ct);
-        _log.LogInformation("ProcessTransfers: total={Total} invoices for wallet {WalletId}, statuses: {Statuses}",
-            allInvoices.Count, walletId, string.Join(",", allInvoices.Select(i => $"{i.Id[..8]}={i.Status}")));
-        var pending = allInvoices.Where(i => i.Status is RGBInvoiceStatus.Pending or RGBInvoiceStatus.WaitingConfirmations or RGBInvoiceStatus.Underpaid).ToList();
+        var pendingQuery = ctx.RGBInvoices.Where(i => i.WalletId == walletId
+            && i.AssetId != null
+            && (i.Status == RGBInvoiceStatus.Pending
+                || i.Status == RGBInvoiceStatus.WaitingConfirmations
+                || i.Status == RGBInvoiceStatus.Underpaid));
+        if (!string.IsNullOrEmpty(wallet.InvoiceScanCursor))
+            pendingQuery = pendingQuery.Where(i => string.Compare(i.Id, wallet.InvoiceScanCursor) > 0);
+        var pending = await pendingQuery.OrderBy(i => i.Id).Take(DurableInvoicePageSize).ToListAsync(ct);
         _log.LogInformation("ProcessTransfers: {Count} pending/waiting invoices for wallet {WalletId}", pending.Count, walletId);
-        if (pending.Count == 0) return;
+        if (pending.Count == 0)
+        {
+            if (wallet.InvoiceScanCursor != null)
+            {
+                wallet.InvoiceScanCursor = null;
+                await ctx.SaveChangesAsync(ct);
+            }
+            return true;
+        }
+        wallet.InvoiceScanCursor = DurableInvoiceScan.NextCursor(
+            pending.Select(i => i.Id).ToList(), DurableInvoicePageSize);
 
         var assetIds = pending.Where(i => !string.IsNullOrEmpty(i.AssetId)).Select(i => i.AssetId!).Distinct().ToList();
         _log.LogInformation("ProcessTransfers: Checking {Count} asset IDs", assetIds.Count);
-        if (assetIds.Count == 0) return;
+        if (assetIds.Count == 0)
+        {
+            await ctx.SaveChangesAsync(ct);
+            return true;
+        }
 
+        var pageSucceeded = true;
         var incomingTransfers = new List<(RgbTransfer Transfer, string AssetId)>();
         foreach (var aid in assetIds)
         {
@@ -332,6 +382,7 @@ public class RGBInvoiceListener : IHostedService
             }
             catch (Exception ex)
             {
+                pageSucceeded = false;
                 _log.LogWarning(ex, "Failed to get transfers for asset {AssetId}", aid);
             }
         }
@@ -368,7 +419,10 @@ public class RGBInvoiceListener : IHostedService
                         {
                             if (await RecordOrUpdatePayment(inv, t, result.PaymentStatus.Value, wallet.StoreId, ct)
                                 == PaymentRegistration.Failed)
+                            {
                                 registrationFailed = true;
+                                pageSucceeded = false;
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -378,6 +432,7 @@ public class RGBInvoiceListener : IHostedService
                             // only door through which this payment can ever be retried.
                             _log.LogWarning(ex, "Failed to record payment for invoice {Id} transfer {Idx}", inv.BtcPayInvoiceId, t.Idx);
                             registrationFailed = true;
+                            pageSucceeded = false;
                         }
                     }
                 }
@@ -408,21 +463,38 @@ public class RGBInvoiceListener : IHostedService
             }
         }
         await ctx.SaveChangesAsync(ct);
+        return pageSucceeded;
     }
 
-    async Task ProcessAssetDiscoveryInvoices(string walletId, CancellationToken ct)
+    async Task<bool> ProcessAssetDiscoveryInvoices(string walletId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
+        var wallet = await ctx.RGBWallets.FindAsync([walletId], ct);
+        if (wallet == null) return true;
         var pending = await ctx.RGBInvoices
             .Where(i => i.WalletId == walletId
                         && i.AssetId == null
                         && i.BtcPayInvoiceId == null
                         && (i.Status == RGBInvoiceStatus.Pending
-                            || i.Status == RGBInvoiceStatus.WaitingConfirmations))
+                            || i.Status == RGBInvoiceStatus.WaitingConfirmations)
+                        && (wallet.DiscoveryScanCursor == null
+                            || string.Compare(i.Id, wallet.DiscoveryScanCursor) > 0))
+            .OrderBy(i => i.Id)
+            .Take(DurableInvoicePageSize)
             .ToListAsync(ct);
-        if (pending.Count == 0) return;
+        if (pending.Count == 0)
+        {
+            if (wallet.DiscoveryScanCursor != null || wallet.DiscoveryAssetPage != 0)
+            {
+                wallet.DiscoveryScanCursor = null;
+                wallet.DiscoveryAssetPage = 0;
+                await ctx.SaveChangesAsync(ct);
+            }
+            return true;
+        }
+        var nextInvoiceCursor = DurableInvoiceScan.NextCursor(
+            pending.Select(i => i.Id).ToList(), DurableInvoicePageSize);
 
-        var anyChanged = false;
         var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         // Expiry sweep FIRST — runs independent of any rgb-lib calls. If asset listing
@@ -433,7 +505,6 @@ public class RGBInvoiceListener : IHostedService
             if (inv.ExpirationTimestamp.HasValue && nowUnix > inv.ExpirationTimestamp.Value)
             {
                 inv.Status = RGBInvoiceStatus.Expired;
-                anyChanged = true;
                 continue;
             }
             stillPending.Add(inv);
@@ -441,8 +512,10 @@ public class RGBInvoiceListener : IHostedService
 
         if (stillPending.Count == 0)
         {
-            if (anyChanged) await ctx.SaveChangesAsync(ct);
-            return;
+            wallet.DiscoveryScanCursor = nextInvoiceCursor;
+            wallet.DiscoveryAssetPage = 0;
+            await ctx.SaveChangesAsync(ct);
+            return true;
         }
 
         List<RgbAsset> assets;
@@ -450,20 +523,27 @@ public class RGBInvoiceListener : IHostedService
         catch (Exception ex)
         {
             _log.LogWarning(ex, "ListAssetsRawAsync failed during asset-discovery scan for wallet {WalletId}", walletId);
-            if (anyChanged) await ctx.SaveChangesAsync(ct);
-            return;
+            await ctx.SaveChangesAsync(ct);
+            return false;
         }
         if (assets.Count == 0)
         {
-            if (anyChanged) await ctx.SaveChangesAsync(ct);
-            return;
+            wallet.DiscoveryScanCursor = nextInvoiceCursor;
+            wallet.DiscoveryAssetPage = 0;
+            await ctx.SaveChangesAsync(ct);
+            return true;
         }
+        var assetPageCount = (assets.Count + DurableAssetPageSize - 1) / DurableAssetPageSize;
+        var currentAssetPage = Math.Clamp(wallet.DiscoveryAssetPage, 0, assetPageCount - 1);
+        var assetPage = DurableInvoiceScan.RotatingPage(
+            assets, a => a.AssetId, DurableAssetPageSize, currentAssetPage);
 
         // Prefetch transfers per asset ONCE per scan: with N pending invoices and M assets,
         // the prior structure made N×M rgb-lib calls every poll. Build the per-asset
         // transfer list up front and let the per-invoice loop evaluate against the cache.
-        var transfersByAsset = new Dictionary<string, List<RgbTransfer>>(assets.Count);
-        foreach (var asset in assets)
+        var transfersByAsset = new Dictionary<string, List<RgbTransfer>>(assetPage.Count);
+        var pageSucceeded = true;
+        foreach (var asset in assetPage)
         {
             try
             {
@@ -471,13 +551,14 @@ public class RGBInvoiceListener : IHostedService
             }
             catch (Exception ex)
             {
+                pageSucceeded = false;
                 _log.LogWarning(ex, "GetTransfersAsync failed for asset {AssetId} during discovery", asset.AssetId);
             }
         }
 
         foreach (var inv in stillPending)
         {
-            foreach (var asset in assets)
+            foreach (var asset in assetPage)
             {
                 if (!transfersByAsset.TryGetValue(asset.AssetId, out var transfers)) continue;
 
@@ -495,7 +576,6 @@ public class RGBInvoiceListener : IHostedService
                 {
                     inv.Status = RGBInvoiceStatus.Failed;
                     inv.Txid = match.Transfer.Txid;
-                    anyChanged = true;
                     break;
                 }
 
@@ -514,12 +594,21 @@ public class RGBInvoiceListener : IHostedService
                 _log.LogInformation("Asset-discovery invoice {Id} -> {Status} (asset={AssetId}, amount={Amount})",
                     inv.Id, match.NewStatus, asset.AssetId, match.ReceivedAmount);
 
-                anyChanged = true;
                 break;
             }
         }
 
-        if (anyChanged) await ctx.SaveChangesAsync(ct);
+        if (currentAssetPage + 1 < assetPageCount)
+        {
+            wallet.DiscoveryAssetPage = currentAssetPage + 1;
+        }
+        else
+        {
+            wallet.DiscoveryAssetPage = 0;
+            wallet.DiscoveryScanCursor = nextInvoiceCursor;
+        }
+        await ctx.SaveChangesAsync(ct); // also persists both durable fairness cursors
+        return pageSucceeded;
     }
 
     internal enum PaymentRegistration
@@ -668,15 +757,15 @@ public class RGBInvoiceListener : IHostedService
     {
         try
         {
-            var inv = await _cache.GetOrCreateAsync($"rgb:inv:{invoiceId}", async e => {
-                var i = await _invoices.GetInvoice(invoiceId);
-                if (i != null) e.AbsoluteExpiration = ComputeExpiry(i);
-                return i;
-            });
+            var inv = await _invoices.GetInvoice(invoiceId);
             if (inv == null) return;
             var prompt = inv.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
-            if (prompt?.Details == null) return;
-            await ProcessTransfers(_handler.ParsePaymentPromptDetails(prompt.Details).WalletId, inv.StoreId, ct);
+            if (prompt == null) return;
+            // An event is only a latency hint. State interpretation must go through RefreshAllWallets,
+            // where refresh + expiry cleanup both acquired this wallet's lock. Calling ProcessTransfers
+            // here let a hint bypass that gate after a busy wallet was skipped and could record an expired
+            // status-1 transfer as Processing.
+            _queue.RequestRecovery();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -874,14 +963,6 @@ public class RGBInvoiceListener : IHostedService
         }
 
         return new InvoiceProcessingResult(null, null, null, Array.Empty<RgbTransfer>(), null, null);
-    }
-
-    // internal so the pre-warm's expiry has CONTRACT tests: the source pins bind this callee but cannot see
-    // what it returns, and an elapsed instant here evicts every pre-warmed entry before the drain reads it.
-    internal static DateTimeOffset ComputeExpiry(InvoiceEntity inv)
-    {
-        var left = inv.ExpirationTime - DateTimeOffset.UtcNow;
-        return DateTimeOffset.UtcNow + (left > TimeSpan.FromMinutes(5) ? left : TimeSpan.FromMinutes(5));
     }
 
     internal record AssetDiscoveryMatch(

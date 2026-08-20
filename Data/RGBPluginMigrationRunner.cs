@@ -7,6 +7,7 @@ using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Data;
 
@@ -66,21 +67,32 @@ public class RGBPluginMigrationRunner : IStartupTask
     internal void CleanupStaleStagingDirs()
     {
         var staleThreshold = TimeSpan.FromHours(1);
+        const int entryBudget = 1_000;
+        var timeBudget = TimeSpan.FromSeconds(2);
+        var clock = Stopwatch.StartNew();
+        var inspected = 0;
         try
         {
             foreach (var net in NetworkSettings.AvailableNetworks)
             {
+                if (inspected >= entryBudget || clock.Elapsed >= timeBudget) break;
                 var walletsDir = Path.Combine(_cfg.RgbBaseDir, RGBConfiguration.MapNetworkFolder(net), "rgb-wallets");
                 if (!Directory.Exists(walletsDir)) continue;
+                var root = Path.GetFullPath(walletsDir) + Path.DirectorySeparatorChar;
 
                 foreach (var dir in Directory.EnumerateDirectories(walletsDir, $"{RGBWalletService.RestoreStagingPrefix}*"))
                 {
-                    var created = Directory.GetCreationTimeUtc(dir);
-                    if (DateTime.UtcNow - created < staleThreshold) continue;
+                    if (++inspected > entryBudget || clock.Elapsed >= timeBudget) break;
+                    var full = Path.GetFullPath(dir);
+                    if (!full.StartsWith(root, StringComparison.Ordinal)
+                        || !Path.GetFileName(full).StartsWith(RGBWalletService.RestoreStagingPrefix, StringComparison.Ordinal))
+                        continue;
+                    var lastTouched = new[] { Directory.GetCreationTimeUtc(full), Directory.GetLastWriteTimeUtc(full) }.Max();
+                    if (DateTime.UtcNow - lastTouched < staleThreshold) continue;
                     try
                     {
-                        Directory.Delete(dir, true);
-                        _log.LogInformation("Cleaned up stale restore staging dir: {Dir}", dir);
+                        Directory.Delete(full, true);
+                        _log.LogInformation("Cleaned up stale restore staging dir: {Dir}", full);
                     }
                     catch (Exception ex)
                     {
@@ -198,5 +210,4 @@ public class RGBPluginMigrationRunner : IStartupTask
         }
     }
 }
-
 

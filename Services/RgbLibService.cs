@@ -149,23 +149,23 @@ public class RgbLibService : IRgbLibService
         return new RgbLibWalletHandle(wallet, walletId, _log);
     }
 
-    public void UnloadWallet(string walletId) => UnloadFromCache(_wallets, walletId, _log);
+    public bool UnloadWallet(string walletId) => UnloadFromCache(_wallets, walletId, _log);
 
-    internal static void UnloadFromCache(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, ILogger? log)
+    internal static bool UnloadFromCache(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, ILogger? log)
     {
         if (!wallets.TryGetValue(walletId, out var lazy))
-            return;
+            return true;
 
         if (lazy.IsValueCreated)
         {
-            DisposeAndEvict(wallets, walletId, lazy, log);
-            return;
+            return DisposeAndEvict(wallets, walletId, lazy, log);
         }
 
         Task.Run(() => DisposeAndEvict(wallets, walletId, lazy, log));
+        return false;
     }
 
-    static void DisposeAndEvict(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, Lazy<RgbLibWalletHandle> lazy, ILogger? log)
+    static bool DisposeAndEvict(ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets, string walletId, Lazy<RgbLibWalletHandle> lazy, ILogger? log)
     {
         RgbLibWalletHandle handle;
         try
@@ -176,7 +176,7 @@ public class RgbLibService : IRgbLibService
         {
             log?.LogDebug(ex, "Wallet {WalletId} construction had failed; removing cache entry", walletId);
             wallets.TryRemove(new KeyValuePair<string, Lazy<RgbLibWalletHandle>>(walletId, lazy));
-            return;
+            return true;
         }
 
         handle.Dispose();
@@ -185,6 +185,7 @@ public class RgbLibService : IRgbLibService
         {
             wallets.TryRemove(new KeyValuePair<string, Lazy<RgbLibWalletHandle>>(walletId, lazy));
             log?.LogInformation("Wallet {WalletId} unloaded", walletId);
+            return true;
         }
         else
         {
@@ -192,6 +193,7 @@ public class RgbLibService : IRgbLibService
                 "Wallet {WalletId} unload timed out with an operation still running; native wallet will be freed after the operation completes",
                 walletId);
             Task.Run(() => CompleteTimedOutDisposeAndEvict(wallets, walletId, lazy, handle, log));
+            return false;
         }
     }
 

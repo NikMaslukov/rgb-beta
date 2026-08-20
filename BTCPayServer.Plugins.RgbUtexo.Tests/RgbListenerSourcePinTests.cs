@@ -440,13 +440,9 @@ public class RgbListenerSourcePinTests
         AssertArgumentIsLocal(plugin, tree, eligibility, "paymentMethodEnabled", "enabled");
         AssertArgumentIsLocal(plugin, tree, eligibility, "now", "now");
 
-        // `config?.WalletId`, not `config.WalletId`: config is null on exactly the disabled path this
-        // gate exists for, and arguments evaluate before the callee's gates run.
-        var configured = NamedArgument(eligibility, "configuredWalletId").Expression;
-        var conditional = Assert.IsType<ConditionalAccessExpressionSyntax>(configured);
-        Assert.Equal("config", Assert.IsType<IdentifierNameSyntax>(conditional.Expression).Identifier.ValueText);
-        Assert.Equal("WalletId",
-            Assert.IsType<MemberBindingExpressionSyntax>(conditional.WhenNotNull).Name.Identifier.ValueText);
+        // The active RGBWallet row is authoritative. Greenfield replacement updates may omit the
+        // legacy config pointer, so replenishment must not silently unbind the store in that case.
+        AssertArgumentBindsTo(plugin, tree, eligibility, "configuredWalletId", "RGBWallet", "Id", receiver: "w");
 
         // The cooldown read itself, not just the wallet id inside it.
         var nextEligible = NamedArgument(eligibility, "nextEligibleAt").Expression;
@@ -1509,65 +1505,21 @@ public class RgbListenerSourcePinTests
             SyntaxKind.IfStatement, SyntaxKind.IfStatement, SyntaxKind.ReturnStatement);
     }
 
-    // P-H2 (finding H2b). The sibling path. Its inline copy of the predicate is the one that was RIGHT while
-    // OnInvoice's was missing; routing both through one declaration is what stops them diverging again.
-    // The cache clause here is POSITIVE, unlike P-H1's: this path's _cache.Set is deliberately kept, because
-    // pre-warming is what spares the drain a database fetch whose failure would spend the one-shot queue entry
-    // with no sweep to rescue it. It was deleted once for tidiness; this is what stops that recurring.
+    // P-H2. Startup subscribes before requesting the durable sweep. The previous fetch-then-subscribe order
+    // had a permanent event gap, and materializing every monitored invoice recreated an unbounded list before
+    // the bounded channel was even consulted.
     [Fact]
-    public void PH2_EnqueuePendingInvoicesUsesTheSamePredicateAndKeepsItsPreWarm()
+    public void PH2_StartSubscribesBeforeDurableRecoveryAndDoesNotMaterializeABacklog()
     {
         var plugin = PluginCompilation.Shared;
-        var enqueue = RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, "EnqueuePendingInvoices");
+        var start = RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, "StartAsync");
+        var text = start.Body!.ToString();
+        var subscribe = text.IndexOf("SubscribeAsync<InvoiceEvent>", StringComparison.Ordinal);
+        var recovery = text.IndexOf("RequestRecovery", StringComparison.Ordinal);
 
-        var write = AssertGuardedBy(plugin, enqueue, "ShouldEnqueue", "TryWrite", "_queue", allowedPreamble: 1);
-
-        // The one allowed preamble statement on this path, pinned the way P-H1 pins OnInvoice's event filter:
-        // the fetch that produces the collection. Leaving it unpinned let `(await …).Take(1).ToArray()` and a
-        // `if (pending.Length > 200) return;` beside it pass every clause.
-        var fetch = FirstMeaningful(enqueue);
-        Assert.True(fetch is LocalDeclarationStatementSyntax decl
-                    && decl.Declaration.Variables.Count == 1
-                    && Unwrap(decl.Declaration.Variables[0].Initializer!.Value) is InvocationExpressionSyntax call
-                    && NameOf(call) == "GetMonitoredInvoices",
-            $"EnqueuePendingInvoices: the only statement allowed before the loop is the bare "
-            + $"`var pending = await _invoices.GetMonitoredInvoices(…)` fetch; found '{fetch}'. A projection or "
-            + "an early return there drops invoices before the predicate ever sees them.");
-
-        // ...and the loop must iterate THAT local. The fetch was pinned and the loop header was required to
-        // be an identifier, but nothing tied the two: adding a field `readonly InvoiceEntity[] _none = [];`
-        // and writing `foreach (var inv in _none)` left the fetch, the log and both shape pins untouched
-        // while the startup path enqueued nothing at all — measured GREEN before this clause. Tied by
-        // SYMBOL, not by spelling, so a same-named field or local cannot stand in for the fetch's result.
-        var tree = plugin.Tree(ListenerFile);
-        var fetchLocal = plugin.Model(tree)
-            .GetDeclaredSymbol(((LocalDeclarationStatementSyntax)fetch!).Declaration.Variables[0]);
-        var loop = write.FirstAncestorOrSelf<ForEachStatementSyntax>();
-        Assert.True(loop != null
-                    && SymbolEqualityComparer.Default.Equals(
-                        RoslynPins.BoundSymbol(plugin, tree, loop.Expression), fetchLocal),
-            "EnqueuePendingInvoices: the loop containing the enqueue must iterate the local the fetch "
-            + $"declares; found '{(loop == null ? "<no enclosing foreach>" : loop.Expression.ToString())}'. "
-            + "Iterating anything else enqueues none of the pending invoices while every other clause, "
-            + "including both shape pins, stays green.");
-
-        // ORDER IS LOAD-BEARING, and was established by running the ablation campaign rather than by
-        // reading it. With the shape pins first, six mutations — deleting the pre-warm, caching the wrong
-        // invoice, deferring it into a lambda, wrapping it in an `if` or a bare block, and an exit between
-        // the enqueue and the pre-warm — all died on AssertLoopShape, leaving four AssertCachesOn clauses
-        // (unconditional, subject, same-block, nothing-between) never exercised by any row while the map
-        // recorded them as proven. The specific clause must get first refusal so its message is what a
-        // maintainer reads; the shape pins remain as the backstop for positions no clause anticipates.
-        AssertCachesOn(plugin, enqueue, "_cache", "rgb:inv:",
-            Unwrap(write.ArgumentList.Arguments[0].Expression) is MemberAccessExpressionSyntax m
-                ? m.Expression.ToString() : "<not a member access>", write);
-
-        // Whole-shape pins: the fetch, the loop, the log — and inside the loop, the gate, the write, the
-        // pre-warm. These subsume the position-by-position clauses above for these two methods; the clauses
-        // stay because they carry the diagnostic messages and apply to any future call site.
-        AssertShape(enqueue,
-            SyntaxKind.LocalDeclarationStatement, SyntaxKind.ForEachStatement, SyntaxKind.ExpressionStatement);
-        AssertLoopShape(enqueue,
-            SyntaxKind.IfStatement, SyntaxKind.ExpressionStatement, SyntaxKind.ExpressionStatement);
+        Assert.True(subscribe >= 0 && recovery > subscribe,
+            "StartAsync must subscribe before requesting the initial durable recovery sweep");
+        Assert.DoesNotContain("GetMonitoredInvoices", text);
+        Assert.DoesNotContain("EnqueuePendingInvoices", text);
     }
 }

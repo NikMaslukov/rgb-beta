@@ -20,7 +20,7 @@ public sealed class FakeRgbLib : IRgbLibService
     public void Dispose() { }
 
     public Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
-    public void UnloadWallet(string walletId) => throw new NotImplementedException();
+    public bool UnloadWallet(string walletId) => throw new NotImplementedException();
     public Task<string> GetAddressAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<BtcBalance> GetBtcBalanceAsync(string walletId, CancellationToken ct = default, bool sync = false) => throw new NotImplementedException();
     public Task<List<RgbAsset>> ListAssetsAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();

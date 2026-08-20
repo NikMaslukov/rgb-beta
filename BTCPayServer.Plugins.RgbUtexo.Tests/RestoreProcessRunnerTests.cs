@@ -24,6 +24,7 @@ public class RestoreProcessRunnerTests
         public Task<bool> WaitForExitAsync(TimeSpan grace, CancellationToken ct)
             => Task.FromResult(ReapWithinGrace);
         public Task<string> ReadStdErrAsync() => Task.FromResult("");
+        public Task<string> ReadStdOutAsync() => Task.FromResult("");
         public async Task WriteStdinLineAndCloseAsync(string line)
         {
             if (ThrowOnStdin) throw new IOException("broken pipe");

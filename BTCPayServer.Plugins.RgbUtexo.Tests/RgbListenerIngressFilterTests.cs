@@ -11,7 +11,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 /// The ingress predicate for the invoice listener (audit finding H2b). The listener subscribed to every
 /// invoice created anywhere on the server; this predicate is what makes the subscription RGB-scoped.
 /// It is deliberately BROADER than the check CheckSingleInvoice applies: prompt presence, not Details.
-/// A false TRUE costs a queue slot, a database round-trip and a cached InvoiceEntity; a false FALSE gives
+/// A false TRUE costs a bounded queue slot and a database round-trip; a false FALSE gives
 /// up the one window in which a lazily-activated invoice can still be processed from the queue — between
 /// Created and that entry draining — leaving it to the sweep, which a failing durability flush can skip.
 /// </summary>
@@ -92,31 +92,6 @@ public class RgbListenerIngressFilterTests
                     orderId: "", invoiceTimeHour: 0, expiresInSeconds: 60,
                     speedPolicy: SpeedPolicy.HighSpeed),
                 promptCurrency: "RGB1", divisibility: 8, destination: "rgb:checkout-4")));
-    }
-
-    // 5/6 — the pre-warm's EXPIRY, which lives here because the source pins cannot reach it: they bind
-    // `ComputeExpiry` as the callee and pin its argument, but no syntactic pin can see what a method
-    // returns. `ComputeExpiry` returning an already-elapsed instant passes every clause and evicts every
-    // pre-warmed entry before the drain reads it — the pre-warm is then present, pinned, and dead, which
-    // is R8 with a green suite. Measured: that mutation was GREEN before these two tests existed.
-    [Fact]
-    public void ComputeExpiry_OutlivesTheDrain_ForAShortLivedInvoice()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var expiry = RGBInvoiceListener.ComputeExpiry(new InvoiceEntity { ExpirationTime = now.AddSeconds(30) });
-
-        Assert.True(expiry >= now.AddMinutes(5),
-            $"a five-minute floor is what keeps the entry alive across a poll cycle; got {expiry - now}");
-    }
-
-    [Fact]
-    public void ComputeExpiry_TracksTheInvoiceLifetime_WhenItExceedsTheFloor()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var expiry = RGBInvoiceListener.ComputeExpiry(new InvoiceEntity { ExpirationTime = now.AddHours(2) });
-
-        Assert.True(expiry >= now.AddHours(2).AddSeconds(-5) && expiry <= now.AddHours(2).AddSeconds(5),
-            $"a long-lived invoice must keep its entry for its own lifetime, not the floor; got {expiry - now}");
     }
 
     static JToken Details() => JToken.FromObject(new RGBPromptDetails

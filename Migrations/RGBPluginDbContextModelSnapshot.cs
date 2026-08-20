@@ -134,12 +134,23 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("DiscoveryScanCursor")
+                        .HasColumnType("text");
+
+                    b.Property<int>("DiscoveryAssetPage")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
                     b.Property<string>("EncryptedMnemonic")
                         .IsRequired()
                         .HasColumnType("text");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("InvoiceScanCursor")
+                        .HasColumnType("text");
 
                     b.Property<DateTimeOffset?>("LastSyncAt")
                         .HasColumnType("timestamp with time zone");

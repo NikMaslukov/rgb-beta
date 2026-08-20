@@ -100,7 +100,11 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
 
         var config = ParsePaymentMethodConfig(configToken);
         
-        var wallet = await _wallets.GetWalletAsync(config.WalletId);
+        // The wallet table is authoritative (one active wallet per store). The config pointer is retained
+        // only for wire compatibility: Greenfield treats PUT config as replacement, so a partial update can
+        // omit walletId and serialize it as empty. Resolving by store makes that harmless and also prevents a
+        // foreign pointer from selecting another store's wallet.
+        var wallet = await _wallets.GetWalletForStoreAsync(ctx.Store.Id);
         if (wallet == null)
             throw new PaymentMethodUnavailableException("RGB wallet missing");
 
@@ -111,7 +115,7 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             throw new PaymentMethodUnavailableException(
                 "Select a default RGB asset in store Settings to accept payments");
 
-        var asset = await _wallets.GetAssetAsync(config.WalletId, config.DefaultAssetId);
+        var asset = await _wallets.GetAssetAsync(wallet.Id, config.DefaultAssetId);
         if (asset == null)
             throw new PaymentMethodUnavailableException(
                 $"Configured asset {config.DefaultAssetId[..Math.Min(20, config.DefaultAssetId.Length)]}... not found in wallet");
@@ -136,7 +140,7 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             ctx.InvoiceEntity.Price, invoiceCurrency, plan.Units, plan.PricingCode, rate.Rate, rate.Source);
 
         var expiration = ctx.InvoiceEntity.ExpirationTime - DateTimeOffset.UtcNow;
-        var invoice = await _wallets.CreateInvoiceAsync(config.WalletId, asset.AssetId, plan.Units, expiration,
+        var invoice = await _wallets.CreateInvoiceAsync(wallet.Id, asset.AssetId, plan.Units, expiration,
             ctx.InvoiceEntity.Id, config.MinConfirmations);
 
         ctx.Prompt.Currency = plan.PromptCurrency;
@@ -150,7 +154,7 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
 
         ctx.Prompt.Details = JObject.FromObject(new RGBPromptDetails
         {
-            WalletId = config.WalletId,
+            WalletId = wallet.Id,
             RgbInvoiceId = invoice.Id,
             RecipientId = invoice.RecipientId,
             AssetId = asset.AssetId,
