@@ -36,7 +36,10 @@ public class RestoreExecutorTests
         var (exec, runner) = Build();
         var dir = StagingWithFile();
         runner.Result = new RestoreRunResult(RestoreOutcome.TimedOut, null, "", ChildReaped: true);
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        // RestoreAbortedException, not InvalidOperationException: a supervisor stop is what arms the
+        // post-kill cooldown, and xUnit's ThrowsAsync matches the EXACT type, so asserting the base
+        // type here would silently stop distinguishing an abort from an ordinary failure.
+        await Assert.ThrowsAsync<RestoreAbortedException>(
             () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
         Assert.False(Directory.Exists(dir));
     }
@@ -49,7 +52,7 @@ public class RestoreExecutorTests
         runner.Result = new RestoreRunResult(RestoreOutcome.TimedOut, null, "", ChildReaped: false);
         try
         {
-            await Assert.ThrowsAsync<InvalidOperationException>(
+            await Assert.ThrowsAsync<RestoreAbortedException>(
                 () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
             Assert.True(Directory.Exists(dir));
         }
@@ -62,7 +65,7 @@ public class RestoreExecutorTests
         var (exec, runner) = Build();
         var dir = StagingWithFile();
         runner.Result = new RestoreRunResult(RestoreOutcome.KilledDisk, null, "", ChildReaped: true);
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<RestoreAbortedException>(
             () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
         Assert.False(Directory.Exists(dir));
     }
@@ -73,7 +76,7 @@ public class RestoreExecutorTests
         var (exec, runner) = Build();
         var dir = StagingWithFile();
         runner.Result = new RestoreRunResult(RestoreOutcome.KilledRam, null, "", ChildReaped: true);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+        var ex = await Assert.ThrowsAsync<RestoreAbortedException>(
             () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
         Assert.Contains("memory limit", ex.Message);
         Assert.DoesNotContain("timed out", ex.Message);

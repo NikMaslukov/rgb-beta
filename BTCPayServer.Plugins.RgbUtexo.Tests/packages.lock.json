@@ -760,6 +760,11 @@
           "Serilog": "4.2.0"
         }
       },
+      "SharpCompress": {
+        "type": "Transitive",
+        "resolved": "0.50.4",
+        "contentHash": "/hxjUR7DEX6mky8/LQXyrnrKioOL6D6veAID1EZpro+q4s02x5dHEYBV3qjEN6lDYYilDoQQ76BcmQj+lRx51w=="
+      },
       "SocketIO.Core": {
         "type": "Transitive",
         "resolved": "3.1.2",
@@ -1102,7 +1107,8 @@
           "NBitcoin": "[10.0.5, )",
           "Npgsql.EntityFrameworkCore.PostgreSQL": "[10.0.2, )",
           "RgbLib": "[0.3.0-beta.30, )",
-          "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.4, )"
+          "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.4, )",
+          "SharpCompress": "[0.50.4, )"
         }
       },
       "btcpayserver.rating": {

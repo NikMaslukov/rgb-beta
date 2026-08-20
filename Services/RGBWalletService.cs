@@ -24,6 +24,9 @@ public class RGBWalletService : IRGBWalletService
     readonly ConcurrentDictionary<string, SemaphoreSlim> _sendLocks = new();
     readonly SendLockCoordinator _sendCoordinator;
     static readonly SemaphoreSlim _restoreGate = new(1, 1);
+    // Static for the same reason _restoreGate is: both bound a process-wide resource, so per-instance
+    // state would be defeated by anything that resolves a second RGBWalletService.
+    static RestoreCooldownGate? _restoreCooldown;
     readonly RestoreExecutor _restoreExecutor;
 
     public RGBWalletService(
@@ -611,26 +614,49 @@ public class RGBWalletService : IRGBWalletService
         var parentDir = Path.GetDirectoryName(walletDataDir)!;
         Directory.CreateDirectory(parentDir);
 
+        var cooldown = GetOrCreateRestoreCooldown(() => new RestoreCooldownGate(
+            TimeSpan.FromSeconds(_cfg.RestoreKillCooldownSeconds)));
+        var nowUtc = DateTimeOffset.UtcNow;
+        if (cooldown.IsCoolingDown(nowUtc))
+            throw new InvalidOperationException(
+                "A wallet restore was attempted recently. "
+                + $"Try again in {Math.Ceiling(cooldown.Remaining(nowUtc).TotalSeconds)} seconds.");
+
         // SECURITY: Backup file is validated before reaching native code:
         // - 5MB upload limit (controller [RequestSizeLimit])
         // - ZIP structure + entry validation (controller ValidateBackupFileHeader)
+        // - scrypt KDF cost cap (RgbBackupScryptGuard, inside the gate below)
         // - Post-extraction size cap (configurable RestoreDiskCapBytes, below)
         // The native restore runs in a separate killable child process (RestoreExecutor):
         // a hung/oversized restore is terminated and the staging dir is deleted only once the
         // child is confirmed reaped, else left for the startup sweep.
         // The single-flight gate guards the expensive native restore and every persistent
-        // side effect (staging dir, Directory.Move, DB row); the cheap, side-effect-free key
-        // derivation and in-memory row build above are intentionally left outside it, so a
-        // rejected concurrent restore creates no staging dir and no wallet row.
+        // side effect (staging dir, Directory.Move, DB row). It also guards parent-side archive
+        // parsing/decompression so parallel uploads cannot amplify even that bounded work. The cheap
+        // key derivation and in-memory row build above remain outside it; a rejected concurrent restore
+        // still creates no staging dir and no wallet row.
         var entered = await _restoreGate.WaitAsync(TimeSpan.Zero, ct);
         if (!entered)
             throw new InvalidOperationException(
                 "Another wallet restore is already in progress. Try again once it completes.");
         try
         {
+            // The scrypt cost lives inside the uploaded file and is spent BEFORE decryption, so it is
+            // bounded on the path every restore caller takes, not in the controller, which is only one
+            // of them. This must stay inside the process-wide gate: method-93 public data requires
+            // bounded decompression in the parent, and concurrent requests must not multiply that work.
+            RgbBackupScryptGuard.ValidateFile(backupPath, _cfg.RestoreScryptMemoryCapBytes);
+
             var stagingDir = Path.Combine(parentDir, $"{RestoreStagingPrefix}{wallet.Id}-{Guid.NewGuid():N}");
 
-            await _restoreExecutor.ExecuteAsync(backupPath, stagingDir, password, ct);
+            try { await _restoreExecutor.ExecuteAsync(backupPath, stagingDir, password, ct); }
+            finally
+            {
+                // The KDF runs before password validation, and a measured log_n=18 wrong-password
+                // attempt consumed 290 MiB in 399 ms. Neither exit code nor a duration threshold can
+                // distinguish that from honest work, so every native attempt pays the same duty cycle.
+                cooldown.RecordAttempt(DateTimeOffset.UtcNow);
+            }
 
             var dirSize = new DirectoryInfo(stagingDir)
                 .EnumerateFiles("*", SearchOption.AllDirectories)
@@ -744,6 +770,14 @@ public class RGBWalletService : IRGBWalletService
 
         _log.LogInformation("restored wallet {Id} from backup for {Store} on {Network}", wallet.Id, storeId, walletNetwork);
         return wallet;
+    }
+
+    internal static RestoreCooldownGate GetOrCreateRestoreCooldown(Func<RestoreCooldownGate> create)
+    {
+        var current = Volatile.Read(ref _restoreCooldown);
+        if (current is not null) return current;
+        var candidate = create();
+        return Interlocked.CompareExchange(ref _restoreCooldown, candidate, null) ?? candidate;
     }
 
     public async Task DeleteWalletAsync(string walletId, CancellationToken ct = default)
@@ -1198,6 +1232,3 @@ public class RGBWalletService : IRGBWalletService
         return s.Substring(0, cut);
     }
 }
-
-
-

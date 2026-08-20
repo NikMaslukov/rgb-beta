@@ -35,6 +35,10 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
                 $"Restore helper not found at {helperDll}. The wallet was not restored.");
 
         var psi = BuildStartInfo(helperDll, backupPath, stagingDir, limits);
+        // Starts before the process exists and before its password is delivered: the helper begins
+        // native restore as soon as ReadLine sees the newline, so starting this after the stdin write
+        // allowed child work (and even a full self-exit) to precede both Elapsed and the deadline.
+        var sw = Stopwatch.StartNew();
         IChildHandle child;
         try
         {
@@ -56,20 +60,41 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             var killedReason = RestoreKillReason.None;
             var killed = false;
             var deadline = limits.Timeout;
-            var sw = Stopwatch.StartNew();
 
             while (!child.HasExited)
             {
                 if (sw.Elapsed >= deadline) { killed = true; break; }
-                var dirSize = DirectorySize(stagingDir);
-                var reason = RestoreWatchdog.ShouldKill(dirSize, SafeWorkingSet(child), limits);
+                var usage = MeasureStaging(stagingDir, limits.DiskCapBytes, limits.MaxStagingEntries);
+                var reason = RestoreWatchdog.ShouldKill(
+                    usage.Bytes, SafeWorkingSet(child), limits, usage.Entries);
                 if (reason != RestoreKillReason.None) { killed = true; killedReason = reason; break; }
+                // Re-checked AFTER the measurement, not only before it. MeasureStaging walks a tree the
+                // restored file's author controls, so it consumes real time; checking the deadline only
+                // on the way in let the kill land at deadline + scan time, which is precisely the
+                // "work continues after the timeout" shape this whole child-process design exists to
+                // remove. MeasureStaging is bounded, so this cannot be pushed out indefinitely, but the
+                // deadline must still be the deadline.
+                if (sw.Elapsed >= deadline) { killed = true; break; }
                 try { await Task.Delay(limits.Poll, ct); }
                 catch (OperationCanceledException) { killed = true; break; }
             }
 
             if (!killed && child.HasExited)
-                return new RestoreRunResult(RestoreOutcome.Exited, child.ExitCode, await child.ReadStdErrAsync(), true);
+            {
+                // One final measurement after a self-exit. The loop awaits a full poll interval before
+                // re-checking, so a child that inflated fast and exited inside that window was never
+                // measured at all: the caps were tripwires an attacker could step over between samples.
+                var finalUsage = MeasureStaging(stagingDir, limits.DiskCapBytes, limits.MaxStagingEntries);
+                var finalReason = RestoreWatchdog.ShouldKill(
+                    finalUsage.Bytes, 0, limits, finalUsage.Entries);
+                if (finalReason != RestoreKillReason.None)
+                    return new RestoreRunResult(
+                        finalReason == RestoreKillReason.Disk ? RestoreOutcome.KilledDisk : RestoreOutcome.KilledEntries,
+                        child.ExitCode, "", true, sw.Elapsed);
+
+                return new RestoreRunResult(
+                    RestoreOutcome.Exited, child.ExitCode, await child.ReadStdErrAsync(), true, sw.Elapsed);
+            }
 
             child.Kill(true);
             var reaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
@@ -77,9 +102,10 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             {
                 RestoreKillReason.Disk => RestoreOutcome.KilledDisk,
                 RestoreKillReason.Ram => RestoreOutcome.KilledRam,
+                RestoreKillReason.Entries => RestoreOutcome.KilledEntries,
                 _ => RestoreOutcome.TimedOut
             };
-            return new RestoreRunResult(outcome, null, "", reaped);
+            return new RestoreRunResult(outcome, null, "", reaped, sw.Elapsed);
         }
     }
 
@@ -173,14 +199,37 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         try { return child.WorkingSet64; } catch { return 0; }
     }
 
-    static long DirectorySize(string dir)
+    internal readonly record struct StagingUsage(long Bytes, int Entries);
+
+    // Bounded on BOTH axes, and it stops at the first breach rather than totalling the tree: the
+    // watchdog only needs to know THAT a cap is exceeded, never by how much. The unbounded
+    // `EnumerateFiles(...).Sum(...)` this replaces did one stat per file per poll over
+    // attacker-created content, so a hostile archive inflating to very many small files stayed under
+    // the byte cap while making the parent's own scan the expensive part — work the child's
+    // prlimit --cpu does not cover, because it runs in the BTCPay process.
+    internal static StagingUsage MeasureStaging(string dir, long byteCap, int entryCap)
     {
+        long bytes = 0;
+        var entries = 0;
         try
         {
-            return new DirectoryInfo(dir)
-                .EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
+            // FileSystemInfos, not Files: directories cost a stat to walk and a recursive delete to
+            // clean up, so counting only files let an output dominated by empty directories stay at
+            // entries = 0 and bytes = 0 while re-imposing exactly the unbounded parent-side scan this
+            // measurement exists to bound (measured: 100k empty dirs = 1.3 s per poll, 4.8 s to delete,
+            // and no kill).
+            foreach (var item in new DirectoryInfo(dir).EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
+            {
+                entries++;
+                if (item is FileInfo file) bytes += file.Length;
+                // Strictly greater, to agree with RestoreWatchdog.ShouldKill: returning here must
+                // hand back a value that still trips the same comparison.
+                if (bytes > byteCap || entries > entryCap)
+                    return new StagingUsage(bytes, entries);
+            }
         }
-        catch { return 0; }
+        catch { return new StagingUsage(bytes, entries); }
+        return new StagingUsage(bytes, entries);
     }
 
     sealed class RealChildHandle : IChildHandle

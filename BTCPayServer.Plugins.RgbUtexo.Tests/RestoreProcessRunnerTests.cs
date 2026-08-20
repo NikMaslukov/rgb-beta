@@ -15,6 +15,7 @@ public class RestoreProcessRunnerTests
         public int DisposeCount;
         public bool ReapWithinGrace = true;
         public bool ThrowOnStdin;
+        public TimeSpan StdinDelay;
 
         public long WorkingSet64 => Rss;
         public bool HasExited => Exited;
@@ -23,8 +24,11 @@ public class RestoreProcessRunnerTests
         public Task<bool> WaitForExitAsync(TimeSpan grace, CancellationToken ct)
             => Task.FromResult(ReapWithinGrace);
         public Task<string> ReadStdErrAsync() => Task.FromResult("");
-        public Task WriteStdinLineAndCloseAsync(string line)
-            => ThrowOnStdin ? throw new IOException("broken pipe") : Task.CompletedTask;
+        public async Task WriteStdinLineAndCloseAsync(string line)
+        {
+            if (ThrowOnStdin) throw new IOException("broken pipe");
+            if (StdinDelay > TimeSpan.Zero) await Task.Delay(StdinDelay);
+        }
         // Mirrors RealChildHandle: disposing a still-running child kills it, so an exception
         // escaping the using block can never leak a live restore.
         public void Dispose() { if (!Exited) Kill(true); DisposeCount++; }
@@ -42,6 +46,50 @@ public class RestoreProcessRunnerTests
 
     static RestoreProcessRunner NewRunner(FakeChild child)
         => new(NullLogger<RestoreProcessRunner>.Instance, _ => child, ExistingHelper, () => "dotnet");
+
+    // ROUND 3: the poll loop awaits a full interval before re-checking, so a child that inflated fast
+    // and exited inside that window was never measured at all — the disk and entry caps were tripwires
+    // an attacker could step over between samples. A self-exit now gets one final measurement.
+    [Fact]
+    public async Task AChildThatExitsAfterBreachingTheDiskCapIsStillReportedAsKilled()
+    {
+        var dir = CreateTempDir();
+        File.WriteAllBytes(Path.Combine(dir, "big.dat"), new byte[4000]);
+        // Already exited on entry, so the loop body never runs and only the post-exit check can see it.
+        var child = new FakeChild { Exited = true, Code = 0 };
+
+        var r = await NewRunner(child).RunAsync("bk", dir, "pw", Fast(diskCap: 1000), CancellationToken.None);
+
+        Assert.Equal(RestoreOutcome.KilledDisk, r.Outcome);
+    }
+
+    [Fact]
+    public async Task AChildThatExitsAfterBreachingTheEntryCapIsStillReportedAsKilled()
+    {
+        var dir = CreateTempDir();
+        for (var i = 0; i < 40; i++) File.WriteAllBytes(Path.Combine(dir, $"f{i}.dat"), Array.Empty<byte>());
+        var child = new FakeChild { Exited = true, Code = 0 };
+        var limits = Fast(diskCap: 52_428_800) with { MaxStagingEntries = 10 };
+
+        var r = await NewRunner(child).RunAsync("bk", dir, "pw", limits, CancellationToken.None);
+
+        Assert.Equal(RestoreOutcome.KilledEntries, r.Outcome);
+    }
+
+    [Fact]
+    public async Task AnHonestSelfExitWithinTheCapsStillSucceeds()
+    {
+        // The other side of the same check: adding a post-exit measurement must not turn a normal
+        // successful restore into a failure, which would be a permanent false-REJECT.
+        var dir = CreateTempDir();
+        File.WriteAllBytes(Path.Combine(dir, "small.dat"), new byte[10]);
+        var child = new FakeChild { Exited = true, Code = 0 };
+
+        var r = await NewRunner(child).RunAsync("bk", dir, "pw", Fast(diskCap: 1000), CancellationToken.None);
+
+        Assert.Equal(RestoreOutcome.Exited, r.Outcome);
+        Assert.Equal(0, r.ExitCode);
+    }
 
     [Fact]
     public async Task RamBreach_KillsOnce_ReportsKilledRam()
@@ -85,6 +133,19 @@ public class RestoreProcessRunnerTests
         Assert.Equal(0, r.ExitCode);
         Assert.True(r.ChildReaped);
         Assert.Equal(0, child.KillCount);
+    }
+
+    [Fact]
+    public async Task ElapsedIncludesProcessStartupAndPasswordDelivery()
+    {
+        // The helper starts native work as soon as its ReadLine sees the password. Starting the clock
+        // only after this await allowed that work, including a quick self-exit, to disappear from both
+        // the expensive-attempt classification and the timeout budget.
+        var child = new FakeChild { Exited = true, Code = 1, StdinDelay = TimeSpan.FromMilliseconds(80) };
+
+        var r = await NewRunner(child).RunAsync("bk", CreateTempDir(), "pw", Fast(), CancellationToken.None);
+
+        Assert.True(r.Elapsed >= TimeSpan.FromMilliseconds(60), $"elapsed was only {r.Elapsed.TotalMilliseconds}ms");
     }
 
     [Fact]

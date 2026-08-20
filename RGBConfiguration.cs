@@ -80,6 +80,26 @@ public class RGBConfiguration
     [JsonPropertyName("restore_reap_grace_seconds")]
     public int RestoreReapGraceSeconds { get; set; } = 5;
 
+    // See RgbBackupScryptGuard: the KDF cost lives in the uploaded file, so it is bounded before any
+    // child is spawned. Configurable because this bound can only false-REJECT, and a legitimate
+    // backup written by a future rgb-lib with a higher log_n must remain restorable.
+    [JsonPropertyName("restore_scrypt_memory_cap_bytes")]
+    public long RestoreScryptMemoryCapBytes { get; set; } = RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes;
+
+    // Bounds the WATCHDOG's own work, not the child's. Each poll walked the whole staging tree with a
+    // stat per file; a hostile inner archive that inflates to very many small files kept the byte
+    // total under RestoreDiskCapBytes while making that walk slow, which both burned parent CPU and
+    // delayed the kill. Exceeding this count is itself a kill reason, because an honest rgb-lib
+    // wallet directory is a handful of files.
+    [JsonPropertyName("restore_max_staging_entries")]
+    public int RestoreMaxStagingEntries { get; set; } = 20_000;
+
+    // Applied after every native restore attempt. Exit status and wall-clock duration cannot identify
+    // cheap work: accepted log_n=18 parameters plus a wrong password measured 290 MiB peak RSS and
+    // completed in 399 ms, so a threshold left meaningful resource use immediately retryable forever.
+    [JsonPropertyName("restore_kill_cooldown_seconds")]
+    public int RestoreKillCooldownSeconds { get; set; } = 60;
+
     // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
     // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
@@ -132,7 +152,8 @@ public class RGBConfiguration
         RamCapBytes: RestoreRamCapBytes,
         CpuLimit: TimeSpan.FromSeconds(RestoreCpuLimitSeconds),
         Poll: TimeSpan.FromMilliseconds(RestorePollMs),
-        ReapGrace: TimeSpan.FromSeconds(RestoreReapGraceSeconds));
+        ReapGrace: TimeSpan.FromSeconds(RestoreReapGraceSeconds),
+        MaxStagingEntries: RestoreMaxStagingEntries);
 
     public RGBConfiguration() { }
 

@@ -69,6 +69,7 @@
         <ProjectReference Include="../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="!Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj') And Exists('../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         
         <PackageReference Include="RgbLib" Version="0.3.0-beta.30" />
+        <PackageReference Include="SharpCompress" Version="0.50.4" />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
             <PrivateAssets>all</PrivateAssets>
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

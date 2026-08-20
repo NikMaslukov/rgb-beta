@@ -31,13 +31,17 @@ public sealed class RestoreExecutor
             throw new InvalidOperationException($"Restore failed: {result.StdErr}");
 
         if (result.Outcome is RestoreOutcome.KilledDisk)
-            throw new InvalidOperationException(
+            throw new RestoreAbortedException(
                 $"Restored wallet data exceeds the {_cfg.RestoreDiskCapBytes / (1024 * 1024)}MB size limit");
 
         if (result.Outcome is RestoreOutcome.KilledRam)
-            throw new InvalidOperationException("Backup restore exceeded the memory limit and was stopped");
+            throw new RestoreAbortedException("Backup restore exceeded the memory limit and was stopped");
 
-        throw new InvalidOperationException(
+        if (result.Outcome is RestoreOutcome.KilledEntries)
+            throw new RestoreAbortedException(
+                $"Restored wallet data contains more than {_cfg.RestoreMaxStagingEntries} files and was stopped");
+
+        throw new RestoreAbortedException(
             $"Backup restore timed out after {_cfg.RestoreTimeoutSeconds} seconds");
     }
 

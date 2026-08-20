@@ -109,7 +109,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
     }
 
     /// <summary>
-    /// Applies environment-variable overrides for the automatic-UTXO knobs.
+    /// Applies environment-variable overrides for the automatic-UTXO and backup-restore knobs.
     ///
     /// WHY these exist at all: rgb.json is the only other delivery mechanism, and writing that file is
     /// hazardous — it replaces the whole configuration object, so a file that omits rgb_base_dir silently
@@ -132,6 +132,18 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
         if (int.TryParse(read("RGB_AUTO_UTXO_MAX_BACKOFF_MINUTES"), out var backoff))
             cfg.AutoUtxoMaxBackoffMinutes = backoff;
+
+        // The scrypt ceiling in particular MUST be reachable without editing rgb.json: it is the one
+        // restore bound that can refuse a genuine backup outright (see RgbBackupScryptGuard), so the
+        // recovery path for a false reject has to be as cheap as possible.
+        if (long.TryParse(read("RGB_RESTORE_SCRYPT_MEMORY_CAP_BYTES"), out var scryptCap) && scryptCap > 0)
+            cfg.RestoreScryptMemoryCapBytes = scryptCap;
+
+        if (int.TryParse(read("RGB_RESTORE_MAX_STAGING_ENTRIES"), out var stagingEntries) && stagingEntries > 0)
+            cfg.RestoreMaxStagingEntries = stagingEntries;
+
+        if (int.TryParse(read("RGB_RESTORE_KILL_COOLDOWN_SECONDS"), out var killCooldown) && killCooldown >= 0)
+            cfg.RestoreKillCooldownSeconds = killCooldown;
     }
 
     private static string ResolveRgbBaseDir(string btcPayDataDir)
