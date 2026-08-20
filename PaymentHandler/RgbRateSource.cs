@@ -1,6 +1,9 @@
 using BTCPayServer.Data;
 using BTCPayServer.Rating;
 using BTCPayServer.Services.Rates;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Extensions.Logging;
 
 namespace BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
@@ -45,7 +48,19 @@ public class RgbRateSource : IRgbRateSource
                 .GetRateRules(_defaultRules, storeBlob.Spread, out preferredSource);
 
             var pair = new CurrencyPair(pricingCode, invoiceCurrency);
-            var rateRules = storeBlob.GetRateRules(_defaultRules);
+            if (!RgbPricingCode.IsCurrentPricingCode(pricingCode))
+                return RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);
+
+            var hasPrimary = TryGetExplicitRules(storeBlob.PrimaryRateSettings, storeBlob.Spread, pair,
+                out var primaryRules);
+            var hasFallback = TryGetExplicitRules(storeBlob.FallbackRateSettings, storeBlob.Spread, pair,
+                out var fallbackRules);
+            if (!hasPrimary && !hasFallback)
+                return RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);
+
+            var rateRules = hasPrimary
+                ? new RateRulesCollection(primaryRules!, hasFallback ? fallbackRules : null)
+                : new RateRulesCollection(fallbackRules!, null);
 
             // TWO mechanisms, because neither alone suffices.
             // The token bounds the PROVIDER's work: the pre-change code passed a 5s
@@ -89,5 +104,38 @@ public class RgbRateSource : IRgbRateSource
             _log.LogWarning(ex, "Rate lookup failed for {Code}/{Currency}", pricingCode, invoiceCurrency);
             return RgbRateResult.Failed(RgbRateFailure.Error, preferredSource);
         }
+    }
+
+    static bool TryGetExplicitRules(
+        StoreBlob.RateSettings? settings,
+        decimal spread,
+        CurrencyPair requestedPair,
+        out RateRules? rules)
+    {
+        rules = null;
+        if (settings is not { RateScripting: true }
+            || string.IsNullOrWhiteSpace(settings.RateScript)
+            || !RateRules.TryParse(settings.RateScript, out var parsed)
+            || !DeclaresExactPair(settings.RateScript, requestedPair))
+            return false;
+
+        parsed.Spread = spread;
+        rules = parsed;
+        return true;
+    }
+
+    static bool DeclaresExactPair(string script, CurrencyPair requestedPair)
+    {
+        var inverse = requestedPair.Inverse();
+        return CSharpSyntaxTree.ParseText(script).GetRoot()
+            .DescendantNodes()
+            .OfType<AssignmentExpressionSyntax>()
+            .Where(assignment => assignment.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression))
+            .Select(assignment => assignment.Left as IdentifierNameSyntax)
+            .Where(identifier => identifier is not null)
+            .Select(identifier => CurrencyPair.TryParse(identifier!.Identifier.ValueText, out var pair)
+                ? pair
+                : null)
+            .Any(pair => pair == requestedPair || pair == inverse);
     }
 }

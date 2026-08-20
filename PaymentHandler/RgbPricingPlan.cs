@@ -10,14 +10,10 @@ public record RgbPricingPlan(string PricingCode, long Units, string PromptCurren
     public static RgbPricingPlan Build(string pricingCode, int precision, decimal invoicePrice, decimal rate)
     {
         // Validate the code's SHAPE, not just its presence. Scope, stated precisely because an
-        // earlier draft overclaimed it: this catches substitution of a RAW string — Build(asset.Ticker,
-        // …), a reassigned or aliased local, a deconstruction target. It does NOT catch a ticker routed
-        // through RgbPricingCode.For, which returns a shape-valid code for any input, so a mutated
-        // asset.AssetId or a rebound asset still passes here. Those rest on P-E2b/P-E6 and tests 24/26.
-        // Note the caught side has one exception: an issuer whose ticker is itself literally RGB+16 hex
-        // makes even the raw-string substitution shape-valid. §3.5's ticker guard blocks such a ticker
-        // from currency REGISTRATION, not from being asset.Ticker's value.
-        if (!RgbPricingCode.IsPricingCode(pricingCode))
+        // earlier draft overclaimed it: this catches substitution of a raw ticker and legacy code,
+        // but shape alone cannot prove which contract produced the value. That binding is established
+        // by ConfigurePrompt's derivation and collision guard and rechecked by the listener.
+        if (!RgbPricingCode.IsCurrentPricingCode(pricingCode))
             throw new ArgumentException(
                 $"'{pricingCode}' is not a pricing code; pricing must be contract-derived", nameof(pricingCode));
         if (invoicePrice < 0m)

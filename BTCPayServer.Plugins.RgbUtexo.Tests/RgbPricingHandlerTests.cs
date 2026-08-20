@@ -13,45 +13,103 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
 public class RgbPaymentCurrencyTests
 {
+    const string Asset = "rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw";
+    const string OtherAsset = "rgb:ERERERER-ERERERE-RERERER-ERERERE-RERERER-ERERERE";
+
     [Fact]
-    public void PricingCode_WhenPresent_IsThePaymentCurrency()
+    public void CurrentContractBoundPricingCode_IsThePaymentCurrency()
     {
-        var details = new RGBPromptDetails { PricingCode = "RGB0123456789ABCDEF", AssetTicker = "USDT" };
-        Assert.Equal("RGB0123456789ABCDEF", RGBInvoiceListener.ResolvePaymentCurrency(details));
+        var details = new RGBPromptDetails
+        {
+            AssetId = Asset, PricingCode = RgbPricingCode.For(Asset), AssetTicker = "USDT"
+        };
+        Assert.Equal(RgbPricingCode.For(Asset), RGBInvoiceListener.ResolvePaymentCurrency(details));
     }
 
     [Fact]
-    public void PreUpgradePrompt_FallsBackToTicker()
+    public void PreUpgradePromptWithoutCode_IsRejectedInsteadOfUsingTicker()
     {
-        // Deserialize genuine pre-upgrade prompt JSON — a hand-built object with PricingCode = null
-        // does not prove that a payload written before this change round-trips without the property.
-        var json = JObject.Parse("""{"walletId":"w1","assetTicker":"USDT","amountInAssetUnits":5}""");
+        var json = JObject.Parse($$"""{"walletId":"w1","assetId":"{{Asset}}","assetTicker":"USDT","amountInAssetUnits":5}""");
         var details = json.ToObject<RGBPromptDetails>(BlobSerializer.CreateSerializer().Serializer)!;
         Assert.Null(details.PricingCode);
-        Assert.Equal("USDT", RGBInvoiceListener.ResolvePaymentCurrency(details));
+        Assert.Throws<FormatException>(() => RGBInvoiceListener.ResolvePaymentCurrency(details));
     }
 
     [Fact]
-    public void PromptWithNeither_FallsBackToRgb()
+    public void PromptWithOld64BitCode_IsRejected()
     {
-        var details = new RGBPromptDetails { PricingCode = null, AssetTicker = null };
-        Assert.Equal("RGB", RGBInvoiceListener.ResolvePaymentCurrency(details));
+        var details = new RGBPromptDetails
+        {
+            AssetId = Asset, PricingCode = "RGB0123456789ABCDEF", AssetTicker = "USDT"
+        };
+        Assert.Throws<FormatException>(() => RGBInvoiceListener.ResolvePaymentCurrency(details));
+    }
+
+    [Fact]
+    public void CurrentCodeForAnotherContract_IsRejected()
+    {
+        var details = new RGBPromptDetails
+        {
+            AssetId = Asset, PricingCode = RgbPricingCode.For(OtherAsset), AssetTicker = "USDT"
+        };
+        Assert.Throws<FormatException>(() => RGBInvoiceListener.ResolvePaymentCurrency(details));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("RGB0123456789ABCDEF")]
+    public void LegacyPromptIdentity_FailsRegistrationAndBlocksSettlement(string? pricingCode)
+    {
+        var invoice = new RGBInvoice { AssetId = Asset };
+        var details = new RGBPromptDetails
+        {
+            AssetId = Asset, PricingCode = pricingCode, AssetTicker = "USDT"
+        };
+
+        var registration = RGBInvoiceListener.ClassifyPromptPricingIdentity(
+            invoice, details, out var paymentCurrency);
+
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed, registration);
+        Assert.Equal("", paymentCurrency);
+        Assert.False(RGBInvoiceListener.ShouldCommitAdvance(
+            RGBInvoiceStatus.Settled, registration == RGBInvoiceListener.PaymentRegistration.Failed));
+    }
+
+    [Fact]
+    public void PromptAssetMismatch_FailsRegistration()
+    {
+        var details = new RGBPromptDetails
+        {
+            AssetId = Asset, PricingCode = RgbPricingCode.For(Asset), AssetTicker = "USDT"
+        };
+
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed,
+            RGBInvoiceListener.ClassifyPromptPricingIdentity(
+                new RGBInvoice { AssetId = Asset + "other" }, details, out _));
     }
 }
 
 public class RgbPricingHandlerTests
 {
-    const string AssetA = "rgb:2WBcas9-yCd6PYWKG-8ZQvKcaBM-hHu6bLXcE-JzKTvSAqW-hGrDPfF";
-    const string AssetB = "rgb:9pTvKmQ-3nRwLxYbC-2dFgHjKlM-nBvCxZaSd-QwErTyUiO-pAsDfGh";
+    const string AssetA = "rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw";
+    const string AssetB = "rgb:ERERERER-ERERERE-RERERER-ERERERE-RERERER-ERERERE";
     const string StoreId = "store-1";
     const string WalletId = "wallet-1";
 
     // Not Stubs/FakeRGBWalletService: task 4 leaves its new members throwing, so every case here would
     // fault before reaching the pricing path.
-    sealed class PricingWalletStub : IRGBWalletService
+    sealed class PricingWalletStub : IRGBWalletService, IRgbPricingCodeCollisionGuard
     {
         public RGBAsset? Asset;
         public long? RecordedAmount;
+        public bool Unambiguous = true;
+        public string? CollisionCheckedAssetId;
+
+        public Task<bool> IsUnambiguousAsync(string assetId, CancellationToken ct = default)
+        {
+            CollisionCheckedAssetId = assetId;
+            return Task.FromResult(Unambiguous);
+        }
 
         public Task<RGBWallet?> GetWalletAsync(string walletId, CancellationToken ct = default) =>
             Task.FromResult<RGBWallet?>(new RGBWallet { Id = walletId, StoreId = StoreId });
@@ -134,10 +192,11 @@ public class RgbPricingHandlerTests
     }
 
     static (RGBPaymentMethodHandler Handler, PricingWalletStub Wallets) Build(
-        IRgbRateSource rates, RGBAsset asset)
+        IRgbRateSource rates, RGBAsset asset, bool unambiguous = true)
     {
-        var wallets = new PricingWalletStub { Asset = asset };
-        var handler = new RGBPaymentMethodHandler(wallets, rates, NullLogger<RGBPaymentMethodHandler>.Instance);
+        var wallets = new PricingWalletStub { Asset = asset, Unambiguous = unambiguous };
+        var handler = new RGBPaymentMethodHandler(
+            wallets, rates, wallets, NullLogger<RGBPaymentMethodHandler>.Instance);
         return (handler, wallets);
     }
 
@@ -173,6 +232,20 @@ public class RgbPricingHandlerTests
         Assert.Null(wallets.RecordedAmount);
     }
 
+    [Fact]
+    public async Task PricingCodeCollision_RefusesBeforeRateLookupOrRgbInvoiceCreation()
+    {
+        var source = new RecordingRateSource(RgbRateResult.Ok(1m, "must-not-be-used"));
+        var (handler, wallets) = Build(source, AssetRow(AssetA, "USDT", 0), unambiguous: false);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.Equal(AssetA, wallets.CollisionCheckedAssetId);
+        Assert.Null(source.SeenPricingCode);
+        Assert.Null(wallets.RecordedAmount);
+    }
+
     // 18b — a store still on default rules is told what is actually wrong.
     [Fact]
     public async Task DefaultRulesStore_IsToldToAddARateRule()
@@ -205,6 +278,41 @@ public class RgbPricingHandlerTests
         var ctxB = Context(Store(AssetB, script), handlerB, price: 100m, currency: "USD");
         await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handlerB.ConfigurePrompt(ctxB));
         Assert.Null(walletsB.RecordedAmount);
+    }
+
+    [Theory]
+    [InlineData("BTC", "BTC_USD = 90000;")]
+    [InlineData("EUR", "EUR_USD = 1;")]
+    [InlineData("RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA_USD = 1;")]
+    public async Task IssuerChosenTicker_CannotBorrowItsLiteralRateRule(string ticker, string script)
+    {
+        var (handler, wallets) = Build(TestRateSource.WithNoExchanges(), AssetRow(AssetA, ticker, 0));
+        var ctx = Context(Store(AssetA, script), handler, price: 100m, currency: "USD");
+
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.Null(wallets.RecordedAmount);
+    }
+
+    [Fact]
+    public async Task Old64BitRule_IsNotMappedAndMerchantCanRecoverWithCurrentExplicitRule()
+    {
+        const string oldCode = "RGBF40956866D3C22DA";
+        var currentCode = RgbPricingCode.For(AssetA);
+
+        var (oldHandler, oldWallets) = Build(TestRateSource.WithNoExchanges(), AssetRow(AssetA, "USDT", 0));
+        var oldContext = Context(Store(AssetA, $"{oldCode}_USD = 2;"), oldHandler, 100m, "USD");
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => oldHandler.ConfigurePrompt(oldContext));
+        Assert.Null(oldWallets.RecordedAmount);
+
+        var (currentHandler, currentWallets) = Build(
+            TestRateSource.WithNoExchanges(), AssetRow(AssetA, "USDT", 0));
+        var currentContext = Context(
+            Store(AssetA, $"{currentCode}_USD = 2;"), currentHandler, 100m, "USD");
+        await currentHandler.ConfigurePrompt(currentContext);
+
+        Assert.Equal(50L, currentWallets.RecordedAmount);
     }
 
     // 25 — an ISO code as a ticker claims nothing. USD_JPY exists; the contract calling itself USD
@@ -259,7 +367,12 @@ public class RgbPricingHandlerTests
         var expected = RgbPricingCode.For(AssetA);
         Assert.Equal(expected, source.SeenPricingCode);
         Assert.Equal(expected, ctx.Prompt.Currency);
-        Assert.Equal(expected, handler.ParsePaymentPromptDetails(ctx.Prompt.Details).PricingCode);
+        var details = handler.ParsePaymentPromptDetails(ctx.Prompt.Details);
+        Assert.Equal(expected, details.PricingCode);
+        Assert.Equal(expected, RGBInvoiceListener.ResolvePaymentCurrency(details));
+#pragma warning disable CS0618
+        Assert.Equal(expected, Assert.Single(ctx.InvoiceEntity.Rates).Key);
+#pragma warning restore CS0618
     }
 
     // 28 — a non-integral quotient, so ceiling and truncation differ and a dropped or constant rate

@@ -8,7 +8,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 // explain: refused at invoice time, settings page showing nothing wrong.
 public class RgbPricingNoticeTests
 {
-    const string AssetA = "rgb:2WBcas9-yCd6PYWKG-8ZQvKcaBM-hHu6bLXcE-JzKTvSAqW-hGrDPfF";
+    const string AssetA = "rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw";
 
     static RgbRateResult NoRate(bool preferredSource) =>
         RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);

@@ -22,7 +22,8 @@ public class RgbConfigValidationTests
     const string HandlerType = "BTCPayServer.Plugins.RgbUtexo.PaymentHandler.RGBPaymentMethodHandler";
 
     static RGBPaymentMethodHandler TestHandler() =>
-        new(wallets: null!, rates: null!, NullLogger<RGBPaymentMethodHandler>.Instance);
+        new(wallets: null!, rates: null!, pricingCodeGuard: null!,
+            NullLogger<RGBPaymentMethodHandler>.Instance);
 
     // WHY the JToken overload: a config body that is a JSON *string* rather than an object is the only
     // case where JsonException.Path is empty and the error must be keyed "config". JObject.Parse cannot

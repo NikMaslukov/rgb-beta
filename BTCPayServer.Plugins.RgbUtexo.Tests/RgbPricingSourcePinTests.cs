@@ -182,23 +182,34 @@ public class RgbPricingSourcePinTests
         RoslynPins.AssertNeverReassigned(ConfigurePrompt(), "asset", "plan", "invoiceCurrency");
     }
 
-    // P-E5 — tests 38-40 call ResolvePaymentCurrency directly, so leaving the old
-    // `Currency = details.AssetTicker ?? "RGB"` in place passes all three and the fourth coupled
-    // currency site would ship unproven.
+    // P-E5 — the listener must validate before even looking for an existing payment, then use the
+    // validated current code for a newly inserted payment. Otherwise a legacy ticker payment could
+    // still be updated to Settled after deployment.
     [Fact]
-    public void PE5_TheRecordedPaymentCurrency_ComesFromTheResolver()
+    public void PE5_TheRecordedPaymentCurrency_ComesFromThePreLookupIdentityGate()
     {
-        var listener = PluginCompilation.Shared.Tree(ListenerFile).GetRoot();
+        var method = RoslynPins.Method(
+            PluginCompilation.Shared.Tree(ListenerFile), "RGBInvoiceListener", "RecordOrUpdatePayment");
+        var body = RoslynPins.BodyOf(method);
 
-        var currencyAssignments = listener.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+        var identity = Single(body, "ClassifyPromptPricingIdentity");
+        Assert.Equal("rgbInv", Text(Argument(identity, "rgbInvoice", 0)));
+        Assert.Equal("details", Text(Argument(identity, "details", 1)));
+        var currencyArg = identity.ArgumentList.Arguments[2];
+        Assert.Equal("out var paymentCurrency", Text(currencyArg));
+
+        var existingPayment = body.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(d => d.Identifier.ValueText == "existingPayment");
+        Assert.True(identity.SpanStart < existingPayment.SpanStart,
+            "prompt identity must be rejected before an existing payment can be updated");
+
+        var currencyAssignments = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Where(a => a.Left is IdentifierNameSyntax { Identifier.ValueText: "Currency" }
                         && a.Parent is InitializerExpressionSyntax)
             .ToList();
 
         var assignment = Assert.Single(currencyAssignments);
-        var call = Assert.IsType<InvocationExpressionSyntax>(assignment.Right);
-        Assert.Equal("ResolvePaymentCurrency", NameOf(call));
-        Assert.Equal("details", Text(Assert.Single(call.ArgumentList.Arguments)));
+        Assert.Equal("paymentCurrency", Text(assignment.Right));
     }
 
     // P-E7 — 37b/37c pin the predicate, but nothing pins that production still USES it. Re-inlining

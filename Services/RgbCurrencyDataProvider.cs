@@ -40,8 +40,7 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
             new() { Code = "RGB", Name = "RGB Token", Divisibility = 0, Crypto = true }
         };
 
-        var seenAssetIds = new HashSet<string>(StringComparer.Ordinal);
-        var codeOwners = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var assetsByCanonicalId = new Dictionary<string, RGBAsset>(StringComparer.Ordinal);
         var seenTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var asset in assets)
@@ -51,25 +50,8 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
             if (string.IsNullOrWhiteSpace(asset.AssetId)) continue;
 
             // RGB_Assets is keyed (WalletId, AssetId): one contract in two wallets is one asset.
-            if (seenAssetIds.Add(asset.AssetId))
-            {
-                var code = pricingCode(asset.AssetId);
-                if (codeOwners.TryGetValue(code, out var owner))
-                {
-                    onCollision?.Invoke(code, owner, asset.AssetId);
-                }
-                else
-                {
-                    codeOwners[code] = asset.AssetId;
-                    currencies.Add(new CurrencyData
-                    {
-                        Code = code,
-                        Name = DescribeAsset(asset, code),
-                        Divisibility = asset.Precision,
-                        Crypto = true
-                    });
-                }
-            }
+            // Prefix and separator variants are the same ContractId according to RGB Core.
+            assetsByCanonicalId.TryAdd(RgbPricingCode.CanonicalizeAssetId(asset.AssetId), asset);
 
             if (string.IsNullOrEmpty(asset.Ticker)) continue;
             var ticker = asset.Ticker.ToUpperInvariant();
@@ -81,6 +63,29 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
             currencies.Add(new CurrencyData
             {
                 Code = ticker, Name = asset.Name, Divisibility = asset.Precision, Crypto = true
+            });
+        }
+
+        foreach (var codeGroup in assetsByCanonicalId.Values
+                     .Select(asset => (Asset: asset, Code: pricingCode(asset.AssetId)))
+                     .GroupBy(item => item.Code, StringComparer.OrdinalIgnoreCase))
+        {
+            var owners = codeGroup.ToList();
+            if (owners.Count > 1)
+            {
+                var first = owners[0];
+                foreach (var other in owners.Skip(1))
+                    onCollision?.Invoke(first.Code, first.Asset.AssetId, other.Asset.AssetId);
+                continue;
+            }
+
+            var owner = owners[0];
+            currencies.Add(new CurrencyData
+            {
+                Code = owner.Code,
+                Name = DescribeAsset(owner.Asset, owner.Code),
+                Divisibility = owner.Asset.Precision,
+                Crypto = true
             });
         }
 
@@ -104,7 +109,7 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
             var assets = await ctx.RGBAssets.ToListAsync(cancellationToken);
             return BuildCurrencies(assets, RgbPricingCode.For,
                 (code, owner, other) => _log.LogCritical(
-                    "RGB pricing code {Code} collides between assets {Owner} and {Other}; the second will not be priced",
+                    "RGB pricing code {Code} collides between assets {Owner} and {Other}; neither contract will be priced",
                     code, owner, other));
         }
         catch (Exception ex)

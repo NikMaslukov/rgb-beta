@@ -7,8 +7,8 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
 public class RgbCurrencyDataProviderTests
 {
-    const string AssetA = "rgb:2WBcas9-yCd6PYWKG-8ZQvKcaBM-hHu6bLXcE-JzKTvSAqW-hGrDPfF";
-    const string AssetB = "rgb:9pTvKmQ-3nRwLxYbC-2dFgHjKlM-nBvCxZaSd-QwErTyUiO-pAsDfGh";
+    const string AssetA = "rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw";
+    const string AssetB = "rgb:ERERERER-ERERERE-RERERER-ERERERE-RERERER-ERERERE";
 
     static RGBAsset Asset(string assetId, string ticker = "", string name = "Token",
         int precision = 0, string walletId = "w1") =>
@@ -64,6 +64,8 @@ public class RgbCurrencyDataProviderTests
     [Theory]
     [InlineData("RGB0123456789ABCDEF")]
     [InlineData("rgb0123456789abcdef")]
+    [InlineData("RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")]
+    [InlineData("rgb2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
     public void ATickerShapedLikeAPricingCode_IsRefused_ButTheAssetStillGetsItsOwnCode(string ticker)
     {
         var currencies = Build(Asset(AssetA, ticker: ticker));
@@ -72,21 +74,23 @@ public class RgbCurrencyDataProviderTests
         Assert.NotNull(Find(currencies, RgbPricingCode.For(AssetA)));
     }
 
-    // 35 — a genuine 64-bit collision is logged, and the first owner keeps the code.
+    // A collision removes every claimant from the registry. Keeping the first owner would still
+    // advertise an ambiguous identity to rate and formatting consumers.
     [Fact]
-    public void TwoAssetIdsMappingToOneCode_KeepTheFirstAndReportTheCollision()
+    public void TwoAssetIdsMappingToOneCode_RegisterNeitherAndReportTheCollision()
     {
         var collisions = new List<(string Code, string Owner, string Other)>();
 
         var currencies = RgbCurrencyDataProvider.BuildCurrencies(
             [Asset(AssetA, ticker: "AAA"), Asset(AssetB, ticker: "BBB")],
-            _ => "RGB0123456789ABCDEF",
+            _ => "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             (code, owner, other) => collisions.Add((code, owner, other)));
 
         var collision = Assert.Single(collisions);
         Assert.Equal(AssetA, collision.Owner);
         Assert.Equal(AssetB, collision.Other);
-        Assert.Single(currencies, c => c.Code == "RGB0123456789ABCDEF");
+        Assert.DoesNotContain(currencies,
+            c => c.Code == "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     }
 
     // 36 — RGB_Assets is keyed (WalletId, AssetId), so one contract held in two wallets is one asset
@@ -105,7 +109,23 @@ public class RgbCurrencyDataProviderTests
         Assert.Single(currencies, c => c.Code == RgbPricingCode.For(AssetA));
     }
 
-    // 37 — the raw-ticker entry is retained for historical invoices priced under it.
+    [Fact]
+    public void EquivalentContractIdTextInTwoWallets_IsOneEntryAndNoCollision()
+    {
+        var collisions = new List<string>();
+        var compact = AssetA[4..].Replace("-", "");
+
+        var currencies = RgbCurrencyDataProvider.BuildCurrencies(
+            [Asset(AssetA, walletId: "w1"), Asset(compact, walletId: "w2")],
+            RgbPricingCode.For,
+            (code, _, _) => collisions.Add(code));
+
+        Assert.Empty(collisions);
+        Assert.Single(currencies, c => c.Code == RgbPricingCode.For(AssetA));
+    }
+
+    // Raw ticker metadata remains display-only for already-recorded historical payments. Current
+    // pricing and listener registration never consume it.
     [Fact]
     public void RawTickerRegistration_StillHappens()
     {
@@ -114,6 +134,22 @@ public class RgbCurrencyDataProviderTests
         var entry = Find(currencies, "USDT");
         Assert.NotNull(entry);
         Assert.Equal(2, entry!.Divisibility);
+    }
+
+    [Fact]
+    public void HistoricalTickerCanRenderButCannotAuthorizeANewPayment()
+    {
+        var currencies = Build(Asset(AssetA, ticker: "USDT", precision: 2));
+        Assert.NotNull(Find(currencies, "USDT"));
+
+        var details = new RGBPromptDetails
+        {
+            AssetId = AssetA, AssetTicker = "USDT", PricingCode = null
+        };
+        var outcome = RGBInvoiceListener.ClassifyPromptPricingIdentity(
+            new RGBInvoice { AssetId = AssetA }, details, out _);
+
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed, outcome);
     }
 
     [Fact]

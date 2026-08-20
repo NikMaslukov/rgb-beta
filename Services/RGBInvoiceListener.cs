@@ -576,6 +576,15 @@ public class RGBInvoiceListener : IHostedService
         }
 
         var details = _handler.ParsePaymentPromptDetails(prompt.Details);
+        var identity = ClassifyPromptPricingIdentity(rgbInv, details, out var paymentCurrency);
+        if (identity == PaymentRegistration.Failed)
+        {
+            _log.LogCritical(
+                "RGB payment for invoice {InvoiceId} has no securely contract-bound current pricing code; refusing registration",
+                rgbInv.BtcPayInvoiceId);
+            return identity;
+        }
+
         var receivedAmount = tx.Amount;
         var divisibility = details.AssetPrecision;
         var amountDecimal = divisibility > 0
@@ -613,7 +622,7 @@ public class RGBInvoiceListener : IHostedService
                 Id = paymentId,
                 Created = DateTimeOffset.UtcNow,
                 Status = targetStatus,
-                Currency = ResolvePaymentCurrency(details),
+                Currency = paymentCurrency,
                 InvoiceDataId = rgbInv.BtcPayInvoiceId,
                 Amount = amountDecimal,
                 PaymentMethodId = RGBPlugin.RGBPaymentMethodId.ToString()
@@ -760,12 +769,47 @@ public class RGBInvoiceListener : IHostedService
                 && i.ExpirationTimestamp != null
                 && i.ExpirationTimestamp > nowUnix;
 
-    // IsNullOrEmpty, not ??: AssetTicker is string? but RGBAsset.Ticker is non-nullable "", so a ??
-    // chain yields "" rather than a usable currency for any prompt this plugin wrote.
-    internal static string ResolvePaymentCurrency(RGBPromptDetails details) =>
-        !string.IsNullOrEmpty(details.PricingCode) ? details.PricingCode
-        : !string.IsNullOrEmpty(details.AssetTicker) ? details.AssetTicker
-        : "RGB";
+    internal static string ResolvePaymentCurrency(RGBPromptDetails details)
+    {
+        if (string.IsNullOrWhiteSpace(details.AssetId)
+            || !RgbPricingCode.IsCurrentPricingCode(details.PricingCode))
+            throw new FormatException("RGB prompt does not contain a current contract-bound pricing identity");
+
+        string expected;
+        try
+        {
+            expected = RgbPricingCode.For(details.AssetId);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new FormatException("RGB prompt contains an invalid contract id", ex);
+        }
+
+        if (!string.Equals(details.PricingCode, expected, StringComparison.OrdinalIgnoreCase))
+            throw new FormatException("RGB prompt pricing identity does not match its contract id");
+
+        return expected;
+    }
+
+    internal static PaymentRegistration ClassifyPromptPricingIdentity(
+        RGBInvoice rgbInvoice,
+        RGBPromptDetails details,
+        out string paymentCurrency)
+    {
+        paymentCurrency = "";
+        if (!IsAssetMatch(rgbInvoice.AssetId, details.AssetId ?? ""))
+            return PaymentRegistration.Failed;
+
+        try
+        {
+            paymentCurrency = ResolvePaymentCurrency(details);
+            return PaymentRegistration.Recorded;
+        }
+        catch (FormatException)
+        {
+            return PaymentRegistration.Failed;
+        }
+    }
 
     internal static bool IsAssetMatch(string? invoiceAssetId, string transferAssetId)
     {

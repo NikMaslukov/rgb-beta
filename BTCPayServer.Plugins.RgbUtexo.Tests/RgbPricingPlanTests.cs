@@ -6,7 +6,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
 public class RgbPricingPlanTests
 {
-    const string Code = "RGB0123456789ABCDEF";   // 16 hex — a real pricing code, per IsPricingCode
+    const string Code = "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     [Fact]
     public void Build_ComputesUnitsFromRateAndPrecision()
@@ -37,10 +37,9 @@ public class RgbPricingPlanTests
     [Theory]
     [InlineData("USDT")]
     [InlineData("RGB")]
-    [InlineData("rgb0123456789abcdef")]   // lowercase IS accepted — IsPricingCode is case-insensitive
+    [InlineData("RGB0123456789ABCDEF")]
     public void Build_RejectsAnythingThatIsNotAPricingCode(string code)
     {
-        if (RgbPricingCode.IsPricingCode(code)) return;   // the lowercase case is legitimately valid
         Assert.Throws<ArgumentException>(
             () => RgbPricingPlan.Build(code, precision: 0, invoicePrice: 100m, rate: 1m));
     }

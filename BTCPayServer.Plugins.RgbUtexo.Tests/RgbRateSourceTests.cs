@@ -7,7 +7,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
 public class RgbRateSourceTests
 {
-    const string Code = "RGB0123456789ABCDEF";
+    const string Code = "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     // StoreWithScript and TestRateSource live in the shared Tests/TestRateSource.cs;
     // this alias keeps the cases readable.
@@ -33,6 +33,26 @@ public class RgbRateSourceTests
         var result = await source.FetchAsync(Code, "EUR", StoreWithScript($"{Code}_USD = 1;"), default);
         Assert.False(result.IsOk);
         Assert.Equal(RgbRateFailure.NoRate, result.Failure);
+    }
+
+    [Fact]
+    public async Task WildcardRule_CannotPriceAContractWithoutAnExplicitPair()
+    {
+        var result = await TestRateSource.WithNoExchanges().FetchAsync(
+            Code, "USD", StoreWithScript("X_X = 1;"), default);
+
+        Assert.False(result.IsOk);
+        Assert.Equal(RgbRateFailure.NoRate, result.Failure);
+    }
+
+    [Fact]
+    public async Task ExplicitInverseRule_IsAccepted()
+    {
+        var result = await TestRateSource.WithNoExchanges().FetchAsync(
+            Code, "USD", StoreWithScript($"USD_{Code} = 0.5;"), default);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(2m, result.Rate);
     }
 
     [Theory]
@@ -90,7 +110,7 @@ public class RgbRateSourceTests
 // Two properties with no coverage before the final independent review found them missing.
 public class RgbRateSourceCancellationTests
 {
-    const string Code = "RGB0123456789ABCDEF";
+    const string Code = "RGB2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     // The budget must TEAR DOWN the exchange call, not merely stop waiting for it. The pre-change
     // code passed a 5s CancellationTokenSource into FetchRate; abandoning instead would leave one

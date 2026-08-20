@@ -11,15 +11,18 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
 {
     readonly IRGBWalletService _wallets;
     readonly IRgbRateSource _rates;
+    readonly IRgbPricingCodeCollisionGuard _pricingCodeGuard;
     readonly ILogger<RGBPaymentMethodHandler> _log;
 
     public RGBPaymentMethodHandler(
         IRGBWalletService wallets,
         IRgbRateSource rates,
+        IRgbPricingCodeCollisionGuard pricingCodeGuard,
         ILogger<RGBPaymentMethodHandler> log)
     {
         _wallets = wallets;
         _rates = rates;
+        _pricingCodeGuard = pricingCodeGuard;
         _log = log;
     }
 
@@ -114,6 +117,13 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
                 $"Configured asset {config.DefaultAssetId[..Math.Min(20, config.DefaultAssetId.Length)]}... not found in wallet");
 
         var pricingCode = RgbPricingCode.For(asset.AssetId);
+        if (!await _pricingCodeGuard.IsUnambiguousAsync(asset.AssetId))
+        {
+            _log.LogCritical("RGB pricing code {Code} is ambiguous for contract {AssetId}; refusing invoice pricing",
+                pricingCode, asset.AssetId);
+            throw new PaymentMethodUnavailableException(
+                $"RGB pricing identity collision for {pricingCode}; invoice creation was refused");
+        }
 
         var invoiceCurrency = ctx.InvoiceEntity.Currency;
         var rate = await _rates.FetchAsync(pricingCode, invoiceCurrency, ctx.Store, default);
