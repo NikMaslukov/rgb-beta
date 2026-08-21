@@ -19,6 +19,60 @@ permissions:
   contents: read
 
 jobs:
+  clean-publish-negative-control:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
+    steps:
+      - name: Checkout without staged gate natives
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            10.0.x
+
+      - name: Restore clean checkout (locked mode)
+        run: |
+          set -euo pipefail
+          dotnet restore "$PROJECT_FILE" \
+            --locked-mode \
+            -p:Configuration=Release \
+            -p:ContinuousIntegrationBuild=true \
+            -p:StaticWebAssetsEnabled=false
+
+      - name: Publish clean checkout (expected deficient artifact)
+        run: |
+          set -euo pipefail
+          dotnet publish "$PROJECT_FILE" \
+            -c Release \
+            --no-restore \
+            -p:ContinuousIntegrationBuild=true \
+            -p:StaticWebAssetsEnabled=false \
+            -o clean-publish-out
+
+      # This job passes only when the current pre-package delivery defect is reproduced precisely.
+      # When RgbVerifyCffi is referenced from nuget.org, invert this to a normal strict-provenance
+      # success check and remove the native-staging path from the positive job below.
+      - name: Require exact finding-A negative control
+        run: |
+          set -euo pipefail
+          set +e
+          OUTPUT=$(python3 scripts/verify_plugin_artifact.py clean-publish-out \
+            --provenance pre-package \
+            --package-cache "$HOME/.nuget/packages" 2>&1)
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          test "$STATUS" -eq 1 \
+            || { echo "::error::expected verifier exit 1 for the missing gate native, got $STATUS"; exit 1; }
+          EXPECTED='missing required artifact path: runtimes/linux-x64/native/librgbverifycffi.so'
+          grep -Fqx "artifact verification failed: $EXPECTED" <<<"$OUTPUT" \
+            || { echo "::error::clean publish failed artifact verification for a reason other than the expected finding-A payload defect"; exit 1; }
+
   dotnet-test:
     runs-on: ubuntu-latest
     env:
@@ -74,6 +128,25 @@ jobs:
             -p:ContinuousIntegrationBuild=true \
             -p:StaticWebAssetsEnabled=false \
             --logger "console;verbosity=normal"
+
+      - name: Test artifact verifier fixtures
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+      - name: Publish staged pre-package artifact (Release)
+        run: |
+          set -euo pipefail
+          dotnet publish BTCPayServer.Plugins.RgbUtexo.csproj \
+            -c Release \
+            --no-restore \
+            -p:ContinuousIntegrationBuild=true \
+            -p:StaticWebAssetsEnabled=false \
+            -o ci-publish-out
+
+      - name: Verify complete staged publish artifact
+        run: |
+          python3 scripts/verify_plugin_artifact.py ci-publish-out \
+            --provenance pre-package \
+            --package-cache "$HOME/.nuget/packages"
 
   rust-test:
     runs-on: ubuntu-latest

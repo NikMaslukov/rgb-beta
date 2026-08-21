@@ -191,18 +191,14 @@ verify() {
   plant_dummy_natives "$scratch"
   if dotnet pack "$scratch/packaging/RgbVerifyCffi.csproj" -c Release \
       -p:Version=0.0.0-verify -p:RequireAllRids=true -o "$scratch/out" >"$scratch/pack.log" 2>&1; then
-    entries="$(unzip -Z1 "$scratch/out/RgbVerifyCffi.0.0.0-verify.nupkg" | sort)"
-    expected="lib/net8.0/_._"
-    echo "$entries" | grep -qx "$expected" \
-      || { echo "P3 FAIL: $expected missing from the package"; failures=$((failures + 1)); }
-    declared_rids | while read -r rid lib; do
-      echo "$entries" | grep -qx "runtimes/$rid/native/$lib" \
-        || echo "P3 FAIL: runtimes/$rid/native/$lib missing from the package"
-    done
-    unzip -p "$scratch/out/RgbVerifyCffi.0.0.0-verify.nupkg" RgbVerifyCffi.nuspec \
-      | grep -q "<dependencies" \
-      && { echo "P3 FAIL: the nuspec declares dependencies"; failures=$((failures + 1)); }
-    echo "P3 ok: layout is $(echo "$entries" | tr '\n' ' ')"
+    if python3 "$REPO_ROOT/scripts/verify_plugin_artifact.py" \
+        "$scratch/out/RgbVerifyCffi.0.0.0-verify.nupkg" \
+        --gate-package --provenance strict; then
+      echo "P3 ok: shared contract accepted the complete gate package"
+    else
+      echo "P3 FAIL: shared gate-package contract rejected the nupkg"
+      failures=$((failures + 1))
+    fi
   else
     echo "P3 FAIL: pack failed"; sed -n '1,20p' "$scratch/pack.log"; failures=$((failures + 1))
   fi

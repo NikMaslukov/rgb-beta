@@ -124,21 +124,11 @@ jobs:
             -p:Deterministic=true \
             -o publish-out
 
-      - name: Sanity-check published files
+      - name: Verify complete publish artifact
         run: |
-          set -euo pipefail
-          test -f "publish-out/$MANIFEST_FILE" || { echo "::error::manifest missing in publish output"; exit 1; }
-          test -f "publish-out/BTCPayServer.Plugins.RgbUtexo.dll" || { echo "::error::plugin dll missing"; exit 1; }
-          if [[ -f "publish-out/BTCPayServer.dll" ]]; then
-            echo "::error::publish output contains BTCPayServer.dll — host assemblies must not ship in the plugin"
-            exit 1
-          fi
-          VERIFY=publish-out/runtimes/linux-x64/native/librgbverifycffi.so
-          RGBLIB=publish-out/runtimes/linux-x64/native/librgblibcffi.so
-          test -f "$VERIFY" || { echo "::error::rgbverifycffi native missing from publish output — the C8 gate would fail closed on every RGB send"; exit 1; }
-          test -f "$RGBLIB" || { echo "::error::rgblibcffi (C8-enabled) native missing from publish output"; exit 1; }
-          nm -D --defined-only "$RGBLIB" | grep -q rgblib_create_consignments || { echo "::error::packaged rgblibcffi lacks the C8 exports (wrong RgbLib version?)"; exit 1; }
-          echo "native trust libs present: $(stat -c %s "$VERIFY") + $(stat -c %s "$RGBLIB") bytes"
+          python3 scripts/verify_plugin_artifact.py publish-out \
+            --provenance pre-package \
+            --package-cache "$HOME/.nuget/packages"
 
       - name: Pack .btcpay
         run: |
@@ -146,6 +136,12 @@ jobs:
           (cd publish-out && zip -r "../$ARTIFACT_NAME" .)
           sha256sum "$ARTIFACT_NAME" | tee "$ARTIFACT_NAME.sha256"
           ls -lh "$ARTIFACT_NAME" "$ARTIFACT_NAME.sha256"
+
+      - name: Verify final .btcpay archive
+        run: |
+          python3 scripts/verify_plugin_artifact.py "$ARTIFACT_NAME" \
+            --provenance pre-package \
+            --package-cache "$HOME/.nuget/packages"
 
       - name: Configure git identity
         run: |

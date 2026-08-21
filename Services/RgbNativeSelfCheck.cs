@@ -27,16 +27,16 @@ internal static class RgbNativeSelfCheck
 {
     const string IssuesUrl = "https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/issues";
 
-    // Logs to both sinks and then throws — the hard-fail entry point, wired in a later phase.
+    // Logs to both sinks and then throws for explicit callers that need a fatal check. Plugin startup
+    // deliberately uses VerifyOrLog below so recovery features remain available while sends fail closed.
     internal static void Verify(ILoggerFactory? factory, TextWriter writer,
                                 NativeProbe probe, Func<IntPtr, string, bool> hasExport)
     {
         var (message, fault) = Diagnose(probe, hasExport);
         if (message == null) return;
 
-        // Reports before it throws in every failure state, state 5 included: a later phase wires
-        // this as the hard-fail path, and the audit clause demands the loud error come from our own
-        // code rather than from whatever the host does with the exception.
+        // Reports before it throws in every failure state, state 5 included, so explicit fatal callers
+        // receive our actionable diagnostic rather than only whatever their host logs for the exception.
         Report(factory, writer, message);
 
         throw fault == null

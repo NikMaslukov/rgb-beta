@@ -315,11 +315,11 @@ Check BTCPay logs for errors:
 docker logs btcpay
 ```
 
-If the plugin was auto-disabled after a crash, delete the disable command:
-```bash
-rm ~/.btcpayserver/Plugins/commands
-```
-Then restart BTCPay Server.
+If BTCPay auto-disabled the plugin after a crash, first fix the reported crash or missing dependency.
+Then open **Server Settings → Plugins → Manage Plugins**, choose this plugin, and use BTCPay's
+**Enable** action; restart BTCPay when the UI asks. `Plugins/commands` is only a transient command queue
+that the host consumes, so deleting it does not re-enable a plugin already recorded in
+`Plugins/disabled`.
 
 ### Connection errors
 Verify your Electrum server is reachable. Check `RGB_ELECTRUM_URL` environment variable or `rgb.json` configuration.
@@ -329,9 +329,14 @@ Verify your Electrum server is reachable. Check `RGB_ELECTRUM_URL` environment v
 | Platform | Status |
 |----------|--------|
 | Linux x64 | Supported |
-| macOS ARM64 (Apple Silicon) | Supported |
-| macOS x64 (Intel) | Not supported (native library not included) |
-| Windows | Not supported (native library not included) |
+| Linux ARM64 | Not supported (current `RgbLib` package has no core native) |
+| macOS ARM64 (Apple Silicon) | Not currently supported by a clean plugin build |
+| macOS x64 (Intel) | Not supported (complete native pair not included) |
+| Windows | Not supported (complete native pair not included) |
+
+Support is an explicit end-to-end claim and requires both `rgbverifycffi` and `rgblibcffi` for a RID.
+An extra native supplied by either package does not expand this table by itself. The reviewed matrix is
+`scripts/plugin-artifact-contract.json`.
 
 ## Building from source
 
@@ -347,7 +352,7 @@ This repository uses NuGet lockfiles (`packages.lock.json`) for both the plugin 
 The pre-sign verification library (`native/rgb-verify`, built by `native/rgb-verify/build-native.sh`) can also be packed as a native-only NuGet package. Nothing references that package yet — this is the machinery that produces it.
 
 ```bash
-# stage every shipped RID and pack (host RID natively, cross RIDs in containers)
+# stage every gate-package RID and pack (host RID natively, cross RIDs in containers)
 scripts/pack-rgbverify.sh --require-all-rids --version 0.11.1-rc.10-native.1
 
 # pack only what is already staged (what CI's assemble job does)
@@ -357,7 +362,10 @@ scripts/pack-rgbverify.sh --pack-only --require-all-rids --version 0.11.1-rc.10-
 scripts/pack-rgbverify.sh --verify
 ```
 
-`--stage` and `--pack-only` are independent switches, not modes; passing neither does both. The shipped RID set (`linux-x64`, `linux-arm64`, `osx-arm64`) is declared once, in the packaging project's `GateRid` items, and the pack refuses to produce a package missing the production RID.
+`--stage` and `--pack-only` are independent switches, not modes; passing neither does both. The
+gate-package RID set (`linux-x64`, `linux-arm64`, `osx-arm64`) is declared in the packaging project's
+`GateRid` items, and the canonical pack refuses to omit one. This is package coverage, not a claim that
+the complete plugin supports all three RIDs; the plugin matrix currently claims only `linux-x64`.
 
 The package lands in `local-nuget-feed/`, which is **not** a source in the committed `nuget.config` — a folder source that cannot exist in a fresh clone fails restore with `NU1301` for every consumer, and a local source ahead of nuget.org could shadow the published trust core. Supply it on the command line instead:
 
@@ -375,6 +383,32 @@ The feed path must be **absolute**. Measured on this project graph: both `--sour
 **glibc floor.** The canonical Linux natives are built in `rust:1-bookworm` (Debian 12), because a native linked against a newer glibc than the deployment target fails to `dlopen` there. `scripts/verify-native-loads-debian.sh` loads the packed `linux-x64` native inside a Debian 12 container and resolves all four exports, so a floor mistake surfaces at pack time rather than at a merchant's startup.
 
 For releases, `.github/workflows/pack-native.yml` (manual dispatch) builds each RID on a runner of that architecture, checks the exports with a tool that can read that object format, and uploads the assembled `.nupkg` as an artifact. It deliberately does not tag or publish a release.
+
+### Verifying a plugin artifact
+
+One verifier checks both a Release publish directory and the final `.btcpay` ZIP against the same
+declarative contract:
+
+```bash
+python3 scripts/verify_plugin_artifact.py publish-out \
+  --provenance pre-package \
+  --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
+
+python3 scripts/verify_plugin_artifact.py BTCPayServer.Plugins.RgbUtexo.btcpay \
+  --provenance pre-package \
+  --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
+```
+
+`pre-package` is intentionally temporary and reports that a hand-staged gate native was accepted. Once
+the published `RgbVerifyCffi` dependency is connected, use `--provenance strict`; strict mode requires
+the gate to be declared by that package and byte-identical to its global-packages-cache copy. A locally
+built three-RID gate package can be checked without network access:
+
+```bash
+python3 scripts/verify_plugin_artifact.py \
+  local-nuget-feed/RgbVerifyCffi.<VERSION>.nupkg \
+  --gate-package --provenance strict
+```
 
 ## License
 

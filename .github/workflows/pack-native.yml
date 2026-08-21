@@ -163,24 +163,14 @@ jobs:
           set -euo pipefail
           bash scripts/pack-rgbverify.sh --pack-only --require-all-rids --version '${{ inputs.version }}'
 
-      - name: Assert the nupkg layout
+      - name: Verify the complete gate-native package contract
         run: |
           set -euo pipefail
           NUPKG="local-nuget-feed/RgbVerifyCffi.${{ inputs.version }}.nupkg"
           test -f "$NUPKG" || { echo "::error::$NUPKG not produced"; exit 1; }
-          ENTRIES="$(unzip -Z1 "$NUPKG" | sort)"
-          echo "$ENTRIES"
-          for expected in \
-            'lib/net8.0/_._' \
-            'runtimes/linux-x64/native/librgbverifycffi.so' \
-            'runtimes/linux-arm64/native/librgbverifycffi.so' \
-            'runtimes/osx-arm64/native/librgbverifycffi.dylib'; do
-            echo "$ENTRIES" | grep -qx "$expected" \
-              || { echo "::error::$NUPKG is missing $expected"; exit 1; }
-          done
-          if unzip -p "$NUPKG" RgbVerifyCffi.nuspec | grep -q '<dependencies'; then
-            echo "::error::$NUPKG declares dependencies; the trust core must have none"; exit 1
-          fi
+          python3 scripts/verify_plugin_artifact.py "$NUPKG" \
+            --gate-package \
+            --provenance strict
 
       - name: Assert the production native loads on Debian
         run: bash scripts/verify-native-loads-debian.sh
