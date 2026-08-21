@@ -26,7 +26,7 @@ public class RgbNativeSelfCheckTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void SelfCheck_LoadsAndResolvesAllFourExports_DoesNotThrow(bool withEarlierLoadFailure)
+    public void SelfCheck_LoadsAndResolvesAllFiveExports_DoesNotThrow(bool withEarlierLoadFailure)
     {
         // State 4: an earlier candidate that existed but would not load is informational only. An
         // operator on a working install must not be shown unloadable-native text.
@@ -86,6 +86,7 @@ public class RgbNativeSelfCheckTests
     [InlineData("rgbverify_decode_invoice", false)]
     [InlineData("rgbverify_validate", false)]
     [InlineData("rgbverify_commitment_check", false)]
+    [InlineData("rgbverify_validate_v2", false)]
     [InlineData("rgbverify_string_free", false)]
     [InlineData("rgbverify_string_free", true)]
     public void SelfCheck_MissingExport_ThrowsNamingTheSymbol(string missing, bool withEarlierLoadFailure)

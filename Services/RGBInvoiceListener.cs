@@ -307,9 +307,23 @@ public class RGBInvoiceListener : IHostedService
 
                 try
                 {
-                    await _wallets.CreateColorableUtxosAsync(
-                        walletId: w.Id, count: decision.RequestCount, size: decision.UtxoSize, ct: ct);
+                    await _wallets.CreateColorableUtxosAutomaticallyAsync(
+                        walletId: w.Id,
+                        count: decision.RequestCount,
+                        size: decision.UtxoSize,
+                        authorize: authorizationCt => RecheckAutomaticReplenishmentAuthorizationAsync(
+                            w.Id, w.StoreId, config, decision.RequestCount, decision.UtxoSize,
+                            authorizationCt),
+                        ct: ct);
                     _cooldowns.RecordAttemptSucceeded(w.Id, DateTimeOffset.UtcNow);
+                }
+                catch (RgbAutomaticReplenishmentNotAuthorizedException ex)
+                {
+                    // State changed while this wallet waited for its send lock. This is an authorization
+                    // refusal, not a failed signing attempt, so do not stamp success or failure cooldown.
+                    _log.LogDebug(ex,
+                        "Wallet {WalletId}: automatic UTXO replenishment authorization changed before signing",
+                        w.Id);
                 }
                 catch (RgbWalletQuarantinedException ex)
                 {
@@ -336,6 +350,92 @@ public class RGBInvoiceListener : IHostedService
             }
         }
     }
+
+    async Task<bool> RecheckAutomaticReplenishmentAuthorizationAsync(
+        string walletId,
+        string expectedStoreId,
+        RGBPaymentMethodConfig expectedConfig,
+        int expectedRequestCount,
+        int expectedUtxoSize,
+        CancellationToken ct)
+    {
+        await using var ctx = _db.CreateContext();
+        // This callback runs after the per-wallet send lock and cross-process native lease are held.
+        // Re-read both halves of demand here: a preceding send can change the colored UTXO set while
+        // this attempt waits, and invoice rows can expire or settle during the same wait. Any changed
+        // request is refused and left for the next sweep instead of signing a stale request.
+        var utxos = await _wallets.ListUnspentsAsync(walletId, ct);
+        var colorable = utxos.Where(u => u.Utxo.Colorable).ToList();
+        var freshNowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var activePendingInvoices = await ctx.RGBInvoices.CountAsync(
+            ActivePendingInvoicePredicate(walletId, freshNowUnix), ct);
+
+        // Keep the authoritative authorization read after the slower native and invoice work. There are
+        // no awaits after the store lookup: a disable or settings edit that lands while those reads wait
+        // cannot authorize the native begin with a stale enabled/config snapshot.
+        var current = await ctx.RGBWallets.AsNoTracking()
+            .FirstOrDefaultAsync(w => w.Id == walletId, ct);
+        if (current == null) return false;
+        var store = await _stores.FindStore(expectedStoreId);
+        if (store == null) return false;
+        var configs = store.GetPaymentMethodConfigs(onlyEnabled: true);
+        var enabled = configs.TryGetValue(RGBPlugin.RGBPaymentMethodId, out var token);
+        RGBPaymentMethodConfig? currentConfig = null;
+        if (enabled && token is not null)
+        {
+            try { currentConfig = token.ToObject<RGBPaymentMethodConfig>(_blobSerializer); }
+            catch { return false; }
+        }
+        if (!IsAutomaticReplenishmentAuthorized(
+                current, expectedStoreId, enabled, currentConfig, expectedConfig)
+            || currentConfig == null)
+            return false;
+
+        var currentDecision = EvaluateReplenishDemand(
+            colorableCount: colorable.Count,
+            usedByColorings: colorable.Sum(u => u.RgbAllocations.Count),
+            activePendingInvoices: activePendingInvoices,
+            maxAllocationsPerUtxo: current.MaxAllocationsPerUtxo,
+            minFreeSlots: currentConfig.UtxoCount,
+            utxoSize: currentConfig.UtxoSize,
+            maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos);
+
+        return IsCurrentReplenishmentRequestAuthorized(
+            currentDecision: currentDecision,
+            expectedRequestCount: expectedRequestCount,
+            expectedUtxoSize: expectedUtxoSize);
+    }
+
+    internal static bool IsAutomaticReplenishmentAuthorized(
+        RGBWallet? current,
+        string expectedStoreId,
+        bool paymentMethodEnabled,
+        RGBPaymentMethodConfig? currentConfig,
+        RGBPaymentMethodConfig expectedConfig)
+    {
+        if (current == null
+            || !current.IsActive
+            || current.NeedsRecovery
+            || current.MaxAllocationsPerUtxo <= 0
+            || !RGBPaymentMethodHandler.WalletBelongsToStore(current.StoreId, expectedStoreId)
+            || !paymentMethodEnabled
+            || currentConfig == null
+            || !RgbConfigBounds.ArePaymentMethodValuesValid(
+                currentConfig.UtxoCount, currentConfig.UtxoSize, currentConfig.MinConfirmations))
+            return false;
+
+        // A settings edit that keeps RGB enabled can still invalidate the already-computed request.
+        // Refuse this cycle and let the next sweep recompute count and size from the new configuration.
+        return currentConfig.UtxoCount == expectedConfig.UtxoCount
+            && currentConfig.UtxoSize == expectedConfig.UtxoSize
+            && currentConfig.MinConfirmations == expectedConfig.MinConfirmations;
+    }
+
+    internal static bool IsCurrentReplenishmentRequestAuthorized(
+        ReplenishDecision currentDecision, int expectedRequestCount, int expectedUtxoSize)
+        => currentDecision.Outcome == ReplenishOutcome.Create
+           && currentDecision.RequestCount == expectedRequestCount
+           && currentDecision.UtxoSize == expectedUtxoSize;
 
     async Task<bool> ProcessTransfers(string walletId, string expectedStoreId, CancellationToken ct)
     {

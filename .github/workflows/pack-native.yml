@@ -18,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  EXPORTS: rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_string_free
+  EXPORTS: rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free
 
 jobs:
   linux-x64:

@@ -133,6 +133,10 @@ public static class RgbVerifyNative
         ulong entropy);
 
     [DllImport("rgbverifycffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern CResultString rgbverify_validate_v2(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string requestJson);
+
+    [DllImport("rgbverifycffi", CallingConvention = CallingConvention.Cdecl)]
     static extern void rgbverify_string_free(IntPtr ptr);
 
     public static RgbDecodeInvoiceResult DecodeInvoice(string invoice)
@@ -143,6 +147,13 @@ public static class RgbVerifyNative
 
     public static RgbCommitmentCheckResult CommitmentCheck(string fasciaPath, string unsignedTxid, string opretCommitmentBytes, ulong entropy)
         => Deserialize<RgbCommitmentCheckResult>(Read(rgbverify_commitment_check(fasciaPath, unsignedTxid, opretCommitmentBytes, entropy)), "commitment_check");
+
+    public static RgbValidateV2Result ValidateV2(RgbValidateV2Request request)
+    {
+        RgbNativeSelfCheck.RequireAvailable();
+        var requestJson = JsonSerializer.Serialize(request);
+        return Deserialize<RgbValidateV2Result>(Read(rgbverify_validate_v2(requestJson)), "validate_v2");
+    }
 
     static string Read(CResultString result)
     {

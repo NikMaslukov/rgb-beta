@@ -380,7 +380,7 @@ The feed path must be **absolute**. Measured on this project graph: both `--sour
 
 `--force-evaluate` is needed because Rust builds are not byte-reproducible: re-packing at a version already restored elsewhere otherwise fails with `NU1403`.
 
-**glibc floor.** The canonical Linux natives are built in `rust:1-bookworm` (Debian 12), because a native linked against a newer glibc than the deployment target fails to `dlopen` there. `scripts/verify-native-loads-debian.sh` loads the packed `linux-x64` native inside a Debian 12 container and resolves all four exports, so a floor mistake surfaces at pack time rather than at a merchant's startup.
+**glibc floor.** The canonical Linux natives are built in `rust:1-bookworm` (Debian 12), because a native linked against a newer glibc than the deployment target fails to `dlopen` there. `scripts/verify-native-loads-debian.sh` loads the packed `linux-x64` native inside a Debian 12 container and resolves all five exports, so a floor mistake surfaces at pack time rather than at a merchant's startup.
 
 For releases, `.github/workflows/pack-native.yml` (manual dispatch) builds each RID on a runner of that architecture, checks the exports with a tool that can read that object format, and uploads the assembled `.nupkg` as an artifact. It deliberately does not tag or publish a release.
 

@@ -18,6 +18,7 @@ public class RgbListenerSourcePinTests
 {
     const string ListenerFile = "Services/RGBInvoiceListener.cs";
     const string RgbLibFile = "Services/RgbLibService.cs";
+    const string WalletServiceFile = "Services/RGBWalletService.cs";
     const string ListenerType = "RGBInvoiceListener";
     // Fully qualified for symbol comparison: a same-simple-named type in another namespace, inherited
     // by the listener, supplies members that pass a simple-name compare — measured.
@@ -173,34 +174,39 @@ public class RgbListenerSourcePinTests
     {
         var plugin = PluginCompilation.Shared;
         var all = RepoWideInvocationsNamed(plugin, "GetPaymentMethodConfigs");
-        Assert.True(all.Count == 5,
-            $"the plugin has {all.Count} GetPaymentMethodConfigs invocations; the mandated total is 5 — "
+        Assert.True(all.Count == 6,
+            $"the plugin has {all.Count} GetPaymentMethodConfigs invocations; the mandated total is 6 — "
             + "a new call site must be reviewed against finding C before this count is updated");
 
         var argumentBearing = all.Where(i => i.ArgumentList.Arguments.Count > 0).ToList();
-        Assert.True(argumentBearing.Count == 1,
-            $"exactly one GetPaymentMethodConfigs call may pass an argument, found {argumentBearing.Count}");
+        Assert.True(argumentBearing.Count == 2,
+            $"exactly the initial and final automatic authorization checks may pass an argument, found {argumentBearing.Count}");
 
-        var call = argumentBearing[0];
-        Assert.Equal(Replenish, ContainingMethod(call));
-        var argument = call.ArgumentList.Arguments[0];
-        var literal = Assert.IsType<LiteralExpressionSyntax>(argument.Expression);
-        Assert.True(literal.IsKind(SyntaxKind.TrueLiteralExpression),
-            "the replenishment sweep must call GetPaymentMethodConfigs(onlyEnabled: true) — "
-            + "the default overload returns methods the merchant has excluded");
+        Assert.Equal(
+            new[] { Replenish, "RecheckAutomaticReplenishmentAuthorizationAsync" }.OrderBy(x => x),
+            argumentBearing.Select(ContainingMethod).OrderBy(x => x));
+        foreach (var call in argumentBearing)
+        {
+            var argument = call.ArgumentList.Arguments[0];
+            var literal = Assert.IsType<LiteralExpressionSyntax>(argument.Expression);
+            Assert.True(literal.IsKind(SyntaxKind.TrueLiteralExpression),
+                "both automatic authorization checks must call GetPaymentMethodConfigs(onlyEnabled: true) — "
+                + "the default overload returns methods the merchant has excluded");
+        }
     }
 
     // ---- P-C2: clause 2, the active-invoice predicate --------------------------------------------
 
     [Fact]
-    public void PC2_BothPendingCounts_GoThroughTheSharedActivePredicate()
+    public void PC2_AllPendingCounts_GoThroughTheSharedActivePredicate()
     {
         var plugin = PluginCompilation.Shared;
         var invocations = RepoWideInvocationsNamed(plugin, "ActivePendingInvoicePredicate");
-        Assert.True(invocations.Count == 2,
-            $"expected exactly two ActivePendingInvoicePredicate invocations, found {invocations.Count}");
+        Assert.True(invocations.Count == 3,
+            $"expected exactly three ActivePendingInvoicePredicate invocations, found {invocations.Count}");
         Assert.Equal(
-            new[] { "Utxos", Replenish }.OrderBy(x => x, StringComparer.Ordinal),
+            new[] { "Utxos", Replenish, "RecheckAutomaticReplenishmentAuthorizationAsync" }
+                .OrderBy(x => x, StringComparer.Ordinal),
             invocations.Select(ContainingMethod).OrderBy(x => x, StringComparer.Ordinal));
 
         // The absence claim is scoped to the provably-unique declaration: RGBInvoiceListener is not
@@ -239,7 +245,7 @@ public class RgbListenerSourcePinTests
         var replenish = ReplenishMethod(plugin);
 
         Single(replenish, "EvaluateReplenishDemand");
-        var create = Single(replenish, "CreateColorableUtxosAsync");
+        var create = Single(replenish, "CreateColorableUtxosAutomaticallyAsync");
 
         // Named, because positionally (id, decision.UtxoSize, decision.RequestCount, ct) compiles and
         // asks for 1000 UTXOs — the signature is (walletId, count = 4, size = 1000, ct).
@@ -275,22 +281,148 @@ public class RgbListenerSourcePinTests
         AssertProducedBy(replenish, "decision", "EvaluateReplenishDemand");
     }
 
+    [Fact]
+    public void PC4b_AutomaticCreationCarriesAFreshStoreAuthorizationCallback()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+        var replenish = ReplenishMethod(plugin);
+        var create = Single(replenish, "CreateColorableUtxosAutomaticallyAsync");
+
+        var lambda = Assert.IsType<SimpleLambdaExpressionSyntax>(NamedArgument(create, "authorize").Expression);
+        var recheck = Single(lambda, "RecheckAutomaticReplenishmentAuthorizationAsync");
+        var recheckSymbol = RoslynPins.BoundSymbol(plugin, tree, recheck.Expression);
+        Assert.True(recheckSymbol.Name == "RecheckAutomaticReplenishmentAuthorizationAsync"
+                    && recheckSymbol.ContainingType?.Name == ListenerType,
+            $"the automatic callback must bind to {ListenerType}.RecheckAutomaticReplenishmentAuthorizationAsync");
+
+        Assert.Equal(6, recheck.ArgumentList.Arguments.Count);
+        foreach (var (position, member) in new[] { (0, "Id"), (1, "StoreId") })
+        {
+            var access = Assert.IsType<MemberAccessExpressionSyntax>(recheck.ArgumentList.Arguments[position].Expression);
+            Assert.Equal(member, access.Name.Identifier.ValueText);
+            Assert.Equal("w", Assert.IsType<IdentifierNameSyntax>(access.Expression).Identifier.ValueText);
+        }
+
+        Assert.Equal("config",
+            Assert.IsType<IdentifierNameSyntax>(recheck.ArgumentList.Arguments[2].Expression).Identifier.ValueText);
+        foreach (var (position, member) in new[] { (3, "RequestCount"), (4, "UtxoSize") })
+        {
+            var access = Assert.IsType<MemberAccessExpressionSyntax>(recheck.ArgumentList.Arguments[position].Expression);
+            Assert.Equal(member, access.Name.Identifier.ValueText);
+            Assert.Equal("decision", Assert.IsType<IdentifierNameSyntax>(access.Expression).Identifier.ValueText);
+        }
+        var callbackCt = Assert.IsType<IdentifierNameSyntax>(recheck.ArgumentList.Arguments[5].Expression);
+        Assert.Equal(lambda.Parameter.Identifier.ValueText, callbackCt.Identifier.ValueText);
+    }
+
+    [Fact]
+    public void PC4e_FinalAuthorizationRecomputesFreshDemandAndRequiresAnExactRequest()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+        var recheck = RoslynPins.Method(
+            tree, ListenerType, "RecheckAutomaticReplenishmentAuthorizationAsync");
+
+        var list = Single(recheck, "ListUnspentsAsync");
+        var count = Single(recheck, "CountAsync");
+        var predicate = Single(recheck, "ActivePendingInvoicePredicate");
+        var demand = Single(recheck, "EvaluateReplenishDemand");
+        var exact = Single(recheck, "IsCurrentReplenishmentRequestAuthorized");
+        var finalStore = Single(recheck, "FindStore");
+        Assert.True(list.SpanStart < demand.SpanStart && count.SpanStart < demand.SpanStart,
+            "the final demand decision must use UTXOs and invoices re-read inside the authorization callback");
+        Assert.True(list.SpanStart < finalStore.SpanStart && count.SpanStart < finalStore.SpanStart,
+            "slow UTXO and invoice reads must finish before the final enabled/config store read");
+        Assert.True(demand.SpanStart < exact.SpanStart,
+            "the freshly recomputed demand must feed the exact-request authorization");
+        Assert.DoesNotContain(RoslynPins.BodyOf(recheck).DescendantNodes().OfType<AwaitExpressionSyntax>(),
+            await_ => await_.SpanStart > finalStore.Span.End);
+
+        var countArgument = count.ArgumentList.Arguments[0].Expression;
+        Assert.Same(predicate, countArgument);
+        Assert.Equal("walletId",
+            Assert.IsType<IdentifierNameSyntax>(predicate.ArgumentList.Arguments[0].Expression).Identifier.ValueText);
+        Assert.Equal("freshNowUnix",
+            Assert.IsType<IdentifierNameSyntax>(predicate.ArgumentList.Arguments[1].Expression).Identifier.ValueText);
+
+        var freshClock = InitializerOf(recheck, "freshNowUnix");
+        var toUnix = Assert.IsType<InvocationExpressionSyntax>(freshClock);
+        Assert.Equal("ToUnixTimeSeconds", NameOf(toUnix));
+        var utcNow = Assert.IsType<MemberAccessExpressionSyntax>(
+            Assert.IsType<MemberAccessExpressionSyntax>(toUnix.Expression).Expression);
+        Assert.True(RoslynPins.NamesBclMember(utcNow, "DateTimeOffset", "UtcNow"),
+            $"the final invoice predicate must use a fresh DateTimeOffset.UtcNow, found '{freshClock}'");
+
+        foreach (var parameter in new[] { "expectedRequestCount", "expectedUtxoSize" })
+        {
+            var identifier = Assert.IsType<IdentifierNameSyntax>(NamedArgument(exact, parameter).Expression);
+            Assert.Equal(parameter, identifier.Identifier.ValueText);
+            Assert.IsAssignableFrom<IParameterSymbol>(RoslynPins.BoundSymbol(plugin, tree, identifier));
+        }
+    }
+
+    [Fact]
+    public void PC4c_FinalAuthorizationRunsAfterSerializationAndImmediatelyBeforeNativeBegin()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(WalletServiceFile);
+        var internalCreate = RoslynPins.Method(
+            tree, "RGBWalletService", "CreateColorableUtxosInternalAsync");
+        var authorize = Single(internalCreate, "authorize");
+        var nativeBegin = Single(internalCreate, "CreateUtxosBeginAsync");
+        var guard = authorize.Ancestors().OfType<IfStatementSyntax>().Single();
+
+        Assert.True(authorize.SpanStart < nativeBegin.SpanStart,
+            "the current store/payment-method authorization must run before native UTXO creation");
+        Assert.Empty(guard.Statement.DescendantNodes().OfType<InvocationExpressionSyntax>());
+        var refusal = guard.Statement.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Single();
+        var creation = Assert.IsType<ObjectCreationExpressionSyntax>(refusal.Expression);
+        Assert.Equal("RgbAutomaticReplenishmentNotAuthorizedException", creation.Type.ToString());
+
+        var statements = RoslynPins.BodyOf(internalCreate).DescendantNodes()
+            .OfType<BlockSyntax>()
+            .Single(b => b.Statements.Contains(guard));
+        var guardIndex = statements.Statements.IndexOf(guard);
+        var nativeStatement = nativeBegin.Ancestors().OfType<StatementSyntax>()
+            .First(s => s.Parent == statements);
+        Assert.Equal(guardIndex + 1, statements.Statements.IndexOf(nativeStatement));
+    }
+
+    [Fact]
+    public void PC4d_ManualAdminPathBypassesOnlyTheAutomaticAuthorizationCallback()
+    {
+        var tree = PluginCompilation.Shared.Tree(WalletServiceFile);
+        var root = tree.GetRoot();
+        var methods = root.DescendantNodes().OfType<MethodDeclarationSyntax>().ToList();
+        var manual = methods.Single(m => m.Identifier.ValueText == "CreateColorableUtxosAsync");
+        var automatic = methods.Single(m => m.Identifier.ValueText == "CreateColorableUtxosAutomaticallyAsync");
+
+        var manualCommon = Single(manual, "CreateColorableUtxosWithAuthorizationAsync");
+        Assert.True(manualCommon.ArgumentList.Arguments[3].Expression.IsKind(SyntaxKind.NullLiteralExpression),
+            "the explicit admin method must remain usable without the listener-only authorization callback");
+        var automaticCommon = Single(automatic, "CreateColorableUtxosWithAuthorizationAsync");
+        Assert.Equal("authorize",
+            Assert.IsType<IdentifierNameSyntax>(automaticCommon.ArgumentList.Arguments[3].Expression).Identifier.ValueText);
+    }
+
     // ---- P-C5: no second automatic path, and the tracker is actually wired ------------------------
 
     [Fact]
     public void PC5_OnlyTheListenerAndTheAdminButtonCreateUtxos()
     {
         var plugin = PluginCompilation.Shared;
-        var creations = RepoWideInvocationsNamed(plugin, "CreateColorableUtxosAsync");
-        Assert.True(creations.Count == 2,
-            $"the plugin has {creations.Count} CreateColorableUtxosAsync invocations; exactly two are "
-            + "mandated — the listener's automatic path and the admin Create-UTXOs button");
+        var automatic = RepoWideInvocationsNamed(plugin, "CreateColorableUtxosAutomaticallyAsync");
+        Assert.Single(automatic);
+        Assert.Equal("RGBWalletService",
+            RoslynPins.BoundSymbol(plugin, automatic[0].SyntaxTree, automatic[0].Expression)
+                .ContainingType?.Name);
 
-        var owners = creations
-            .Select(c => RoslynPins.BoundSymbol(plugin, c.SyntaxTree, c.Expression).ContainingType?.Name)
-            .OrderBy(x => x, StringComparer.Ordinal)
-            .ToList();
-        Assert.Equal(new[] { "IRGBWalletService", "RGBWalletService" }, owners);
+        var manual = RepoWideInvocationsNamed(plugin, "CreateColorableUtxosAsync");
+        Assert.Single(manual);
+        Assert.Equal("IRGBWalletService",
+            RoslynPins.BoundSymbol(plugin, manual[0].SyntaxTree, manual[0].Expression)
+                .ContainingType?.Name);
 
         foreach (var member in new[]
                  {
@@ -374,7 +506,7 @@ public class RgbListenerSourcePinTests
         RoslynPins.AssertNoLocalShadow(replenish,
             "EvaluateReplenishEligibility", "EvaluateReplenishDemand", "ActivePendingInvoicePredicate",
             "ListUnspentsAsync", "FirstOrDefaultAsync", "CountAsync", "TryGetValue", "FindStore",
-            "GetPaymentMethodConfigs", "CreateColorableUtxosAsync",
+            "GetPaymentMethodConfigs", "CreateColorableUtxosAutomaticallyAsync",
             "NextEligibleAt", "RecordAttemptSucceeded", "RecordAttemptFailed", "RecordNoActionNeeded", "Prune");
 
         // Provenance: each pinned local is produced by the call that must produce it.
@@ -684,7 +816,7 @@ public class RgbListenerSourcePinTests
         var plugin = PluginCompilation.Shared;
         var replenish = ReplenishMethod(plugin);
 
-        var creation = Single(replenish, "CreateColorableUtxosAsync");
+        var creation = Single(replenish, "CreateColorableUtxosAutomaticallyAsync");
         var creationTry = creation.Ancestors().OfType<TryStatementSyntax>().First();
 
         var succeeded = Single(replenish, "RecordAttemptSucceeded");
@@ -746,7 +878,7 @@ public class RgbListenerSourcePinTests
         // …and it must stand BEFORE the creation. Shape alone is not enough: hoisting the creation's
         // try/catch above this gate keeps every pin green while routing SkipCapReached and
         // SkipEnoughFreeSlots straight into CreateColorableUtxosAsync.
-        Assert.True(gates[0].SpanStart < Single(replenish, "CreateColorableUtxosAsync").SpanStart,
+        Assert.True(gates[0].SpanStart < Single(replenish, "CreateColorableUtxosAutomaticallyAsync").SpanStart,
             "the refused-demand gate must precede CreateColorableUtxosAsync");
     }
 

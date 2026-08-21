@@ -54,6 +54,50 @@ public class RgbStockDurabilityTests
     }
 
     [Fact]
+    public void VerificationSnapshot_CopiesStockAndBdkByteForByte()
+    {
+        var stock = MakeStock(out var index, out var stash, out var state);
+        var wallet = Path.Combine(Path.GetTempPath(), $"rgb-wallet-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(wallet);
+        var bdk = RandomNumberGenerator.GetBytes(1024);
+        File.WriteAllBytes(Path.Combine(wallet, "bdk_db"), bdk);
+        RgbVerificationSnapshot? snapshot = null;
+        try
+        {
+            snapshot = RgbStockDurability.SnapshotVerificationState(stock, wallet);
+            Assert.Equal(index, File.ReadAllBytes(Path.Combine(snapshot.StockDir, "index.dat")));
+            Assert.Equal(stash, File.ReadAllBytes(Path.Combine(snapshot.StockDir, "stash.dat")));
+            Assert.Equal(state, File.ReadAllBytes(Path.Combine(snapshot.StockDir, "state.dat")));
+            Assert.Equal(bdk, File.ReadAllBytes(snapshot.BdkStorePath));
+        }
+        finally
+        {
+            if (snapshot != null) RgbStockDurability.DeleteSnapshot(snapshot.RootDir);
+            Directory.Delete(stock, true);
+            Directory.Delete(wallet, true);
+        }
+    }
+
+    [Fact]
+    public void VerificationSnapshot_MissingRequiredFileFailsClosedAndCleansUp()
+    {
+        var stock = MakeStock(out _, out _, out _);
+        var wallet = Path.Combine(Path.GetTempPath(), $"rgb-wallet-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(wallet);
+        File.Delete(Path.Combine(stock, "state.dat"));
+        try
+        {
+            Assert.Throws<FileNotFoundException>(() =>
+                RgbStockDurability.SnapshotVerificationState(stock, wallet));
+        }
+        finally
+        {
+            Directory.Delete(stock, true);
+            Directory.Delete(wallet, true);
+        }
+    }
+
+    [Fact]
     public void FsyncStockDats_OnExistingFiles_DoesNotThrowOrCorrupt()
     {
         var stock = MakeStock(out var index, out var stash, out var state);

@@ -1,3 +1,5 @@
+using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
+using BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
@@ -179,4 +181,76 @@ public class ReplenishDecisionTests
         => Assert.Equal(ReplenishOutcome.SkipEnoughFreeSlots,
             Demand(colorableCount: 4, usedByColorings: 0, activePendingInvoices: 0,
                 maxAllocationsPerUtxo: 10, minFreeSlots: 4).Outcome);
+
+    static bool FinalAuthorization(
+        bool enabled = true,
+        bool active = true,
+        bool quarantined = false,
+        string storeId = "s1",
+        RGBPaymentMethodConfig? current = null,
+        RGBPaymentMethodConfig? expected = null)
+    {
+        current ??= new RGBPaymentMethodConfig { UtxoCount = 4, UtxoSize = 1000, MinConfirmations = 1 };
+        expected ??= new RGBPaymentMethodConfig { UtxoCount = 4, UtxoSize = 1000, MinConfirmations = 1 };
+        return RGBInvoiceListener.IsAutomaticReplenishmentAuthorized(
+            new RGBWallet
+            {
+                Id = "w1", StoreId = storeId, IsActive = active,
+                NeedsRecovery = quarantined, MaxAllocationsPerUtxo = 10
+            },
+            "s1", enabled, current, expected);
+    }
+
+    [Fact]
+    public void FinalAuthorization_HealthyUnchangedState_Passes()
+        => Assert.True(FinalAuthorization());
+
+    [Fact]
+    public void FinalAuthorization_DisabledAfterDemandDecision_Rejects()
+        => Assert.False(FinalAuthorization(enabled: false));
+
+    [Theory]
+    [InlineData(true, false, "other")]
+    [InlineData(false, false, "s1")]
+    [InlineData(true, true, "s1")]
+    public void FinalAuthorization_WrongStoreInactiveOrQuarantined_Rejects(
+        bool active, bool quarantined, string storeId)
+        => Assert.False(FinalAuthorization(active: active, quarantined: quarantined, storeId: storeId));
+
+    [Fact]
+    public void FinalAuthorization_ConfigChangedAfterDemandDecision_Rejects()
+        => Assert.False(FinalAuthorization(current: new RGBPaymentMethodConfig
+        {
+            UtxoCount = 4, UtxoSize = 2000, MinConfirmations = 1
+        }));
+
+    [Fact]
+    public void FinalRequest_FreshDemandStillExactlyMatches_Passes()
+    {
+        var decision = Demand(activePendingInvoices: 37);
+        Assert.True(RGBInvoiceListener.IsCurrentReplenishmentRequestAuthorized(
+            decision, decision.RequestCount, decision.UtxoSize));
+    }
+
+    [Fact]
+    public void FinalRequest_InvoiceDemandDisappearedWhileWaiting_Rejects()
+    {
+        var original = Demand(activePendingInvoices: 37);
+        var fresh = Demand(activePendingInvoices: 0);
+        Assert.Equal(ReplenishOutcome.Create, original.Outcome);
+        Assert.Equal(ReplenishOutcome.SkipEnoughFreeSlots, fresh.Outcome);
+        Assert.False(RGBInvoiceListener.IsCurrentReplenishmentRequestAuthorized(
+            fresh, original.RequestCount, original.UtxoSize));
+    }
+
+    [Fact]
+    public void FinalRequest_UtxoStateChangedWhileWaiting_RejectsStaleCount()
+    {
+        var original = Demand(colorableCount: 4, activePendingInvoices: 37);
+        var fresh = Demand(colorableCount: 5, activePendingInvoices: 47);
+        Assert.Equal(ReplenishOutcome.Create, fresh.Outcome);
+        Assert.NotEqual(original.RequestCount, fresh.RequestCount);
+        Assert.False(RGBInvoiceListener.IsCurrentReplenishmentRequestAuthorized(
+            fresh, original.RequestCount, original.UtxoSize));
+    }
 }

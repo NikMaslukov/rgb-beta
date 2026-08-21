@@ -46,6 +46,39 @@ public static class RgbStockDurability
         return tempDir;
     }
 
+    public static RgbVerificationSnapshot SnapshotVerificationState(string stockDir, string walletDir)
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rgb-verify-snap-{Guid.NewGuid():N}");
+        var stockSnapshot = Path.Combine(root, "rgb");
+        Directory.CreateDirectory(stockSnapshot);
+        Hardened(root);
+        Hardened(stockSnapshot);
+        try
+        {
+            foreach (var name in StockFiles)
+            {
+                var source = Path.Combine(stockDir, name);
+                if (!File.Exists(source))
+                    throw new FileNotFoundException(
+                        $"RGB verification snapshot source is missing: {source}", source);
+                File.Copy(source, Path.Combine(stockSnapshot, name));
+            }
+
+            var bdkSource = Path.Combine(walletDir, "bdk_db");
+            if (!File.Exists(bdkSource))
+                throw new FileNotFoundException(
+                    $"RGB verification BDK snapshot source is missing: {bdkSource}", bdkSource);
+            var bdkSnapshot = Path.Combine(root, "bdk_db");
+            File.Copy(bdkSource, bdkSnapshot);
+            return new RgbVerificationSnapshot(root, stockSnapshot, bdkSnapshot);
+        }
+        catch
+        {
+            DeleteSnapshot(root);
+            throw;
+        }
+    }
+
     public static void DeleteSnapshot(string? tempDir)
     {
         if (string.IsNullOrEmpty(tempDir)) return;
@@ -59,3 +92,5 @@ public static class RgbStockDurability
         catch { }
     }
 }
+
+public sealed record RgbVerificationSnapshot(string RootDir, string StockDir, string BdkStorePath);

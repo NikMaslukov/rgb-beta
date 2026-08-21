@@ -98,6 +98,9 @@ internal static class RgbNativeSelfCheck
     internal static bool DefaultHasExport(IntPtr h, string name)
         => NativeLibrary.TryGetExport(h, name, out _);
 
+    internal static void RequireAvailable()
+        => Verify(null, TextWriter.Null, DefaultProbe, DefaultHasExport);
+
     // The probe resolves the handle and requires the exports, but never calls one: every export
     // returns CResultString by value and the binding dereferences and frees that pointer, which
     // against an ABI-mismatched image can abort the process during plugin load.
@@ -151,6 +154,7 @@ internal static class RgbNativeSelfCheck
         "rgbverify_decode_invoice",
         "rgbverify_validate",
         "rgbverify_commitment_check",
+        "rgbverify_validate_v2",
         "rgbverify_string_free"
     ];
 

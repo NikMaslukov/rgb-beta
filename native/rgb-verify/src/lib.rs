@@ -4,10 +4,12 @@ mod commitment;
 mod inputs;
 mod invoice;
 mod validate;
+mod validate_v2;
 
 use commitment::commitment_check;
 use invoice::decode_invoice;
 use validate::validate;
+use validate_v2::validate_v2;
 
 #[repr(C)]
 pub enum CResultValue {
@@ -98,6 +100,11 @@ pub extern "C" fn rgbverify_commitment_check(
             entropy,
         )
     })
+}
+
+#[no_mangle]
+pub extern "C" fn rgbverify_validate_v2(request_json: *const c_char) -> CResultString {
+    guard(|| validate_v2(cstr_to_string(request_json)))
 }
 
 #[no_mangle]

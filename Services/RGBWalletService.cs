@@ -282,6 +282,24 @@ public class RGBWalletService : IRGBWalletService
     }
 
     public async Task<int> CreateColorableUtxosAsync(string walletId, int count = 4, int size = 1000, CancellationToken ct = default)
+        => await CreateColorableUtxosWithAuthorizationAsync(walletId, count, size, null, ct);
+
+    // The listener uses this path so its store/payment-method decision is revalidated after waiting for
+    // the wallet send lock and acquiring the cross-process lease. The public method remains the explicit
+    // merchant/admin path and intentionally requires no automatic-replenishment authorization.
+    internal async Task<int> CreateColorableUtxosAutomaticallyAsync(
+        string walletId, int count, int size,
+        Func<CancellationToken, Task<bool>> authorize,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(authorize);
+        return await CreateColorableUtxosWithAuthorizationAsync(walletId, count, size, authorize, ct);
+    }
+
+    async Task<int> CreateColorableUtxosWithAuthorizationAsync(
+        string walletId, int count, int size,
+        Func<CancellationToken, Task<bool>>? authorize,
+        CancellationToken ct)
     {
         var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
         await sendLock.WaitAsync(ct);
@@ -291,13 +309,16 @@ public class RGBWalletService : IRGBWalletService
             var walletDir = Path.Combine(
                 _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network), wallet.MasterFingerprint);
             using var operationLease = AcquireNativeSendParentLease(walletDir);
-            try { return await CreateColorableUtxosInternalAsync(walletId, count, size, ct); }
+            try { return await CreateColorableUtxosInternalAsync(walletId, count, size, authorize, ct); }
             finally { operationLease.ClearActiveMarker(walletDir); }
         }
         finally { sendLock.Release(); }
     }
 
-    async Task<int> CreateColorableUtxosInternalAsync(string walletId, int count, int size, CancellationToken ct)
+    async Task<int> CreateColorableUtxosInternalAsync(
+        string walletId, int count, int size,
+        Func<CancellationToken, Task<bool>>? authorize,
+        CancellationToken ct)
     {
         var wallet = await GetWalletOrThrow(walletId, ct);
         // A quarantined wallet is one whose Stock and rgb-lib database may disagree, because send_end writes
@@ -311,6 +332,10 @@ public class RGBWalletService : IRGBWalletService
 
         try
         {
+            if (authorize != null && !await authorize(ct))
+                throw new RgbAutomaticReplenishmentNotAuthorizedException(
+                    "automatic RGB UTXO creation is no longer authorized by current store state");
+
             var result = await _rgbLib.CreateUtxosBeginAsync(walletId, count, size, 2.0f, ct);
             if (string.IsNullOrEmpty(result)) return 0;
 
@@ -1617,7 +1642,7 @@ public class RGBWalletService : IRGBWalletService
 
         var leaseWalletDir = Path.Combine(walletDataDir, wallet.MasterFingerprint);
         using var operationLease = AcquireNativeSendParentLease(leaseWalletDir);
-        string? stockSnapshot = null;
+        RgbVerificationSnapshot? verificationSnapshot = null;
         var sendBeginMayHaveRun = false;
         var sendEndStarted = false;
         try
@@ -1629,7 +1654,7 @@ public class RGBWalletService : IRGBWalletService
                     "wallet became quarantined before staging — refusing to send");
             // Snapshot the on-disk Stock BEFORE send_begin so the gate scans state untouched by
             // this send. The operation-wide lease stays published through both helper phases.
-            stockSnapshot = await _rgbLib.SnapshotStockAsync(walletId, ct);
+            verificationSnapshot = await _rgbLib.SnapshotVerificationStateAsync(walletId, ct);
             // Durable before send_begin: managed code may never receive its batch index, so restart
             // recovery must be driven by the wallet DB plus this phase marker, not a local variable.
             await SetNeedsRecoveryAsync(walletId, ct);
@@ -1645,7 +1670,8 @@ public class RGBWalletService : IRGBWalletService
 
             try
             {
-                await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, parsedSendBegin, amount, resolvedAssetId, stockSnapshot, ct);
+                await RunIntentGateAsync(walletId, wallet, network, rgbInvoice, parsedSendBegin, amount,
+                    resolvedAssetId, verificationSnapshot, ct);
             }
             catch (Exception gateEx)
             {
@@ -1780,7 +1806,8 @@ public class RGBWalletService : IRGBWalletService
         }
         finally
         {
-            if (stockSnapshot != null) RgbStockDurability.DeleteSnapshot(stockSnapshot);
+            if (verificationSnapshot != null)
+                RgbStockDurability.DeleteSnapshot(verificationSnapshot.RootDir);
             // Absence of the journal means no staged mutation is indeterminate. Remove the marker
             // while the parent mutex is still held; otherwise restart recovery owns its cleanup.
             if (!File.Exists(recoveryJournal)) operationLease.ClearActiveMarker(leaseWalletDir);
@@ -1838,7 +1865,8 @@ public class RGBWalletService : IRGBWalletService
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");
 
     async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
-        SendBeginResult parsedSendBegin, long amount, string operatorAssetId, string stockDir, CancellationToken ct)
+        SendBeginResult parsedSendBegin, long amount, string operatorAssetId,
+        RgbVerificationSnapshot snapshot, CancellationToken ct)
     {
         var details = parsedSendBegin.Details
             ?? throw new RgbIntentVerificationException("send_begin returned no details");
@@ -1859,16 +1887,21 @@ public class RGBWalletService : IRGBWalletService
         var consignmentPath = await _rgbLib.CreateConsignmentsAsync(walletId, parsedSendBegin.Psbt, ct);
 
         var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-        var validate = RgbVerifyNative.Validate(
-            consignmentPath, unsignedTxid, networkSettings.ElectrumUrl, RgbChainNetMapper.PrefixForNetwork(network), stockDir);
-
-        // Finding B: refuse unless every allocation on every PSBT input is accounted for by this
-        // single-contract transfer — a co-spent input bearing another contract would burn it.
-        if (!validate.InputsAccounted)
-            throw new RgbIntentVerificationException(
-                "intent gate: not every PSBT input allocation is accounted for by the transfer — refusing to sign");
-
-        var commitment = RgbVerifyNative.CommitmentCheck(details.FasciaPath, unsignedTxid, opretHex, details.Entropy);
+        var validate = RgbVerifyNative.ValidateV2(new RgbValidateV2Request
+        {
+            ConsignmentPath = consignmentPath,
+            FasciaPath = details.FasciaPath,
+            UnsignedTxid = unsignedTxid,
+            OpretCommitmentBytes = opretHex,
+            Entropy = details.Entropy,
+            IndexerUrl = networkSettings.ElectrumUrl,
+            Network = RgbChainNetMapper.PrefixForNetwork(network),
+            StockDir = snapshot.StockDir,
+            BdkStorePath = snapshot.BdkStorePath,
+            AccountXpubVanilla = wallet.XpubVanilla,
+            AccountXpubColored = wallet.XpubColored,
+            MasterFingerprint = wallet.MasterFingerprint
+        });
 
         var stagedEndpoints = RgbTransferDataReader.ReadTransportEndpoints(details.FasciaPath);
 
@@ -1879,7 +1912,7 @@ public class RGBWalletService : IRGBWalletService
         using var chainClient = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
         await chainClient.ConnectAsync(ct);
 
-        await RgbIntentVerifier.VerifyAsync(decode, validate, commitment, unsignedPsbt, unsignedTxid,
+        await RgbIntentVerifier.VerifyAsync(decode, validate, unsignedPsbt, unsignedTxid,
             signer, network, amount, operatorAssetId, stagedEndpoints, chainClient, ct);
     }
 

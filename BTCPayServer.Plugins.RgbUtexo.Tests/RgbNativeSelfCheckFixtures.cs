@@ -50,6 +50,7 @@ internal static class SelfCheckTokens
         "rgbverify_decode_invoice",
         "rgbverify_validate",
         "rgbverify_commitment_check",
+        "rgbverify_validate_v2",
         "rgbverify_string_free"
     ];
 
@@ -194,7 +195,7 @@ internal static class SelfCheckCases
                     "rgbverify_decode_invoice", "rgbverify_validate", "rgbverify_commitment_check");
                 return new FailureCase(
                     SelfCheckProbes.Loading((IntPtr)7, LoadedElsewhere, Searched, Array.Empty<string>()),
-                    exports.Has, exports, ["rgbverify_string_free", LoadedElsewhere]);
+                    exports.Has, exports, ["rgbverify_validate_v2", LoadedElsewhere]);
             }
             case SelfCheckState.SelfCheckFailed when exportCheckThrows:
                 // State 5's second trigger: the load succeeded and the export check faulted, so

@@ -302,7 +302,7 @@ public class RgbSendClosureSourceTests
         var snapshot = send.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {
-                Name: "SnapshotStockAsync",
+                Name: "SnapshotVerificationStateAsync",
                 ContainingType.Name: "IRgbLibService"
             });
         Assert.True(quarantineChecks[0].SpanStart < acquire.SpanStart);
@@ -711,8 +711,33 @@ public class RgbSendClosureSourceTests
         var plugin = PluginCompilation.Shared;
         var tree = plugin.Tree("Services/RGBWalletService.cs");
         var model = plugin.Model(tree);
-        var body = RoslynPins.BodyOf(
-            RoslynPins.Method(tree, "RGBWalletService", methodName));
+        var entry = RoslynPins.Method(tree, "RGBWalletService", methodName);
+        var body = RoslynPins.BodyOf(entry);
+
+        if (methodName == "CreateColorableUtxosAsync")
+        {
+            // Both entry points deliberately delegate to one private implementation so the final
+            // automatic-authorization check can run after acquiring the same lock and lease used by
+            // the manual path. Follow the bound target instead of requiring the lease text to be
+            // duplicated in this thin public wrapper.
+            var helperCall = Assert.Single(body.DescendantNodes().OfType<InvocationExpressionSyntax>(),
+                i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
+                {
+                    DeclaredAccessibility: Accessibility.Private,
+                    ContainingType.Name: "RGBWalletService"
+                });
+            var helper = Assert.IsAssignableFrom<IMethodSymbol>(model.GetSymbolInfo(helperCall).Symbol);
+            var helperDeclaration = Assert.IsType<MethodDeclarationSyntax>(
+                Assert.Single(helper.DeclaringSyntaxReferences).GetSyntax());
+
+            var automatic = RoslynPins.BodyOf(RoslynPins.Method(
+                tree, "RGBWalletService", "CreateColorableUtxosAutomaticallyAsync"));
+            Assert.Single(automatic.DescendantNodes().OfType<InvocationExpressionSyntax>(), i =>
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(i).Symbol, helper));
+
+            body = RoslynPins.BodyOf(helperDeclaration);
+        }
+
         Assert.Single(body.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {

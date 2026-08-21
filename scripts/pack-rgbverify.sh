@@ -19,7 +19,7 @@ PACKAGING_DIR="$CRATE_DIR/packaging"
 PROJECT="$PACKAGING_DIR/RgbVerifyCffi.csproj"
 FEED="$REPO_ROOT/local-nuget-feed"
 
-EXPORTS="rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_string_free"
+EXPORTS="rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free"
 
 STAGE=0
 PACK=0
@@ -121,7 +121,7 @@ assert_exports() {
     echo "$symbols" | grep -q "$symbol" \
       || { echo "pack-rgbverify: $rid native is missing export $symbol" >&2; return 1; }
   done
-  echo "==> $rid exports all four gate symbols"
+  echo "==> $rid exports all five gate symbols"
 }
 
 stage() {

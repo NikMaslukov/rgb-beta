@@ -62,6 +62,23 @@ public class RgbVerifyBindingTests
         Assert.Empty(r.Inputs);
     }
 
+    [Fact]
+    public void MissingV2SecurityFields_DefaultToRejectingShape()
+    {
+        var r = JsonSerializer.Deserialize<RgbValidateV2Result>(
+            """{ "contractId": "rgb:x", "chainNet": "bcrt", "witnessTxid": "00" }""");
+        Assert.NotNull(r);
+        Assert.Equal(0, r!.ValidationVersion);
+        Assert.False(r.InputsAccounted);
+        Assert.False(r.CommitmentMatches);
+        Assert.False(r.WitnessIdMatches);
+        Assert.Empty(r.CommittedContractIds);
+        Assert.Empty(r.VerifiedContractIds);
+        Assert.Empty(r.VerifiedTransitionIds);
+        Assert.Empty(r.CarryForwards);
+        Assert.Equal(string.Empty, r.MainTransitionId);
+    }
+
     // Proves the native library loads through the DllImportResolver and the CResultString
     // free discipline runs: a malformed invoice returns Err, surfaced as the typed exception.
     [Fact]

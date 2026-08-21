@@ -150,6 +150,46 @@ public class MemoryWalletSigner : IRgbWalletSigner
         return false;
     }
 
+    internal bool IsRgbColoredOutput(PSBTOutput output, Script outputScript, Network network)
+    {
+        var claims = new List<KeyPath>();
+        foreach (var kp in output.HDTaprootKeyPaths)
+            if (kp.Value.RootedKeyPath.MasterFingerprint.ToString()
+                .Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
+                claims.Add(kp.Value.RootedKeyPath.KeyPath);
+        foreach (var kp in output.HDKeyPaths)
+            if (kp.Value.MasterFingerprint.ToString()
+                .Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
+                claims.Add(kp.Value.KeyPath);
+
+        return claims.Count == 1
+            && IsRgbColoredDescriptorScript(outputScript, claims[0], network);
+    }
+
+    internal bool IsRgbColoredScriptAtPath(Script script, string claimedPath, Network network)
+    {
+        KeyPath path;
+        try { path = new KeyPath(claimedPath); }
+        catch { return false; }
+        return IsRgbColoredDescriptorScript(script, path, network);
+    }
+
+    // rgb-lib's allocation-bearing BDK descriptor is exactly tr([origin]account-xpub/0/*).
+    // Account-prefix ownership alone is insufficient here: branch /1 or P2WPKH uses a key we control,
+    // but rgb-lib will not discover that output through its colored descriptor and the RGB successor can
+    // become permanently inaccessible through the plugin.
+    internal bool IsRgbColoredDescriptorScript(Script script, KeyPath path, Network network)
+    {
+        if (!TryClassifyAccount(path, out var account)
+            || account != PrevoutAccount.RgbLibColored
+            || path.Indexes[3] != 0
+            || _masterKey == null)
+            return false;
+
+        var pubKey = _masterKey.Derive(path).GetPublicKey();
+        return pubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script;
+    }
+
     readonly ConcurrentDictionary<Script, byte> _verifiedScripts = new();
     uint _highestVerifiedIndex;
 

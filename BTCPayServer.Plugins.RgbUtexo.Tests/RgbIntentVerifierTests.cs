@@ -25,28 +25,31 @@ public class RgbIntentVerifierTests
 
     class Ctx
     {
+        public required string Mnemonic;
         public required MemoryWalletSigner Signer;
         public required PSBT Psbt;
         public required string UnsignedTxid;
         public required Script ChangeScript;
+        public required KeyPath ChangePath;
         public required RgbDecodeInvoiceResult Decode;
-        public required RgbValidateResult Validate;
-        public required RgbCommitmentCheckResult Commitment;
+        public required RgbValidateV2Result Validate;
         public required List<string> Staged;
         public long OperatorAmount = 100;
         public string OperatorAssetId = ContractId;
         public FakeChainClient Chain = new();
 
         public Task Run() => RgbIntentVerifier.VerifyAsync(
-            Decode, Validate, Commitment, Psbt, UnsignedTxid, Signer, Net, OperatorAmount, OperatorAssetId, Staged, Chain);
+            Decode, Validate, Psbt, UnsignedTxid, Signer, Net, OperatorAmount, OperatorAssetId, Staged, Chain);
     }
 
     static Ctx Valid()
     {
         var mnemonic = new Mnemonic(Wordlist.English, WordCount.Twelve).ToString();
         var signer = new MemoryWalletSigner(mnemonic, Net);
-        var colored = ExtPubKey.Parse(signer.XpubColored, Net);
-        var changeScript = colored.Derive(0).Derive(0).PubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
+        var master = new Mnemonic(mnemonic).DeriveExtKey();
+        var changePath = new KeyPath("m/86'/827167'/0'/0/0");
+        var changePubkey = master.Derive(changePath).GetPublicKey();
+        var changeScript = changePubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, Net).ScriptPubKey;
 
         var opret = new Script(OpcodeType.OP_RETURN, Op.GetPushOp(Convert.FromHexString(RecipientSeal)));
         var tx = Net.CreateTransaction();
@@ -54,15 +57,18 @@ public class RgbIntentVerifierTests
         tx.Outputs.Add(new TxOut(Money.Zero, opret));
         tx.Outputs.Add(new TxOut(Money.Coins(1), changeScript));
         var psbt = tx.CreatePSBT(Net);
+        AddTaprootProof(psbt.Outputs[1], master, changePath);
         var unsignedTxid = psbt.GetGlobalTransaction().GetHash().ToString();
         var prevout = $"{psbt.GetGlobalTransaction().Inputs[0].PrevOut.Hash}:{psbt.GetGlobalTransaction().Inputs[0].PrevOut.N}";
 
         return new Ctx
         {
+            Mnemonic = mnemonic,
             Signer = signer,
             Psbt = psbt,
             UnsignedTxid = unsignedTxid,
             ChangeScript = changeScript,
+            ChangePath = changePath,
             Decode = new RgbDecodeInvoiceResult
             {
                 ContractId = ContractId,
@@ -73,23 +79,25 @@ public class RgbIntentVerifierTests
                 Expiry = null,
                 Transports = ["rpc://proxy.example/0.2/json-rpc"]
             },
-            Validate = new RgbValidateResult
+            Validate = new RgbValidateV2Result
             {
+                ValidationVersion = 2,
                 ContractId = ContractId,
                 ChainNet = "bcrt",
                 WitnessTxid = unsignedTxid,
                 Prevouts = [prevout],
+                InputsAccounted = true,
+                CommitmentMatches = true,
+                WitnessIdMatches = true,
+                CommittedContractIds = [ContractId],
+                VerifiedContractIds = [ContractId],
+                MainTransitionId = "main-transition",
+                VerifiedTransitionIds = ["main-transition"],
                 Legs =
                 [
                     new RgbLeg { AssignmentType = 4000, SealKind = "confidentialSeal", SealBytes = RecipientSeal, Amount = 100 },
                     new RgbLeg { AssignmentType = 4000, SealKind = "revealedWitnessVout", WitnessVout = 1, Amount = 900 }
                 ]
-            },
-            Commitment = new RgbCommitmentCheckResult
-            {
-                Matches = true,
-                WitnessIdMatches = true,
-                CommittedContractIds = [ContractId]
             },
             Staged = ["rpc://proxy.example/0.2/json-rpc"]
         };
@@ -196,6 +204,30 @@ public class RgbIntentVerifierTests
     }
 
     [Fact]
+    public async Task MainWitnessChange_GenericWalletAccount_Rejected()
+    {
+        var c = Valid();
+        SetMainWitnessChange(c, new KeyPath("m/86'/1'/0'/0/5"));
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task MainWitnessChange_RgbInternalBranch_Rejected()
+    {
+        var c = Valid();
+        SetMainWitnessChange(c, new KeyPath("m/86'/827167'/0'/1/5"));
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task MainWitnessChange_RgbP2wpkh_Rejected()
+    {
+        var c = Valid();
+        SetMainWitnessChange(c, new KeyPath("m/86'/827167'/0'/0/5"), taproot: false);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
     public async Task ConcealedNonRecipientLeg_Rejected()
     {
         var c = Valid();
@@ -286,7 +318,7 @@ public class RgbIntentVerifierTests
     public async Task CommitmentNotMatching_Rejected()
     {
         var c = Valid();
-        c.Commitment.Matches = false;
+        c.Validate.CommitmentMatches = false;
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
@@ -294,7 +326,7 @@ public class RgbIntentVerifierTests
     public async Task CommitmentWitnessMismatch_Rejected()
     {
         var c = Valid();
-        c.Commitment.WitnessIdMatches = false;
+        c.Validate.WitnessIdMatches = false;
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
@@ -302,7 +334,7 @@ public class RgbIntentVerifierTests
     public async Task CommittedContractSetWrong_Rejected()
     {
         var c = Valid();
-        c.Commitment.CommittedContractIds = [ContractId, "rgb:extra-contract"];
+        c.Validate.CommittedContractIds = [ContractId, "rgb:extra-contract"];
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
@@ -329,9 +361,34 @@ public class RgbIntentVerifierTests
             AssignmentType = 4000,
             SealKind = "revealedConcreteOutpoint",
             Outpoint = $"{fundingTxid}:0",
+            DerivationPath = c.ChangePath.ToString(),
             Amount = 900
         };
         await c.Run();
+    }
+
+    [Fact]
+    public async Task MainConcreteChange_GenericWalletAccount_Rejected()
+    {
+        var c = Valid();
+        SetMainConcreteChange(c, new KeyPath("m/86'/1'/0'/0/6"));
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task MainConcreteChange_RgbInternalBranch_Rejected()
+    {
+        var c = Valid();
+        SetMainConcreteChange(c, new KeyPath("m/86'/827167'/0'/1/6"));
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task MainConcreteChange_RgbP2wpkh_Rejected()
+    {
+        var c = Valid();
+        SetMainConcreteChange(c, new KeyPath("m/86'/827167'/0'/0/6"), taproot: false);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
     }
 
     [Fact]
@@ -483,5 +540,205 @@ public class RgbIntentVerifierTests
             Amount = 900
         };
         await Assert.ThrowsAsync<RgbIntentVerificationException>(c.Run);
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredWitnessOutput_Passes()
+    {
+        var (c, validate) = V2WithWitnessCarry(rgbColored: true);
+        await RunV2(c, validate);
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToGenericOwnedWitnessOutput_Rejected()
+    {
+        var (c, validate) = V2WithWitnessCarry(rgbColored: false);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredInternalBranchWitnessOutput_Rejected()
+    {
+        var (c, validate) = V2WithWitnessCarry(rgbColored: true, branch: 1);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredP2wpkhWitnessOutput_Rejected()
+    {
+        var (c, validate) = V2WithWitnessCarry(rgbColored: true, taproot: false);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    [Fact]
+    public async Task V2_ExtraVerifiedTransitionWithoutCarryProof_Rejected()
+    {
+        var (c, validate) = V2WithWitnessCarry(rgbColored: true);
+        validate.CarryForwards.Clear();
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredConcreteOutput_Passes()
+    {
+        var (c, validate) = V2WithConcreteCarry();
+        await RunV2(c, validate);
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredInternalBranchConcreteOutput_Rejected()
+    {
+        var (c, validate) = V2WithConcreteCarry(branch: 1);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    [Fact]
+    public async Task V2_ForeignCarryToRgbColoredP2wpkhConcreteOutput_Rejected()
+    {
+        var (c, validate) = V2WithConcreteCarry(taproot: false);
+        await Assert.ThrowsAsync<RgbIntentVerificationException>(() => RunV2(c, validate));
+    }
+
+    static (Ctx Context, RgbValidateV2Result Validate) V2WithWitnessCarry(
+        bool rgbColored, uint branch = 0, bool taproot = true)
+    {
+        var c = Valid();
+        var path = new KeyPath(rgbColored
+            ? $"m/86'/827167'/0'/{branch}/7"
+            : $"m/86'/1'/0'/{branch}/7");
+        var master = new Mnemonic(c.Mnemonic).DeriveExtKey();
+        var pubkey = master.Derive(path).GetPublicKey();
+        var script = pubkey.GetAddress(
+            taproot ? ScriptPubKeyType.TaprootBIP86 : ScriptPubKeyType.Segwit, Net).ScriptPubKey;
+        var tx = c.Psbt.GetGlobalTransaction();
+        tx.Outputs.Add(new TxOut(Money.Coins(1), script));
+        c.Psbt = tx.CreatePSBT(Net);
+        AddTaprootProof(c.Psbt.Outputs[1], master, c.ChangePath);
+        var fingerprint = master.GetPublicKey().GetHDFingerPrint();
+        if (taproot)
+            c.Psbt.Outputs[^1].HDTaprootKeyPaths.Add(pubkey.GetTaprootFullPubKey(),
+                new TaprootKeyPath(new RootedKeyPath(fingerprint, path)));
+        else
+            c.Psbt.Outputs[^1].HDKeyPaths.Add(pubkey, new RootedKeyPath(fingerprint, path));
+        c.UnsignedTxid = c.Psbt.GetGlobalTransaction().GetHash().ToString();
+        c.Validate.WitnessTxid = c.UnsignedTxid;
+
+        var validate = V2Base(c);
+        AddCarry(validate, c.Validate.Prevouts[0], "rgb:foreign-contract", "carry-1",
+            "revealedWitnessVout", (uint)(tx.Outputs.Count - 1), null, null);
+        return (c, validate);
+    }
+
+    static (Ctx Context, RgbValidateV2Result Validate) V2WithConcreteCarry(
+        uint branch = 0, bool taproot = true)
+    {
+        var c = Valid();
+        var path = new KeyPath($"m/86'/827167'/0'/{branch}/9");
+        var master = new Mnemonic(c.Mnemonic).DeriveExtKey();
+        var pubkey = master.Derive(path).GetPublicKey();
+        var script = pubkey.GetAddress(
+            taproot ? ScriptPubKeyType.TaprootBIP86 : ScriptPubKeyType.Segwit, Net).ScriptPubKey;
+        var funding = Net.CreateTransaction();
+        funding.Inputs.Add(new OutPoint(uint256.One, 0));
+        funding.Outputs.Add(new TxOut(Money.Coins(1), script));
+        var fundingTxid = funding.GetHash().ToString();
+        c.Chain.RawTx = _ => funding.ToHex();
+        c.Chain.Unspent = _ => [new Outpoint(fundingTxid, 0)];
+
+        var validate = V2Base(c);
+        AddCarry(validate, c.Validate.Prevouts[0], "rgb:foreign-contract", "carry-1",
+            "revealedConcreteOutpoint", null, $"{fundingTxid}:0", path.ToString());
+        return (c, validate);
+    }
+
+    static RgbValidateV2Result V2Base(Ctx c) => new()
+    {
+        ValidationVersion = 2,
+        ContractId = c.Validate.ContractId,
+        ChainNet = c.Validate.ChainNet,
+        WitnessTxid = c.Validate.WitnessTxid,
+        Prevouts = c.Validate.Prevouts,
+        Legs = c.Validate.Legs,
+        InputsAccounted = true,
+        Inputs = c.Validate.Inputs,
+        CommitmentMatches = true,
+        WitnessIdMatches = true,
+        CommittedContractIds = [ContractId],
+        VerifiedContractIds = [ContractId],
+        MainTransitionId = "main-transition",
+        VerifiedTransitionIds = ["main-transition"]
+    };
+
+    static void AddCarry(RgbValidateV2Result validate, string inputOutpoint, string contractId,
+        string transitionId, string successorKind, uint? witnessVout, string? successorOutpoint,
+        string? derivationPath)
+    {
+        validate.CarryForwards.Add(new RgbCarryForwardProof
+        {
+            ContractId = contractId,
+            Opout = $"opout-{transitionId}",
+            TransitionId = transitionId,
+            InputOutpoint = inputOutpoint,
+            AssignmentType = 4000,
+            StateKind = "amount",
+            Amount = 42,
+            SuccessorKind = successorKind,
+            WitnessVout = witnessVout,
+            SuccessorOutpoint = successorOutpoint,
+            DerivationPath = derivationPath
+        });
+        validate.CommittedContractIds.Add(contractId);
+        validate.VerifiedContractIds.Add(contractId);
+        validate.VerifiedTransitionIds.Add(transitionId);
+    }
+
+    static Task RunV2(Ctx c, RgbValidateV2Result validate) => RgbIntentVerifier.VerifyAsync(
+        c.Decode, validate, c.Psbt, c.UnsignedTxid, c.Signer, Net, c.OperatorAmount,
+        c.OperatorAssetId, c.Staged, c.Chain);
+
+    static void SetMainWitnessChange(Ctx c, KeyPath path, bool taproot = true)
+    {
+        var master = new Mnemonic(c.Mnemonic).DeriveExtKey();
+        var pubkey = master.Derive(path).GetPublicKey();
+        var tx = c.Psbt.GetGlobalTransaction();
+        tx.Outputs[1].ScriptPubKey = pubkey.GetAddress(
+            taproot ? ScriptPubKeyType.TaprootBIP86 : ScriptPubKeyType.Segwit, Net).ScriptPubKey;
+        c.Psbt = tx.CreatePSBT(Net);
+        if (taproot)
+            AddTaprootProof(c.Psbt.Outputs[1], master, path);
+        else
+            c.Psbt.Outputs[1].HDKeyPaths.Add(pubkey,
+                new RootedKeyPath(master.GetPublicKey().GetHDFingerPrint(), path));
+        c.UnsignedTxid = c.Psbt.GetGlobalTransaction().GetHash().ToString();
+        c.Validate.WitnessTxid = c.UnsignedTxid;
+    }
+
+    static void SetMainConcreteChange(Ctx c, KeyPath path, bool taproot = true)
+    {
+        var master = new Mnemonic(c.Mnemonic).DeriveExtKey();
+        var script = master.Derive(path).GetPublicKey().GetAddress(
+            taproot ? ScriptPubKeyType.TaprootBIP86 : ScriptPubKeyType.Segwit, Net).ScriptPubKey;
+        var funding = Net.CreateTransaction();
+        funding.Inputs.Add(new OutPoint(uint256.One, 0));
+        funding.Outputs.Add(new TxOut(Money.Coins(1), script));
+        var fundingTxid = funding.GetHash().ToString();
+        c.Chain.RawTx = _ => funding.ToHex();
+        c.Chain.Unspent = _ => [new Outpoint(fundingTxid, 0)];
+        c.Validate.Legs[1] = new RgbLeg
+        {
+            AssignmentType = 4000,
+            SealKind = "revealedConcreteOutpoint",
+            Outpoint = $"{fundingTxid}:0",
+            DerivationPath = path.ToString(),
+            Amount = 900
+        };
+    }
+
+    static void AddTaprootProof(PSBTOutput output, ExtKey master, KeyPath path)
+    {
+        var pubkey = master.Derive(path).GetPublicKey();
+        output.HDTaprootKeyPaths.Add(pubkey.GetTaprootFullPubKey(),
+            new TaprootKeyPath(new RootedKeyPath(
+                master.GetPublicKey().GetHDFingerPrint(), path)));
     }
 }

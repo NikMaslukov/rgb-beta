@@ -35,6 +35,7 @@ public sealed class FakeRgbLib : IRgbLibService
         CancellationToken ct = default) => throw new NotImplementedException();
     public Task RefreshAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
+    public Task<RgbVerificationSnapshot> SnapshotVerificationStateAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SendBeginAsync(string walletId, string recipientMapJson, float feeRate, int minConfirmations = 1, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SendEndAsync(string walletId, string signedPsbt, CancellationToken ct = default) => throw new NotImplementedException();

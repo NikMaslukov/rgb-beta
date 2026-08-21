@@ -101,7 +101,7 @@ jobs:
           bash native/rgb-verify/build-native.sh
           NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
           test -f "$NATIVE" || { echo "::error::rgbverifycffi native not produced at $NATIVE"; exit 1; }
-          for sym in rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_string_free; do
+          for sym in rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free; do
             nm -D --defined-only "$NATIVE" | grep -q "$sym" \
               || { echo "::error::rgbverifycffi native missing expected export $sym"; exit 1; }
           done

@@ -706,6 +706,25 @@ public class RgbLibService : IRgbLibService
             return RgbStockDurability.SnapshotStock(stockDir);
         }, ct);
     }
+
+    public async Task<RgbVerificationSnapshot> SnapshotVerificationStateAsync(
+        string walletId, CancellationToken ct = default)
+    {
+        var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        await using var ctx = _db.CreateContext();
+        var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
+        var walletDataDir = _config.GetWalletDataDir(walletId, dbWallet.Network);
+        var walletDir = Path.Combine(walletDataDir, dbWallet.MasterFingerprint);
+        var stockDir = RgbStockDurability.ResolveStockDir(walletDataDir, dbWallet.MasterFingerprint);
+
+        return await handle.ExecuteAsync(_ =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return RgbStockDurability.SnapshotVerificationState(stockDir, walletDir);
+        }, ct);
+    }
     
     public async Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default)
     {

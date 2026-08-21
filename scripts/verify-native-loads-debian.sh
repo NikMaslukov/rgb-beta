@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Loads the staged linux-x64 gate native inside Debian 12 and resolves all four exports.
+# Loads the staged linux-x64 gate native inside Debian 12 and resolves all five exports.
 #
 # This is what catches a glibc-floor mistake at pack time instead of at a merchant's startup: a
 # native linked against a newer glibc than the deployment target fails to dlopen, and the plugin's
@@ -24,9 +24,10 @@ missing = [s for s in (
     'rgbverify_decode_invoice',
     'rgbverify_validate',
     'rgbverify_commitment_check',
+    'rgbverify_validate_v2',
     'rgbverify_string_free',
 ) if not hasattr(lib, s)]
 if missing:
     sys.exit('missing exports: ' + ', '.join(missing))
-print('loaded /n/$LIB on debian bookworm with all four exports')
+print('loaded /n/$LIB on debian bookworm with all five exports')
 "
