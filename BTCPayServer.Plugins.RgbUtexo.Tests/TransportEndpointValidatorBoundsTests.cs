@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.ComponentModel.DataAnnotations;
+using BTCPayServer.Plugins.RgbUtexo.Models;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
@@ -42,6 +44,16 @@ public class TransportEndpointValidatorBoundsTests
             if (ReferenceEquals(TransportEndpointValidator.Resolver, _installed))
                 TransportEndpointValidator.ResetResolver();
         }
+    }
+
+    [Fact]
+    public void SendModelUsesTheSameRawInvoiceBoundAsTheService()
+    {
+        var attribute = typeof(RGBSendAssetViewModel).GetProperty(nameof(RGBSendAssetViewModel.RgbInvoice))!
+            .GetCustomAttributes(typeof(StringLengthAttribute), inherit: true)
+            .Cast<StringLengthAttribute>()
+            .Single();
+        Assert.Equal(TransportEndpointValidator.MaxRgbInvoiceLength, attribute.MaximumLength);
     }
 
     static readonly IPAddress[] OnePublicAddress = [IPAddress.Parse("8.8.8.8")];
@@ -127,6 +139,42 @@ public class TransportEndpointValidatorBoundsTests
 
         Assert.Contains("Too many transport endpoints", ex.Message);
         Assert.Equal(0, resolver.Count);
+    }
+
+    [Fact]
+    public async Task EndpointLengthAndAggregateCapsRunBeforeResolution()
+    {
+        var resolver = new CountingResolver();
+        using var swap = new ResolverSwap(resolver.Resolve);
+
+        var oversized = "rpc://host.example/" + new string('x',
+            TransportEndpointValidator.MaxTransportEndpointLength);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync([oversized]));
+
+        var aggregate = Enumerable.Range(0, TransportEndpointValidator.MaxTransportEndpoints)
+            .Select(i => $"rpc://h{i}.example/" + new string('x', 1_100))
+            .ToList();
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => TransportEndpointValidator.ValidateAsync(aggregate));
+
+        Assert.Equal(0, resolver.Count);
+    }
+
+    [Fact(Timeout = 12000)]
+    public async Task AbandonedDnsWorkNeverExceedsTheGlobalConcurrencyCap()
+    {
+        var resolver = new CountingResolver(_ => new TaskCompletionSource<IPAddress[]>().Task);
+        using var swap = new ResolverSwap(resolver.Resolve);
+        var attempts = Enumerable.Range(0, TransportEndpointValidator.MaxConcurrentResolvers + 1)
+            .Select(i => TransportEndpointValidator.ValidateAsync(
+                [$"rpc://limit-{i}.example:3000/json-rpc"]))
+            .ToList();
+
+        await Task.WhenAll(attempts.Select(async attempt =>
+            await Assert.ThrowsAsync<InvalidOperationException>(() => attempt)));
+
+        Assert.Equal(TransportEndpointValidator.MaxConcurrentResolvers, resolver.Count);
     }
 
     // Must exceed the budget, since it is the only thing consuming it. The extra second covers

@@ -1513,12 +1513,22 @@ public class RgbListenerSourcePinTests
     {
         var plugin = PluginCompilation.Shared;
         var start = RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, "StartAsync");
+        var model = plugin.Model(plugin.Tree(ListenerFile));
+        var subscription = RoslynPins.BodyOf(start).DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "Subscribe",
+                ContainingType.Name: "EventAggregator"
+            } symbol && symbol.TypeArguments.SingleOrDefault()?.Name == "InvoiceEvent");
+        Assert.Equal("OnInvoice", subscription.ArgumentList.Arguments.Single().Expression.ToString());
         var text = start.Body!.ToString();
-        var subscribe = text.IndexOf("SubscribeAsync<InvoiceEvent>", StringComparison.Ordinal);
+        var subscribe = text.IndexOf("Subscribe<InvoiceEvent>", StringComparison.Ordinal);
         var recovery = text.IndexOf("RequestRecovery", StringComparison.Ordinal);
 
         Assert.True(subscribe >= 0 && recovery > subscribe,
             "StartAsync must subscribe before requesting the initial durable recovery sweep");
+        Assert.DoesNotContain("SubscribeAsync<InvoiceEvent>", text, StringComparison.Ordinal);
         Assert.DoesNotContain("GetMonitoredInvoices", text);
         Assert.DoesNotContain("EnqueuePendingInvoices", text);
     }

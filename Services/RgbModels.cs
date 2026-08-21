@@ -61,7 +61,11 @@ public class RgbTransfer
     [JsonPropertyName("txid")] public string? Txid { get; set; }
     [JsonPropertyName("recipient_id")] public string? RecipientId { get; set; }
     [JsonPropertyName("receive_utxo")] public Outpoint? ReceiveUtxo { get; set; }
+    public string? AssetId { get; set; }
+    public string AssetTicker { get; set; } = "";
 }
+
+public sealed record RgbMatchedTransfer(string AssetId, RgbAsset Asset, RgbTransfer Transfer);
 
 public class BtcTransaction
 {
@@ -106,4 +110,3 @@ public class RgbInvoiceData
     [JsonPropertyName("expiration_timestamp")] public long ExpirationTimestamp { get; set; }
     [JsonPropertyName("transport_endpoints")] public List<string> TransportEndpoints { get; set; } = [];
 }
-

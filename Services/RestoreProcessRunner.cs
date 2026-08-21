@@ -242,13 +242,30 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         readonly Task<string> _stderr;
         public RealChildHandle(ProcessStartInfo psi, int stdOutCapChars = StdErrCapChars)
         {
-            _p = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned null");
-            _stdout = DrainCappedAsync(_p.StandardOutput, stdOutCapChars);
-            // Drain stderr concurrently from the start so a child that writes more than the OS pipe
-            // buffer cannot block mid-restore (which would convert every restore into a timeout kill).
-            // Retain only a capped prefix so a noisy child cannot shift the DoS into parent memory by
-            // spewing unbounded stderr — the pipe is still fully drained, the overflow is discarded.
-            _stderr = DrainCappedAsync(_p.StandardError, StdErrCapChars);
+            Process? started = null;
+            try
+            {
+                started = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned null");
+                _p = started;
+                _stdout = DrainCappedAsync(_p.StandardOutput, stdOutCapChars);
+                // Drain stderr concurrently from the start so a child that writes more than the OS pipe
+                // buffer cannot block mid-restore (which would convert every restore into a timeout kill).
+                // Retain only a capped prefix so a noisy child cannot shift the DoS into parent memory by
+                // spewing unbounded stderr — the pipe is still fully drained, the overflow is discarded.
+                _stderr = DrainCappedAsync(_p.StandardError, StdErrCapChars);
+            }
+            catch
+            {
+                if (started != null)
+                {
+                    try { if (!started.HasExited) started.Kill(entireProcessTree: true); } catch { }
+                    var reaped = false;
+                    try { reaped = started.WaitForExit(5_000); } catch { }
+                    try { started.Dispose(); } catch { }
+                    if (!reaped) throw new NativeSendChildUnreapedException();
+                }
+                throw;
+            }
         }
 
         static async Task<string> DrainCappedAsync(StreamReader reader, int cap)
@@ -296,6 +313,7 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         public void Dispose()
         {
             try { if (!_p.HasExited) _p.Kill(true); } catch { }
+            try { if (!_p.HasExited) _p.WaitForExit(5_000); } catch { }
             try { _p.Dispose(); } catch { }
         }
     }

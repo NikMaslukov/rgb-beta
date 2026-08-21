@@ -18,6 +18,9 @@ public interface IRgbLibService : IDisposable
     Task<string> CreateUtxosEndAsync(string walletId, string signedPsbt, CancellationToken ct = default);
     
     Task<List<RgbTransfer>> ListTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default);
+    Task<List<RgbMatchedTransfer>> ListIncomingTransfersForRecipientsAsync(
+        string walletId, IReadOnlyCollection<string> recipientIds, string? assetId = null,
+        CancellationToken ct = default);
     Task RefreshAsync(string walletId, CancellationToken ct = default);
     Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default);
 

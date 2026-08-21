@@ -99,6 +99,15 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             throw new PaymentMethodUnavailableException("RGB not configured for this store");
 
         var config = ParsePaymentMethodConfig(configToken);
+        try
+        {
+            RgbConfigBounds.EnsurePaymentMethodValuesValid(
+                config.UtxoCount, config.UtxoSize, config.MinConfirmations);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new PaymentMethodUnavailableException(ex.Message);
+        }
         
         // The wallet table is authoritative (one active wallet per store). The config pointer is retained
         // only for wire compatibility: Greenfield treats PUT config as replacement, so a partial update can

@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using BTCPayServer.Plugins.RgbUtexo.Services;
 using RgbLib;
 
 namespace RgbRestoreHelper;
@@ -12,6 +13,8 @@ public sealed record RgbNativeSendRequest(
     string XpubVanilla,
     string XpubColored,
     string MasterFingerprint,
+    string LeaseWalletDir,
+    string LeaseToken,
     int MaxAllocationsPerUtxo,
     string? RecipientMapJson,
     float FeeRate,
@@ -26,6 +29,16 @@ public static class RgbNativeSend
             ?? throw new InvalidDataException("send request is missing");
         if (string.IsNullOrWhiteSpace(request.DataDir) || string.IsNullOrWhiteSpace(request.MasterFingerprint))
             throw new InvalidDataException("send request has incomplete wallet identity");
+        if (string.IsNullOrWhiteSpace(request.LeaseWalletDir)
+            || string.IsNullOrWhiteSpace(request.LeaseToken))
+            throw new InvalidDataException("send request has no helper lease");
+
+        // This must precede wallet construction. A replacement parent that wins recovery exclusion
+        // makes this open fail, so an orphaned helper can never touch a wallet already being recovered.
+        using var lease = RgbNativeSendLease.AcquireWorker(
+            request.LeaseWalletDir, request.LeaseToken);
+        using var walletAccess = RgbNativeSendLease.AcquireWalletAccess(
+            request.LeaseWalletDir, allowMarked: true);
 
         var walletConfig = JsonSerializer.Serialize(new Dictionary<string, object?>
         {

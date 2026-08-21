@@ -25,7 +25,8 @@ public sealed record NativeSendRunResult(
 public interface INativeSendProcessRunner
 {
     Task<NativeSendRunResult> RunAsync(
-        string operation, string requestJson, NativeSendLimits limits, CancellationToken ct);
+        string operation, string requestJson, string leaseWalletDir, Func<bool> quiesceParent,
+        NativeSendLimits limits, CancellationToken ct);
 }
 
 public sealed class NativeSendProcessRunner : INativeSendProcessRunner
@@ -54,72 +55,96 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
     }
 
     public async Task<NativeSendRunResult> RunAsync(
-        string operation, string requestJson, NativeSendLimits limits, CancellationToken ct)
+        string operation, string requestJson, string leaseWalletDir, Func<bool> quiesceParent,
+        NativeSendLimits limits, CancellationToken ct)
     {
         if (operation is not ("send-begin" or "send-end"))
             throw new ArgumentOutOfRangeException(nameof(operation));
         var helperDll = _resolveHelperDll();
         if (!File.Exists(helperDll))
             throw new InvalidOperationException($"Native send helper not found at {helperDll}");
+        if (!RgbNativeSendLease.Exists(leaseWalletDir)
+            || !RgbNativeSendLease.IsOwnedByCurrentContext(leaseWalletDir))
+            throw new InvalidOperationException("Native send requires an operation-wide wallet lease");
 
         var psi = BuildStartInfo(helperDll, operation, limits);
         var sw = Stopwatch.StartNew();
+        // The caller publishes and retains the operation marker across send_begin, signing, and
+        // send_end. Quiescing after that publication makes every other process refuse wallet access.
+        if (!quiesceParent())
+            throw new RgbWalletQuarantinedException(
+                "cached native wallet could not be quiesced before helper launch");
+
         IChildHandle child;
         try { child = _handleFactory(psi); }
+        catch (NativeSendChildUnreapedException) { throw; }
         catch (Exception ex) { throw new InvalidOperationException("Failed to launch native send helper", ex); }
 
         using (child)
         {
-            var outcome = NativeSendOutcome.TimedOut;
-            var killed = false;
-            var inputTask = child.WriteStdinLineAndCloseAsync(requestJson);
             try
             {
-                var remainingForInput = limits.Timeout - sw.Elapsed;
-                if (remainingForInput <= TimeSpan.Zero) killed = true;
-                else await inputTask.WaitAsync(remainingForInput, ct);
-            }
-            catch (OperationCanceledException) { killed = true; }
-            catch (TimeoutException) { killed = true; }
-            while (!child.HasExited)
-            {
-                if (killed) break;
-                if (sw.Elapsed >= limits.Timeout) { killed = true; break; }
+                var outcome = NativeSendOutcome.TimedOut;
+                var killed = false;
+                var inputTask = child.WriteStdinLineAndCloseAsync(requestJson);
                 try
                 {
-                    if (child.WorkingSet64 > limits.RamCapBytes)
-                    {
-                        outcome = NativeSendOutcome.KilledRam;
-                        killed = true;
-                        break;
-                    }
+                    var remainingForInput = limits.Timeout - sw.Elapsed;
+                    if (remainingForInput <= TimeSpan.Zero) killed = true;
+                    else await inputTask.WaitAsync(remainingForInput, ct);
                 }
-                catch { }
+                catch (OperationCanceledException) { killed = true; }
+                catch (TimeoutException) { killed = true; }
+                while (!child.HasExited)
+                {
+                    if (killed) break;
+                    if (sw.Elapsed >= limits.Timeout) { killed = true; break; }
+                    try
+                    {
+                        if (child.WorkingSet64 > limits.RamCapBytes)
+                        {
+                            outcome = NativeSendOutcome.KilledRam;
+                            killed = true;
+                            break;
+                        }
+                    }
+                    catch { }
 
-                var remaining = limits.Timeout - sw.Elapsed;
-                if (remaining <= TimeSpan.Zero) { killed = true; break; }
-                try { await Task.Delay(remaining < limits.Poll ? remaining : limits.Poll, ct); }
-                catch (OperationCanceledException) { killed = true; break; }
+                    var remaining = limits.Timeout - sw.Elapsed;
+                    if (remaining <= TimeSpan.Zero) { killed = true; break; }
+                    try { await Task.Delay(remaining < limits.Poll ? remaining : limits.Poll, ct); }
+                    catch (OperationCanceledException) { killed = true; break; }
+                }
+
+                if (!killed)
+                {
+                    var reaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
+                    return new NativeSendRunResult(
+                        NativeSendOutcome.Exited,
+                        child.ExitCode,
+                        await child.ReadStdOutAsync(),
+                        await child.ReadStdErrAsync(),
+                        reaped,
+                        sw.Elapsed);
+                }
+
+                child.Kill(entireProcessTree: true);
+                var childReaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
+                try { await inputTask.WaitAsync(limits.ReapGrace, CancellationToken.None); } catch { }
+                if (!childReaped)
+                    _log.LogCritical("Native RGB send child could not be confirmed reaped");
+                return new NativeSendRunResult(outcome, null, "", "", childReaped, sw.Elapsed);
             }
-
-            if (!killed)
+            catch (NativeSendChildUnreapedException) { throw; }
+            catch
             {
-                var reaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
-                return new NativeSendRunResult(
-                    NativeSendOutcome.Exited,
-                    child.ExitCode,
-                    await child.ReadStdOutAsync(),
-                    await child.ReadStdErrAsync(),
-                    reaped,
-                    sw.Elapsed);
+                // Once Process.Start succeeds, every unexpected supervision failure must still prove
+                // process exit. Dispose alone only performs a best-effort kill and cannot establish that.
+                child.Kill(entireProcessTree: true);
+                if (!await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None))
+                    throw new NativeSendChildUnreapedException();
+                throw;
             }
-
-            child.Kill(entireProcessTree: true);
-            var childReaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
-            try { await inputTask.WaitAsync(limits.ReapGrace, CancellationToken.None); } catch { }
-            if (!childReaped)
-                _log.LogCritical("Native RGB send child could not be confirmed reaped");
-            return new NativeSendRunResult(outcome, null, "", "", childReaped, sw.Elapsed);
         }
     }
 
@@ -153,6 +178,8 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
         psi.ArgumentList.Add(helperDll);
         psi.ArgumentList.Add(operation);
         psi.ArgumentList.Add(Math.Clamp((int)Math.Ceiling(limits.Timeout.TotalMilliseconds), 100, 600_000).ToString());
+        psi.ArgumentList.Add(limits.RamCapBytes.ToString());
+        psi.ArgumentList.Add(Math.Clamp((int)Math.Ceiling(limits.CpuLimit.TotalSeconds), 1, 600).ToString());
         return psi;
     }
 }

@@ -11,7 +11,8 @@ public class RgbLibServiceUnloadTests
 {
     sealed class TestHandle : RgbLibWalletHandle
     {
-        public TestHandle(TimeSpan disposeTimeout) : base("test-wallet", disposeTimeout) { }
+        public TestHandle(TimeSpan disposeTimeout, string? walletDir = null)
+            : base("test-wallet", disposeTimeout, walletDir) { }
 
         int _nativeDisposeCount;
         public bool NativeDisposeCalled => Volatile.Read(ref _nativeDisposeCount) > 0;
@@ -163,5 +164,39 @@ public class RgbLibServiceUnloadTests
         var wallets = new ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>>();
         Assert.True(RgbLibService.UnloadFromCache(wallets, "absent", null));
         Assert.False(wallets.ContainsKey("absent"));
+    }
+
+    [Fact]
+    public async Task DisposalCanCrossAMarkerOnlyAfterTakingNativeAccessExclusively()
+    {
+        var walletDir = Path.Combine(Path.GetTempPath(), $"rgb-dispose-lease-{Guid.NewGuid():N}");
+        try
+        {
+            using var parent = RgbNativeSendLease.AcquireParent(walletDir);
+            var handle = new TestHandle(TimeSpan.FromMilliseconds(200), walletDir);
+            Task<bool> foreignDispose;
+            using (ExecutionContext.SuppressFlow())
+                foreignDispose = Task.Run(() =>
+                {
+                    handle.Dispose();
+                    return handle.NativeWalletFreed;
+                });
+
+            Assert.True(await foreignDispose);
+            Assert.True(handle.NativeDisposeCalled);
+            parent.ClearActiveMarker(walletDir);
+        }
+        finally
+        {
+            try { if (Directory.Exists(walletDir)) Directory.Delete(walletDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void DeferredDisposalIsCoalescedPerHandle()
+    {
+        var handle = new TestHandle(TimeSpan.FromMilliseconds(200));
+        Assert.True(handle.TryStartDeferredDispose());
+        Assert.False(handle.TryStartDeferredDispose());
     }
 }

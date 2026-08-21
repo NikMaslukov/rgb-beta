@@ -17,4 +17,18 @@ public static class RgbConfigBounds
 
     public const int MinConfirmationsMin = 1;
     public const int MinConfirmationsMax = 100;
+
+    public static bool ArePaymentMethodValuesValid(
+        int utxoCount, int utxoSize, int minConfirmations) =>
+        utxoCount is >= UtxoCountMin and <= UtxoCountMax
+        && utxoSize is >= UtxoSizeMin and <= UtxoSizeMax
+        && minConfirmations is >= MinConfirmationsMin and <= MinConfirmationsMax;
+
+    public static void EnsurePaymentMethodValuesValid(
+        int utxoCount, int utxoSize, int minConfirmations)
+    {
+        if (!ArePaymentMethodValuesValid(utxoCount, utxoSize, minConfirmations))
+            throw new InvalidOperationException(
+                "Stored RGB configuration is outside the supported safety bounds; save valid store settings before continuing");
+    }
 }

@@ -133,7 +133,6 @@ public class RGBAllocationViewModel
 public class RGBTransfersViewModel : StoreViewModel
 {
     public string? SelectedAssetId { get; set; }
-    public List<RGBAssetViewModel> Assets { get; set; } = [];
     public List<RGBTransferViewModel> Transfers { get; set; } = [];
 }
 
@@ -196,6 +195,7 @@ public class RGBSendAssetViewModel : StoreViewModel
     public string AssetId { get; set; } = "";
 
     [Required]
+    [StringLength(TransportEndpointValidator.MaxRgbInvoiceLength)]
     [Display(Name = "RGB Invoice")]
     public string RgbInvoice { get; set; } = "";
 

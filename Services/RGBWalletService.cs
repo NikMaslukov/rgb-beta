@@ -287,7 +287,12 @@ public class RGBWalletService : IRGBWalletService
         await sendLock.WaitAsync(ct);
         try
         {
-        return await CreateColorableUtxosInternalAsync(walletId, count, size, ct);
+            var wallet = await GetWalletOrThrow(walletId, ct);
+            var walletDir = Path.Combine(
+                _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network), wallet.MasterFingerprint);
+            using var operationLease = AcquireNativeSendParentLease(walletDir);
+            try { return await CreateColorableUtxosInternalAsync(walletId, count, size, ct); }
+            finally { operationLease.ClearActiveMarker(walletDir); }
         }
         finally { sendLock.Release(); }
     }
@@ -516,9 +521,10 @@ public class RGBWalletService : IRGBWalletService
         var wallet = await GetWalletOrThrow(walletId, ct);
         // Background refresh: skip if a send holds the lock — the send's own write-ahead
         // covers state mutation; a concurrent refresh would either block it or race the Stock.
-        return await _sendCoordinator.TryWithSendLockAsync(walletId, async () =>
+        return await _sendCoordinator.TryWithSendLockAsync(walletId, async markedByThisRefresh =>
         {
-            await ReconcileWalletRecoveryAsync(wallet, ct);
+            await ReconcileWalletRecoveryAsync(wallet, ct,
+                durableRecoveryWasPending: !markedByThisRefresh);
             // The one place a quarantine this call did not set is discharged, and the reason both halves of
             // its position are load-bearing. INSIDE the delegate: the coordinator releases the send lock
             // before returning, so a clear placed after the call would commit unlocked, and because
@@ -536,10 +542,20 @@ public class RGBWalletService : IRGBWalletService
         return await _rgbLib.ListTransfersAsync(walletId, assetId, ct);
     }
 
-    const int RgbLibTransferStatusWaitingCounterparty = 0;
-    const int RgbLibTransferStatusWaitingConfirmations = 1;
+    internal async Task<List<RgbMatchedTransfer>> GetIncomingTransfersForRecipientsAsync(
+        string walletId, IReadOnlyCollection<string> recipientIds, string? assetId,
+        CancellationToken ct = default)
+    {
+        await GetWalletOrThrow(walletId, ct);
+        return await _rgbLib.ListIncomingTransfersForRecipientsAsync(
+            walletId, recipientIds, assetId, ct);
+    }
+
+    const int RgbLibTransferStatusInitiated = 5;
+    const int RgbLibTransferStatusWaitingCounterparty = 1;
     const int RgbLibTransferStatusFailed = 4;
     internal const int StagedRecoveryBatchSize = 64;
+    internal const int StagedRecoveryMaxRowsPerAttempt = 4_096;
 
     internal static async Task<IReadOnlyList<int>> FindOrphanedOutgoingBatchIndicesAsync(
         string dbPath, CancellationToken ct = default)
@@ -561,11 +577,11 @@ public class RGBWalletService : IRGBWalletService
             FROM batch_transfer AS bt
             INNER JOIN asset_transfer AS atx ON atx.batch_transfer_idx = bt.idx
             INNER JOIN transfer AS t ON t.asset_transfer_idx = atx.idx
-            WHERE bt.status = @waiting AND t.incoming = 0
+            WHERE bt.status = @initiated AND t.incoming = 0
             ORDER BY bt.idx
             LIMIT @limit
             """;
-        cmd.Parameters.AddWithValue("@waiting", RgbLibTransferStatusWaitingCounterparty);
+        cmd.Parameters.AddWithValue("@initiated", RgbLibTransferStatusInitiated);
         cmd.Parameters.AddWithValue("@limit", StagedRecoveryBatchSize);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -573,45 +589,457 @@ public class RGBWalletService : IRGBWalletService
         return found;
     }
 
-    async Task ReconcileWalletRecoveryAsync(RGBWallet wallet, CancellationToken ct)
+    internal static async Task<int?> FindOutgoingBatchStatusAsync(
+        string dbPath, int batchTransferIdx, CancellationToken ct = default)
+    {
+        if (!File.Exists(dbPath)) return null;
+        var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly
+        };
+        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(builder.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT bt.status
+            FROM batch_transfer AS bt
+            WHERE bt.idx = @idx
+              AND EXISTS (
+                  SELECT 1
+                  FROM asset_transfer AS atx
+                  INNER JOIN transfer AS t ON t.asset_transfer_idx = atx.idx
+                  WHERE atx.batch_transfer_idx = bt.idx AND t.incoming = 0)
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@idx", batchTransferIdx);
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value == null || value == DBNull.Value ? null : Convert.ToInt32(value);
+    }
+
+    internal static async Task<bool> HasOutgoingBatchStatusAsync(
+        string dbPath, int status, CancellationToken ct = default)
+    {
+        if (!File.Exists(dbPath)) return false;
+        var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly
+        };
+        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(builder.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT EXISTS (
+                SELECT 1
+                FROM batch_transfer AS bt
+                INNER JOIN asset_transfer AS atx ON atx.batch_transfer_idx = bt.idx
+                INNER JOIN transfer AS t ON t.asset_transfer_idx = atx.idx
+                WHERE bt.status = @status AND t.incoming = 0)
+            """;
+        cmd.Parameters.AddWithValue("@status", status);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(ct)) != 0;
+    }
+
+    internal static async Task DrainOrphanedOutgoingBatchesAsync(
+        IReadOnlyList<int> firstPage,
+        Func<Task<IReadOnlyList<int>>> findNextPage,
+        Func<int, Task> failBatch)
+    {
+        var page = firstPage;
+        var processed = 0;
+        while (page.Count != 0)
+        {
+            if (processed + page.Count > StagedRecoveryMaxRowsPerAttempt)
+                throw new RgbWalletQuarantinedException(
+                    "staged-send recovery reached its per-attempt work bound; remaining rows will retry");
+
+            foreach (var batchTransferIdx in page)
+                await failBatch(batchTransferIdx);
+            processed += page.Count;
+
+            var next = await findNextPage();
+            if (next.SequenceEqual(page))
+                throw new RgbWalletQuarantinedException(
+                    "staged-send recovery made no durable progress");
+            page = next;
+        }
+    }
+
+    async Task ReconcileWalletRecoveryAsync(RGBWallet wallet, CancellationToken ct,
+        RgbNativeSendLease? operationLease = null, bool durableRecoveryWasPending = false)
     {
         var walletDataDir = _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network);
         var walletDir = Path.Combine(walletDataDir, wallet.MasterFingerprint);
         var dbPath = Path.Combine(walletDir, "rgb_lib_db");
         var journalPath = RgbSendRecoveryJournal.PathFor(walletDataDir, wallet.MasterFingerprint);
-        var phase = RgbSendRecoveryJournal.Read(journalPath);
-        var orphans = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
 
-        // Once send_end was entered, reconcile first: it may have committed even if its caller
-        // never observed success. Settlement remains skipped while this method owns the wallet
-        // lock. A surviving status-0 batch is then failed through rgb-lib itself, never by raw SQL.
-        if (phase == RgbSendRecoveryPhase.SendEndIndeterminate)
+        var durableRecoveryObserved = operationLease != null
+            || durableRecoveryWasPending
+            || File.Exists(journalPath);
+        if (operationLease == null && !durableRecoveryObserved && !RgbNativeSendLease.Exists(walletDir))
         {
+            IReadOnlyList<int> probe;
+            using (RgbNativeSendLease.AcquireWalletAccess(walletDir))
+                probe = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
+            if (probe.Count == 0)
+            {
+                // Healthy refreshes use normal native serialization. Publishing a helper marker here
+                // would reject unrelated checkout and UI calls throughout every background poll.
+                await _rgbLib.RefreshAsync(wallet.Id, ct);
+                return;
+            }
+            durableRecoveryObserved = true;
+        }
+
+        // Parse before publishing a recovery marker. A truncated or corrupt journal must fail closed,
+        // but it must not manufacture a second durable reason that blocks every native read forever.
+        var recovery = RgbSendRecoveryJournal.Read(journalPath);
+        using var acquiredLease = operationLease == null ? AcquireNativeSendRecoveryLease(walletDir) : null;
+        var nativeSendLease = operationLease ?? acquiredLease!;
+        var completed = false;
+        var markerOnlyProven = false;
+        try
+        {
+            var phase = recovery?.Phase;
+            var orphans = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
+            durableRecoveryObserved |= orphans.Count != 0 || phase != null;
+            // NeedsRecovery is also the generic write-ahead for an ordinary refresh. It decides that
+            // reconciliation must run, but is not evidence that send_begin ever staged anything. Once
+            // recovery owns both cross-process files, only a journal or an Initiated row justifies
+            // retaining the worker marker after another transient refresh failure.
+            markerOnlyProven = phase == null && orphans.Count == 0;
+
+            // Once send_end was entered, reconcile first: it may have committed even if its caller
+            // never observed success. Settlement remains skipped while this method owns the wallet
+            // lock. An exact journal first replays a surviving Initiated batch; if that reaped replay
+            // proves the proxy already consumed the recipient ID but status 5 remains, it is safely failed.
+            if (phase == RgbSendRecoveryPhase.SendEndIndeterminate)
+            {
+                if (recovery is { HasSendEndReplay: true })
+                {
+                    var preRefreshStatus = await FindOutgoingBatchStatusAsync(
+                        dbPath, recovery.BatchTransferIdx!.Value, ct);
+                    if (preRefreshStatus == RgbLibTransferStatusWaitingCounterparty)
+                    {
+                        ValidateRecoveryPsbt(
+                            recovery.SignedPsbt!, recovery.RawTransaction!,
+                            recovery.TransactionId!, wallet.Network);
+                        RgbSendRecoveryJournal.RestoreAndFsyncAckBroadcastArtifacts(
+                            walletDir, recovery.TransactionId!, recovery.SignedPsbt!);
+                    }
+                }
+                await _rgbLib.RefreshAsync(wallet.Id, ct);
+                orphans = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
+
+                // Older phase-only journals, and exact journals written without a signed PSBT, cannot
+                // restore the artifact beta.30 needs after an ACK. Never accept or delete such a journal
+                // while its status-1 transfer may still need to broadcast. With no batch index the legacy
+                // format cannot distinguish its row from another outbound transfer, so ambiguity is kept
+                // quarantined in the fail-closed direction.
+                if (recovery is not { HasSendEndReplay: true })
+                {
+                    var hasExactTransaction = recovery is { HasExactTransactionRecovery: true };
+                    var exactStatus = hasExactTransaction
+                        ? await FindOutgoingBatchStatusAsync(
+                            dbPath, recovery!.BatchTransferIdx!.Value, ct)
+                        : null;
+                    var anyWaitingCounterparty = !hasExactTransaction
+                        && await HasOutgoingBatchStatusAsync(
+                            dbPath, RgbLibTransferStatusWaitingCounterparty, ct);
+                    if (ShouldQuarantineIncompleteAckRecovery(
+                            hasSendEndReplay: false,
+                            hasExactTransaction,
+                            exactStatus,
+                            anyWaitingCounterparty))
+                        throw new RgbWalletQuarantinedException(
+                            "send_end recovery cannot prove the ACK-broadcast PSBT is durable");
+                }
+
+                if (recovery is { HasExactTransactionRecovery: true })
+                {
+                    var status = await FindOutgoingBatchStatusAsync(
+                        dbPath, recovery.BatchTransferIdx!.Value, ct);
+                    if (status == null)
+                        throw new RgbWalletQuarantinedException(
+                            "send_end recovery cannot find its outbound batch");
+
+                    // For this plugin's non-donation flow beta.30 moves Initiated to
+                    // WaitingCounterparty without broadcasting. Exact replay is still preferable to
+                    // failure: it completes the already-signed transfer deterministically. The native
+                    // refresh path remains responsible for the ACK-gated broadcast.
+                    if (status == RgbLibTransferStatusInitiated)
+                    {
+                        if (!recovery.HasSendEndReplay)
+                            throw new RgbWalletQuarantinedException(
+                                "send_end recovery lacks the signed PSBT required to finish an Initiated batch");
+                        ValidateRecoveryPsbt(
+                            recovery.SignedPsbt!, recovery.RawTransaction!,
+                            recovery.TransactionId!, wallet.Network);
+                        nativeSendLease.PrepareWorkerReplay(walletDir);
+                        string? sendEndResult = null;
+                        var replayFailedAfterReap = false;
+                        try
+                        {
+                            sendEndResult = await RunNativeSendIsolatedAsync(
+                                wallet, "send-end", recipientMapJson: null, feeRate: 1,
+                                minConfirmations: 1, recovery.SignedPsbt, ct);
+                        }
+                        catch (NativeSendReapedFailureException ex)
+                        {
+                            // beta.30 uploads before committing status 1. If the helper dies in that
+                            // interval, replay gets RecipientIDAlreadyUsed while the authoritative row
+                            // remains Initiated. A confirmed-reaped helper makes failing that row safe;
+                            // an unreaped or pre-launch failure is deliberately not caught here.
+                            replayFailedAfterReap = true;
+                            _log.LogWarning(ex,
+                                "Exact send_end replay failed after child reap for wallet {WalletId}; "
+                                + "the authoritative transfer status will decide recovery",
+                                wallet.Id);
+                        }
+                        finally
+                        {
+                            try { nativeSendLease.ReclaimWorkerAfterReplay(walletDir); }
+                            catch { throw new NativeSendChildUnreapedException(); }
+                        }
+                        status = await FindOutgoingBatchStatusAsync(
+                            dbPath, recovery.BatchTransferIdx.Value, ct);
+                        if (status == null)
+                            throw new RgbWalletQuarantinedException(
+                                "send_end replay lost its outbound batch");
+
+                        if (!replayFailedAfterReap)
+                        {
+                            ValidateSendEndTransactionId(sendEndResult!, recovery.TransactionId!);
+                            RgbSendRecoveryJournal.RestoreAndFsyncAckBroadcastArtifacts(
+                                walletDir, recovery.TransactionId!, recovery.SignedPsbt!);
+                        }
+
+                        if (ShouldFailInitiatedAfterReapedReplayFailure(
+                                status.Value, replayFailedAfterReap))
+                        {
+                            // Leave status 5 in the refreshed orphan page below. The bounded sweep
+                            // changes it to Failed and the final empty-page barrier proves progress.
+                        }
+                        else
+                        {
+                            await _rgbLib.RefreshAsync(wallet.Id, ct);
+                            status = await FindOutgoingBatchStatusAsync(
+                                dbPath, recovery.BatchTransferIdx.Value, ct);
+                            if (status == null)
+                                throw new RgbWalletQuarantinedException(
+                                    "send_end recovery lost its outbound batch after refresh");
+                        }
+
+                        if (status == RgbLibTransferStatusInitiated && !replayFailedAfterReap)
+                            throw new RgbWalletQuarantinedException(
+                                "replayed send_end left its outbound batch Initiated");
+                    }
+
+                    if (status != RgbLibTransferStatusInitiated
+                        && ShouldRebroadcastRecoveredTransaction(status.Value))
+                    {
+                        await EnsureRecoveryTransactionBroadcastAsync(
+                            wallet.Network,
+                            recovery.RawTransaction!,
+                            recovery.TransactionId!,
+                            ct);
+                    }
+                    else if (status != RgbLibTransferStatusInitiated
+                             && !IsRecoveredTransactionSafeWithoutBroadcast(status.Value))
+                    {
+                        throw new RgbWalletQuarantinedException(
+                            $"send_end recovery found unknown transfer status {status}");
+                    }
+
+                    // send_end replay may have moved the batch out of Initiated. Refresh the orphan
+                    // page so the generic staged cleanup below cannot fail an already-broadcast send.
+                    orphans = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
+                }
+                // The prior release's phase-only journal has no exact PSBT to replay. In beta.30's
+                // non-donation path an Initiated row proves send_end did not reach its status update and
+                // did not broadcast, so it is safe to fail through the same bounded sweep as Staged.
+            }
+
+            // A missing journal does not mean there is no staging: an older build or a crash before
+            // managed send_begin returned can leave only rgb-lib's durable Initiated rows. Those rows
+            // are authoritative. WaitingCounterparty is a live protocol state and must never be swept.
+            await DrainOrphanedOutgoingBatchesAsync(
+                orphans,
+                () => FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct),
+                batchTransferIdx => _rgbLib.FailTransfersAsync(wallet.Id, batchTransferIdx,
+                    noAssetOnly: false, skipSync: true, ct));
+
             await _rgbLib.RefreshAsync(wallet.Id, ct);
-            orphans = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
-        }
 
-        // A missing journal does not mean there is no staging: an older build or a crash before
-        // managed send_begin returned can leave only rgb-lib's durable status-0 rows. Those rows
-        // are authoritative. Incoming status-0 receives are excluded by the query.
-        foreach (var batchTransferIdx in orphans)
+            var stillIndeterminate = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
+            if (stillIndeterminate.Count != 0)
+                throw new RgbWalletQuarantinedException(
+                    "outbound staged transfers remain after reconciliation");
+
+            // ClearNeedsRecovery fsyncs the Stock before committing the database flag. The operation
+            // lease remains owned through marker and journal cleanup, so every crash ordering either
+            // retries an idempotent reconciliation or retains a quarantine marker.
+            await ClearNeedsRecoveryAsync(wallet.Id, ct);
+            nativeSendLease.ClearActiveMarker(walletDir);
+            RgbSendRecoveryJournal.Delete(journalPath);
+            completed = true;
+        }
+        finally
         {
-            await _rgbLib.FailTransfersAsync(wallet.Id, batchTransferIdx,
-                noAssetOnly: false, skipSync: true, ct);
+            // A marker with no journal, quarantine, or Initiated row can only predate staged mutation.
+            // Do not turn an unrelated refresh outage into a wallet-wide helper quarantine.
+            if (!completed && markerOnlyProven)
+                nativeSendLease.ClearActiveMarker(walletDir);
+        }
+    }
+
+    static RgbNativeSendLease AcquireNativeSendRecoveryLease(string walletDir)
+    {
+        try { return RgbNativeSendLease.AcquireRecovery(walletDir); }
+        catch (IOException ex)
+        {
+            throw new RgbWalletQuarantinedException(
+                "native send helper is still running — wallet recovery remains quarantined", ex);
+        }
+    }
+
+    static RgbNativeSendLease AcquireNativeSendParentLease(string walletDir)
+    {
+        try { return RgbNativeSendLease.AcquireParent(walletDir); }
+        catch (IOException ex)
+        {
+            throw new RgbWalletQuarantinedException(
+                "another process owns this RGB wallet — refusing to stage a send", ex);
+        }
+    }
+
+    // beta.30 status 1 is WaitingCounterparty: broadcasting there bypasses the recipient's ACK/NACK.
+    // Status 2/6 proves refresh already crossed the ACK-gated native broadcast transition. Settled is
+    // already confirmed, so it needs no rebroadcast either.
+    internal static bool ShouldRebroadcastRecoveredTransaction(int status) => status is 2 or 6;
+
+    // WaitingCounterparty is the expected post-send_end state until the recipient ACKs. Settled and
+    // Failed are also complete protocol decisions that require no managed broadcast. Initiated is not
+    // accepted here: the exact replay above must first move it out of status 5.
+    internal static bool IsRecoveredTransactionSafeWithoutBroadcast(int status) => status is 1 or 3 or 4;
+
+    internal static bool ShouldQuarantineIncompleteAckRecovery(
+        bool hasSendEndReplay, bool hasExactTransaction, int? exactStatus,
+        bool anyWaitingCounterparty) =>
+        !hasSendEndReplay
+        && (hasExactTransaction
+            ? exactStatus == RgbLibTransferStatusWaitingCounterparty
+            : anyWaitingCounterparty);
+
+    internal static bool ShouldFailInitiatedAfterReapedReplayFailure(
+        int status, bool replayFailedAfterReap) =>
+        replayFailedAfterReap && status == RgbLibTransferStatusInitiated;
+
+    async Task EnsureRecoveryTransactionBroadcastAsync(
+        string walletNetwork, string rawTransaction, string transactionId, CancellationToken ct)
+    {
+        var settings = RGBConfiguration.GetNetworkSettings(walletNetwork);
+        var allowInsecure = NetworkSettings.AllowsPlainElectrum(walletNetwork);
+        using var chain = BitcoinChainClientFactory.Create(
+            settings.ElectrumUrl, allowInsecure: allowInsecure);
+        await chain.ConnectAsync(ct);
+        await EnsureTransactionBroadcastAsync(
+            chain, NetworkHelper.GetNetwork(walletNetwork), rawTransaction, transactionId, ct);
+    }
+
+    internal static async Task EnsureTransactionBroadcastAsync(
+        IBitcoinChainClient chain,
+        Network network,
+        string rawTransaction,
+        string transactionId,
+        CancellationToken ct = default)
+    {
+        var parsed = Transaction.Parse(rawTransaction, network);
+        var computedTransactionId = parsed.GetHash().ToString();
+        if (!string.Equals(computedTransactionId, transactionId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "recovery transaction does not match its durable transaction id");
+
+        Exception? initialLookupError = null;
+        try
+        {
+            var existing = Transaction.Parse(await chain.GetRawTransactionAsync(transactionId, ct), network);
+            if (!string.Equals(existing.GetHash().ToString(), transactionId,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("chain server returned the wrong recovery transaction");
+            return;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            initialLookupError = ex;
         }
 
-        await _rgbLib.RefreshAsync(wallet.Id, ct);
+        try
+        {
+            var broadcastTransactionId = await chain.BroadcastTransactionAsync(rawTransaction, ct);
+            if (!string.Equals(broadcastTransactionId, transactionId,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("chain server returned the wrong broadcast transaction id");
+            return;
+        }
+        catch (Exception broadcastError) when (broadcastError is not OperationCanceledException)
+        {
+            // Electrum/Esplora may report an already-known transaction as a broadcast error. Verify
+            // after that response so retries remain idempotent without accepting an unrelated txid.
+            try
+            {
+                var existing = Transaction.Parse(
+                    await chain.GetRawTransactionAsync(transactionId, ct), network);
+                if (string.Equals(existing.GetHash().ToString(), transactionId,
+                        StringComparison.OrdinalIgnoreCase))
+                    return;
+            }
+            catch (Exception verificationError) when (verificationError is not OperationCanceledException)
+            {
+                throw new InvalidOperationException(
+                    "RGB recovery could neither verify nor broadcast its transaction",
+                    new AggregateException(initialLookupError!, broadcastError, verificationError));
+            }
 
-        var stillIndeterminate = await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct);
-        if (stillIndeterminate.Count != 0)
-            throw new RgbWalletQuarantinedException(
-                "outbound staged transfers remain after reconciliation");
+            throw new InvalidOperationException(
+                "RGB recovery broadcast could not be verified",
+                new AggregateException(initialLookupError!, broadcastError));
+        }
+    }
 
-        // ClearNeedsRecovery fsyncs the Stock before committing the database flag. The journal
-        // is deleted last, so every crash ordering either retries an idempotent reconciliation or
-        // retains a quarantine marker.
-        await ClearNeedsRecoveryAsync(wallet.Id, ct);
-        RgbSendRecoveryJournal.Delete(journalPath);
+    internal static void ValidateRecoveryPsbt(
+        string signedPsbt, string rawTransaction, string transactionId, string networkName)
+    {
+        try
+        {
+            var psbt = PSBT.Parse(signedPsbt, NetworkHelper.GetNetwork(networkName));
+            if (!psbt.TryFinalize(out var errors))
+                throw new InvalidDataException(
+                    $"recovery PSBT cannot be finalized: {string.Join("; ", errors)}");
+            var transaction = psbt.ExtractTransaction();
+            if (!string.Equals(transaction.ToHex(), rawTransaction, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(transaction.GetHash().ToString(), transactionId,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    "recovery PSBT does not match the durable transaction identity");
+        }
+        catch (InvalidDataException) { throw; }
+        catch (Exception ex)
+        {
+            throw new InvalidDataException("recovery PSBT is invalid", ex);
+        }
+    }
+
+    internal static void ValidateSendEndTransactionId(string sendEndResult, string transactionId)
+    {
+        using var document = JsonDocument.Parse(sendEndResult);
+        var returned = document.RootElement.TryGetProperty("txid", out var txidProperty)
+            ? txidProperty.GetString() ?? sendEndResult
+            : sendEndResult;
+        if (!string.Equals(returned.Trim('"'), transactionId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException(
+                "send_end returned a transaction id that differs from the durable signed transaction");
     }
 
     public async Task<bool> CleanupExpiredTransfersAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct = default)
@@ -638,26 +1066,34 @@ public class RGBWalletService : IRGBWalletService
     async Task<int> CleanupExpiredTransfersInternalAsync(string walletId, string walletNetwork, string masterFingerprint, CancellationToken ct)
     {
         var walletDataDir = _rgbLib.GetWalletDataDir(walletId, walletNetwork);
-        var dbPath = Path.Combine(walletDataDir, masterFingerprint, "rgb_lib_db");
+        var walletDir = Path.Combine(walletDataDir, masterFingerprint);
+        var dbPath = Path.Combine(walletDir, "rgb_lib_db");
         if (!File.Exists(dbPath)) return 0;
 
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var connStr = $"Data Source={dbPath}";
-        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = $"UPDATE batch_transfer SET status = {RgbLibTransferStatusFailed} WHERE status = {RgbLibTransferStatusWaitingConfirmations} AND expiration IS NOT NULL AND expiration < @now";
-        cmd.Parameters.AddWithValue("@now", now);
-        var count = await cmd.ExecuteNonQueryAsync(ct);
-        if (count > 0)
+        // The raw SQLite write is native wallet state too. Own the same cross-process interval as
+        // sends and deletion so it cannot flip an ACK-pending batch while a helper is reconciling it.
+        using var operationLease = AcquireNativeSendParentLease(walletDir);
+        try
         {
-            _log.LogInformation("Cleaned up {Count} expired blind receive transfers for wallet {WalletId}", count, walletId);
-            // WHY: this runs inside the WithSendLock write-ahead op; a swallowed refresh failure
-            // would let the coordinator clear NeedsRecovery over a possibly-incomplete Stock.
-            // Must propagate so the failure path leaves the wallet quarantined + evicts the handle.
-            await _rgbLib.RefreshAsync(walletId, ct);
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var connStr = $"Data Source={dbPath}";
+            await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"UPDATE batch_transfer SET status = {RgbLibTransferStatusFailed} WHERE status = {RgbLibTransferStatusWaitingCounterparty} AND expiration IS NOT NULL AND expiration < @now";
+            cmd.Parameters.AddWithValue("@now", now);
+            var count = await cmd.ExecuteNonQueryAsync(ct);
+            if (count > 0)
+            {
+                _log.LogInformation("Cleaned up {Count} expired blind receive transfers for wallet {WalletId}", count, walletId);
+                // WHY: this runs inside the WithSendLock write-ahead op; a swallowed refresh failure
+                // would let the coordinator clear NeedsRecovery over a possibly-incomplete Stock.
+                // Must propagate so the failure path leaves the wallet quarantined + evicts the handle.
+                await _rgbLib.RefreshAsync(walletId, ct);
+            }
+            return count;
         }
-        return count;
+        finally { operationLease.ClearActiveMarker(walletDir); }
     }
 
     public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
@@ -868,17 +1304,66 @@ public class RGBWalletService : IRGBWalletService
         // commit fails the wallet survives WITH its lock intact rather than losing exclusivity.
         var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
         await sendLock.WaitAsync(ct);
+        var releaseLock = true;
+        var deletionCommitted = false;
         try
         {
-            await using var ctx = _db.CreateContext();
-            ctx.RGBWallets.Remove(wallet);
-            await ctx.SaveChangesAsync(ct);
+            var walletDataDir = _rgbLib.GetWalletDataDir(walletId, wallet.Network);
+            var walletDir = Path.Combine(walletDataDir, wallet.MasterFingerprint);
+            var journalPath = RgbSendRecoveryJournal.PathFor(
+                walletDataDir, wallet.MasterFingerprint);
+            if (await IsNeedsRecoveryAsync(walletId, ct)
+                || File.Exists(journalPath)
+                || RgbNativeSendLease.Exists(walletDir))
+                throw new RgbWalletQuarantinedException(
+                    "wallet has pending durable recovery and cannot be deleted");
 
-            _rgbLib.UnloadWallet(walletId);
+            // Publish the same cross-process marker as a send, then re-check after publication. This
+            // closes the gap in which another server instance could stage a send between the guard and
+            // row deletion, removing the only row the startup recovery sweep can discover.
+            using var deleteLease = AcquireNativeSendParentLease(walletDir);
+            if (await IsNeedsRecoveryAsync(walletId, ct) || File.Exists(journalPath))
+                throw new RgbWalletQuarantinedException(
+                    "wallet became quarantined before deletion");
+            var dbPath = Path.Combine(walletDir, "rgb_lib_db");
+            if ((await FindOrphanedOutgoingBatchIndicesAsync(dbPath, ct)).Count != 0)
+                throw new RgbWalletQuarantinedException(
+                    "wallet has staged outbound transfers and cannot be deleted");
+            if (!_rgbLib.UnloadWallet(walletId))
+            {
+                // Deletion never launches a child. False means cache construction/disposal was
+                // deferred, not that a native-send worker may still exist, so unwind this attempt.
+                deleteLease.ClearActiveMarker(walletDir);
+                throw new RgbWalletQuarantinedException(
+                    "wallet remained busy while preparing deletion; retry after native access finishes");
+            }
+
+            await using var ctx = _db.CreateContext();
+            var current = await ctx.RGBWallets.FindAsync([walletId], ct)
+                ?? throw new KeyNotFoundException($"wallet {walletId} not found");
+            ctx.RGBWallets.Remove(current);
+            await ctx.SaveChangesAsync(ct);
+            deletionCommitted = true;
+
             _signerProvider.UnloadSigner(walletId);
             _addressCache.TryRemove(walletId, out _);
+            deleteLease.ClearActiveMarker(walletDir);
         }
-        finally { sendLock.Release(); }
+        catch (Exception ex) when (deletionCommitted)
+        {
+            // The authoritative row is already gone. Reporting failure would make the controller
+            // compensate by re-enabling a store whose wallet no longer exists. Cleanup is best effort;
+            // the orphaned data directory and marker are unreachable without a wallet row.
+            _log.LogWarning(ex,
+                "Wallet {WalletId} deletion committed but post-commit cleanup was incomplete",
+                walletId);
+        }
+        catch (NativeSendChildUnreapedException)
+        {
+            releaseLock = false;
+            throw;
+        }
+        finally { if (releaseLock) sendLock.Release(); }
 
         _sendLocks.TryRemove(walletId, out _);
 
@@ -892,7 +1377,12 @@ public class RGBWalletService : IRGBWalletService
         await sendLock.WaitAsync(ct);
         try
         {
-        return await SendBtcInternalAsync(walletId, destinationAddress, amountSats, feeRate, ct);
+            var wallet = await GetWalletOrThrow(walletId, ct);
+            var walletDir = Path.Combine(
+                _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network), wallet.MasterFingerprint);
+            using var operationLease = AcquireNativeSendParentLease(walletDir);
+            try { return await SendBtcInternalAsync(walletId, destinationAddress, amountSats, feeRate, ct); }
+            finally { operationLease.ClearActiveMarker(walletDir); }
         }
         finally { sendLock.Release(); }
     }
@@ -1035,9 +1525,10 @@ public class RGBWalletService : IRGBWalletService
         }
         catch (NativeSendChildUnreapedException)
         {
-            // The child has its own hard self-timeout, so restart eventually recovers safely. Until
-            // then, retaining this wallet's semaphore is the only way to prove that an unconfirmed
-            // worker cannot race refresh, settlement, or another send. Other wallets use other locks.
+            // A parent handle that could not be evicted or a child that could not be reaped makes
+            // continued in-process use indeterminate. Retaining this wallet's semaphore is the only
+            // way to prove it cannot race refresh, settlement, or another send; the durable helper
+            // marker lets restart recover safely. Other wallets use other locks.
             releaseLock = false;
             throw;
         }
@@ -1048,8 +1539,8 @@ public class RGBWalletService : IRGBWalletService
         RGBWallet wallet, string operation, string? recipientMapJson, float feeRate,
         int minConfirmations, string? signedPsbt, CancellationToken ct)
     {
-        if (!_rgbLib.UnloadWallet(wallet.Id))
-            throw new NativeSendChildUnreapedException();
+        var leaseWalletDir = Path.Combine(_rgbLib.GetWalletDataDir(wallet.Id, wallet.Network),
+            wallet.MasterFingerprint);
         var request = JsonSerializer.Serialize(new
         {
             DataDir = _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network),
@@ -1058,25 +1549,31 @@ public class RGBWalletService : IRGBWalletService
             wallet.XpubVanilla,
             wallet.XpubColored,
             wallet.MasterFingerprint,
+            LeaseWalletDir = leaseWalletDir,
+            LeaseToken = RgbNativeSendLease.GetWorkerTokenForCurrentContext(leaseWalletDir),
             MaxAllocationsPerUtxo = ResolveAllocationsPerUtxo(wallet.MaxAllocationsPerUtxo),
             RecipientMapJson = recipientMapJson,
             FeeRate = feeRate,
             MinConfirmations = minConfirmations,
             SignedPsbt = signedPsbt
         });
-        var result = await _nativeSendRunner.RunAsync(operation, request, _cfg.ToNativeSendLimits(), ct);
+        var result = await _nativeSendRunner.RunAsync(operation, request, leaseWalletDir,
+            () => _rgbLib.UnloadWallet(wallet.Id), _cfg.ToNativeSendLimits(), ct);
         if (!result.ChildReaped)
             throw new NativeSendChildUnreapedException();
         if (result.Outcome == NativeSendOutcome.TimedOut)
-            throw new TimeoutException($"RGB {operation} exceeded the native execution deadline");
+            throw new NativeSendReapedFailureException(
+                $"RGB {operation} exceeded the native execution deadline");
         if (result.Outcome == NativeSendOutcome.KilledRam)
-            throw new InvalidOperationException($"RGB {operation} exceeded the native memory limit");
+            throw new NativeSendReapedFailureException(
+                $"RGB {operation} exceeded the native memory limit");
         if (result.ExitCode != 0)
-            throw new RgbLibException(string.IsNullOrWhiteSpace(result.StdErr)
+            throw new NativeSendReapedFailureException(string.IsNullOrWhiteSpace(result.StdErr)
                 ? $"RGB {operation} helper failed with exit code {result.ExitCode}"
                 : result.StdErr.Trim());
         if (string.IsNullOrWhiteSpace(result.StdOut))
-            throw new RgbLibException($"RGB {operation} helper returned no result");
+            throw new NativeSendReapedFailureException(
+                $"RGB {operation} helper returned no result");
         return result.StdOut;
     }
 
@@ -1093,6 +1590,10 @@ public class RGBWalletService : IRGBWalletService
         var allowPrivateEndpoints = wallet.Network.Equals("regtest", StringComparison.OrdinalIgnoreCase)
             && _cfg.AllowPrivateTransportEndpoints;
 
+        if (string.IsNullOrWhiteSpace(rgbInvoice)
+            || rgbInvoice.Length > TransportEndpointValidator.MaxRgbInvoiceLength)
+            throw new InvalidOperationException(
+                $"RGB invoice exceeds the {TransportEndpointValidator.MaxRgbInvoiceLength}-character limit");
         var invoiceData = _rgbLib.DecodeInvoice(rgbInvoice);
         EnsureInvoiceNetworkMatchesWallet(invoiceData.Network, wallet.Network);
         var assets = await _rgbLib.ListAssetsAsync(walletId, ct);
@@ -1114,13 +1615,21 @@ public class RGBWalletService : IRGBWalletService
         _log.LogInformation("SendAsset: {Ticker} amount={Amount} to {RecipientId}",
             asset.Ticker, amount, invoiceData.RecipientId[..Math.Min(30, invoiceData.RecipientId.Length)]);
 
-        // Snapshot the on-disk Stock BEFORE send_begin so the gate scans state untouched by
-        // this send; taken inside one native ExecuteAsync so it cannot race a concurrent write.
-        var stockSnapshot = await _rgbLib.SnapshotStockAsync(walletId, ct);
+        var leaseWalletDir = Path.Combine(walletDataDir, wallet.MasterFingerprint);
+        using var operationLease = AcquireNativeSendParentLease(leaseWalletDir);
+        string? stockSnapshot = null;
         var sendBeginMayHaveRun = false;
         var sendEndStarted = false;
         try
         {
+            // The early check avoids expensive validation for an already-quarantined wallet. This
+            // check is authoritative: the cross-process lease closes the gap before write-ahead.
+            if (await IsNeedsRecoveryAsync(walletId, ct) || File.Exists(recoveryJournal))
+                throw new RgbWalletQuarantinedException(
+                    "wallet became quarantined before staging — refusing to send");
+            // Snapshot the on-disk Stock BEFORE send_begin so the gate scans state untouched by
+            // this send. The operation-wide lease stays published through both helper phases.
+            stockSnapshot = await _rgbLib.SnapshotStockAsync(walletId, ct);
             // Durable before send_begin: managed code may never receive its batch index, so restart
             // recovery must be driven by the wallet DB plus this phase marker, not a local variable.
             await SetNeedsRecoveryAsync(walletId, ct);
@@ -1167,20 +1676,33 @@ public class RGBWalletService : IRGBWalletService
                 throw;
             }
 
-            string txid;
+            var finalizedPsbt = PSBT.Parse(signedPsbt, network);
+            if (!finalizedPsbt.TryFinalize(out var finalizeErrors))
+                throw new RgbIntentVerificationException(
+                    $"signed RGB transaction could not be finalized: {string.Join("; ", finalizeErrors)}");
+            var rawTransaction = finalizedPsbt.ExtractTransaction();
+            var rawTransactionHex = rawTransaction.ToHex();
+            var txid = rawTransaction.GetHash().ToString();
             try
             {
                 // From this durable transition onward, failure is not assumed to mean that
-                // consume_fascia did nothing. Recovery refreshes first and uses rgb-lib's supported
-                // fail/reconciliation API before it can discharge the quarantine.
-                RgbSendRecoveryJournal.Write(recoveryJournal, RgbSendRecoveryPhase.SendEndIndeterminate);
+                // consume_fascia did nothing. Persist the exact transaction and signed PSBT before
+                // send_end so a crash can replay that exact native state transition without re-signing.
+                RgbSendRecoveryJournal.WriteSendEnd(
+                    recoveryJournal, batchTransferIdx, rawTransactionHex, txid, signedPsbt);
                 sendEndStarted = true;
+                RgbSendRecoveryJournal.FsyncPreSendEndArtifacts(leaseWalletDir, txid);
                 var sendEndResult = await RunNativeSendIsolatedAsync(
                     wallet, "send-end", recipientMapJson: null, feeRate, 1, signedPsbt, ct);
-                using var sendEndDocument = JsonDocument.Parse(sendEndResult);
-                txid = sendEndDocument.RootElement.TryGetProperty("txid", out var txidProperty)
-                    ? txidProperty.GetString() ?? sendEndResult
-                    : sendEndResult;
+                ValidateSendEndTransactionId(sendEndResult, txid);
+                RgbSendRecoveryJournal.RestoreAndFsyncAckBroadcastArtifacts(
+                    leaseWalletDir, txid, signedPsbt);
+            }
+            catch (RgbWalletQuarantinedException)
+            {
+                // NativeSendProcessRunner uses this type only when its pre-launch quiescence
+                // callback fails. No child exists to reap, including in the send_end phase.
+                throw;
             }
             catch
             {
@@ -1195,30 +1717,13 @@ public class RGBWalletService : IRGBWalletService
                 throw;
             }
 
-            string? broadcastWarning = null;
-            try
-            {
-                var psbtObj = PSBT.Parse(signedPsbt, network);
-                psbtObj.TryFinalize(out _);
-                var rawTx = psbtObj.ExtractTransaction();
-
-                var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
-                var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
-                using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
-                await electrum.ConnectAsync(ct);
-                await electrum.BroadcastTransactionAsync(rawTx.ToHex(), ct);
-            }
-            catch (Exception ex)
-            {
-                broadcastWarning = "RGB state committed but transaction broadcast failed. It may need to be rebroadcast manually.";
-                _log.LogError(ex, "SendAsset: broadcast failed for txid={Txid}. RGB state committed but tx may not be on chain.", txid);
-            }
-
             _log.LogInformation("SendAsset completed: {Ticker} amount={Amount}, txid={Txid}",
                 asset.Ticker, amount, txid);
 
-            // Clear quarantine only after a successful reconciling refresh (fsync Stock then commit).
-            // A refresh failure leaves the send successful but the wallet sync-pending/quarantined.
+            string? broadcastWarning = null;
+            // beta.30's non-donation flow deliberately waits for the recipient ACK. Refresh owns the
+            // native broadcast transition; broadcasting the extracted Bitcoin transaction here would
+            // bypass NACK protection and can strand the RGB allocation state.
             try
             {
                 await _rgbLib.RefreshAsync(walletId, ct);
@@ -1227,6 +1732,7 @@ public class RGBWalletService : IRGBWalletService
             }
             catch (Exception ex)
             {
+                broadcastWarning = "RGB transfer state is pending automatic recovery.";
                 _log.LogWarning(ex, "SendAsset: post-send refresh failed — wallet {WalletId} left quarantined (sync-pending)", walletId);
                 try { _rgbLib.UnloadWallet(walletId); } catch { }
             }
@@ -1240,13 +1746,22 @@ public class RGBWalletService : IRGBWalletService
                 // A native handle (parent or child) is still unconfirmed. Do not open the wallet
                 // for cleanup concurrently; retain its journal, quarantine, and semaphore.
             }
+            else if (sendException is RgbWalletQuarantinedException
+                     && sendBeginMayHaveRun)
+            {
+                // The current helper was never launched. Its pre-launch quiescence check found an
+                // existing parent-side native call or constructor. Keep the durable staged journal
+                // for normal recovery, but preserve the typed error so SendAssetAsync releases its
+                // semaphore. This applies to both helper phases; sendEndStarted means intent, not launch.
+                try { _rgbLib.UnloadWallet(walletId); } catch { }
+            }
             else if (sendBeginMayHaveRun && !sendEndStarted)
             {
                 try
                 {
                     if (!_rgbLib.UnloadWallet(walletId))
                         throw new NativeSendChildUnreapedException();
-                    await ReconcileWalletRecoveryAsync(wallet, CancellationToken.None);
+                    await ReconcileWalletRecoveryAsync(wallet, CancellationToken.None, operationLease);
                 }
                 catch (NativeSendChildUnreapedException) { throw; }
                 catch (Exception recoveryEx)
@@ -1265,7 +1780,10 @@ public class RGBWalletService : IRGBWalletService
         }
         finally
         {
-            RgbStockDurability.DeleteSnapshot(stockSnapshot);
+            if (stockSnapshot != null) RgbStockDurability.DeleteSnapshot(stockSnapshot);
+            // Absence of the journal means no staged mutation is indeterminate. Remove the marker
+            // while the parent mutex is still held; otherwise restart recovery owns its cleanup.
+            if (!File.Exists(recoveryJournal)) operationLease.ClearActiveMarker(leaseWalletDir);
         }
     }
 
@@ -1322,11 +1840,6 @@ public class RGBWalletService : IRGBWalletService
     async Task RunIntentGateAsync(string walletId, RGBWallet wallet, Network network, string rgbInvoice,
         SendBeginResult parsedSendBegin, long amount, string operatorAssetId, string stockDir, CancellationToken ct)
     {
-        // Burn-prevention: a quarantined wallet may have an incompletely-persisted Stock, so the
-        // native input scan cannot be trusted to see every real allocation. Refuse to sign.
-        if (await IsNeedsRecoveryAsync(walletId, ct))
-            throw new RgbIntentVerificationException("wallet is quarantined pending recovery — refusing to sign");
-
         var details = parsedSendBegin.Details
             ?? throw new RgbIntentVerificationException("send_begin returned no details");
 

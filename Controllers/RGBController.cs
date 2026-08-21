@@ -495,6 +495,8 @@ public class RGBController : Controller
 
         try
         {
+            RgbConfigBounds.EnsurePaymentMethodValuesValid(
+                count, size, config?.MinConfirmations ?? 1);
             var created = await _wallets.CreateColorableUtxosAsync(wallet.Id, count, size);
             TempData["SuccessMessage"] = created > 0 ? $"{created} UTXOs created ({size} sats each)" : "UTXOs already available";
         }
@@ -608,7 +610,8 @@ public class RGBController : Controller
         {
             var result = await _wallets.SendAssetAsync(
                 wallet.Id, model.RgbInvoice.Trim(), model.AssetId, model.Amount, model.FeeRate);
-            var msg = $"Sent {result.AmountSent:N0} {result.AssetTicker} — Txid: {result.Txid}";
+            var msg = $"Initiated {result.AmountSent:N0} {result.AssetTicker} transfer — Txid: {result.Txid}. "
+                      + "The transaction broadcasts after the recipient acknowledges the consignment";
             if (result.BroadcastWarning != null)
                 TempData[WellKnownTempData.ErrorMessage] = $"{msg}. Warning: {result.BroadcastWarning}";
             else
@@ -674,14 +677,8 @@ public class RGBController : Controller
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
-        var assets = await _wallets.ListAssetsAsync(wallet.Id);
-        var assetLookup = assets.ToDictionary(a => a.AssetId, a => a.Ticker);
-
-        var allTransfers = new List<RGBTransferViewModel>();
-        foreach (var asset in assets)
-        {
-            var transfers = await _wallets.GetTransfersAsync(wallet.Id, asset.AssetId);
-            allTransfers.AddRange(transfers.Select(t => new RGBTransferViewModel
+        var transfers = await _wallets.GetTransfersAsync(wallet.Id, assetId);
+        var rows = transfers.Select(t => new RGBTransferViewModel
             {
                 Idx = t.Idx,
                 Status = TransferStatus(t.Status),
@@ -689,16 +686,14 @@ public class RGBController : Controller
                 Amount = t.Amount,
                 Txid = t.Txid,
                 RecipientId = t.RecipientId,
-                AssetTicker = asset.Ticker
-            }));
-        }
+                AssetTicker = t.AssetTicker
+            }).ToList();
 
         return View(new RGBTransfersViewModel
         {
             StoreId = storeId,
             SelectedAssetId = assetId,
-            Assets = assets.Select(a => a.ToViewModel()).ToList(),
-            Transfers = allTransfers.OrderByDescending(t => t.Idx).ToList()
+            Transfers = rows
         });
     }
 
@@ -778,8 +773,14 @@ public class RGBController : Controller
         try
         {
             var store = await _stores.FindStore(storeId);
+            Newtonsoft.Json.Linq.JToken? originalConfig = null;
+            var originallyExcluded = false;
             if (store != null)
             {
+                originalConfig = store.GetPaymentMethodConfig(
+                    RGBPlugin.RGBPaymentMethodId)?.DeepClone();
+                originallyExcluded = store.GetStoreBlob().IsExcluded(RGBPlugin.RGBPaymentMethodId);
+
                 store.SetPaymentMethodConfig(_handlers[RGBPlugin.RGBPaymentMethodId], null);
                 var blob = store.GetStoreBlob();
                 blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, true);
@@ -787,7 +788,32 @@ public class RGBController : Controller
                 await _stores.UpdateStore(store);
             }
 
-            await _wallets.DeleteWalletAsync(wallet.Id);
+            try
+            {
+                await _wallets.DeleteWalletAsync(wallet.Id);
+            }
+            catch (Exception deleteError)
+            {
+                if (store != null)
+                {
+                    try
+                    {
+                        store.SetPaymentMethodConfig(
+                            RGBPlugin.RGBPaymentMethodId, originalConfig);
+                        var blob = store.GetStoreBlob();
+                        blob.SetExcluded(RGBPlugin.RGBPaymentMethodId, originallyExcluded);
+                        store.SetStoreBlob(blob);
+                        await _stores.UpdateStore(store);
+                    }
+                    catch (Exception compensationError)
+                    {
+                        throw new AggregateException(
+                            "Wallet deletion failed and store configuration rollback also failed",
+                            deleteError, compensationError);
+                    }
+                }
+                throw;
+            }
             TempData["SuccessMessage"] = "RGB wallet deleted";
         }
         catch (Exception ex)
@@ -1114,8 +1140,8 @@ public class RGBController : Controller
     }
 
     static string TransferStatus(int s) => s switch {
-        0 => "Waiting Counterparty", 1 => "Waiting Confirmations", 2 => "Waiting Confirmations",
-        3 => "Settled", 4 => "Failed",
+        1 => "Waiting Counterparty", 2 => "Waiting Confirmations",
+        3 => "Settled", 4 => "Failed", 5 => "Initiated", 6 => "Waiting Safe Height",
         _ => $"Unknown ({s})"
     };
 

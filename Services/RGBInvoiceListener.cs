@@ -67,7 +67,9 @@ public class RGBInvoiceListener : IHostedService
         // Subscribe first. Events racing the backlog query can be duplicated, which is harmless; subscribing
         // second permanently missed invoices created between the query and the subscription. A durable sweep
         // replaces the old all-at-once backlog materialization, which itself was unbounded.
-        _subs.Add(_events.SubscribeAsync<InvoiceEvent>(OnInvoice));
+        // Subscribe synchronously: SubscribeAsync inserts an unbounded EventAggregator channel ahead
+        // of this bounded hint queue. OnInvoice is non-blocking and overflow requests a durable sweep.
+        _subs.Add(_events.Subscribe<InvoiceEvent>(OnInvoice));
         _queue.RequestRecovery();
         _worker = PollLoop(_cts.Token);
         return Task.CompletedTask;
@@ -81,11 +83,11 @@ public class RGBInvoiceListener : IHostedService
         if (_worker != null) await _worker;
     }
 
-    Task OnInvoice(InvoiceEvent e)
+    void OnInvoice(InvoiceEvent e)
     {
-        if (e.Name != InvoiceEvent.Created) return Task.CompletedTask;
+        if (e.Name != InvoiceEvent.Created) return;
         if (ShouldEnqueue(e.Invoice)) _queue.TryWrite(e.Invoice.Id);
-        return Task.CompletedTask;
+        return;
     }
 
     async Task PollLoop(CancellationToken ct)
@@ -137,7 +139,8 @@ public class RGBInvoiceListener : IHostedService
         while (true)
         {
             var walletPage = await ctx.RGBWallets.AsNoTracking()
-                .Where(w => w.IsActive && (walletCursor == null || string.Compare(w.Id, walletCursor) > 0))
+                .Where(w => (w.IsActive || w.NeedsRecovery)
+                            && (walletCursor == null || string.Compare(w.Id, walletCursor) > 0))
                 .OrderBy(w => w.Id)
                 .Take(DurableWalletPageSize)
                 .ToListAsync(ct);
@@ -153,6 +156,9 @@ public class RGBInvoiceListener : IHostedService
                         allRecovered = false;
                         continue;
                     }
+                    // Inactive rows are included solely so a staged send cannot become permanently
+                    // undiscoverable. Do not settle invoices or replenish state for a disabled wallet.
+                    if (!w.IsActive) continue;
                     if (!await CleanupExpiredTransfers(w, ct))
                     {
                         allRecovered = false;
@@ -222,6 +228,17 @@ public class RGBInvoiceListener : IHostedService
                 var config = enabled && tok is not null
                     ? tok.ToObject<RGBPaymentMethodConfig>(_blobSerializer)
                     : null;
+
+                // Validation on Greenfield writes cannot repair values persisted by an older vulnerable
+                // build. Refuse those values again at the signing sink, before any rgb-lib or UTXO work.
+                if (config != null && !RgbConfigBounds.ArePaymentMethodValuesValid(
+                        config.UtxoCount, config.UtxoSize, config.MinConfirmations))
+                {
+                    _log.LogWarning(
+                        "Wallet {WalletId}: refusing automatic UTXO creation from out-of-range stored RGB configuration",
+                        w.Id);
+                    continue;
+                }
 
                 var skip = EvaluateReplenishEligibility(
                     walletId: w.Id,
@@ -355,9 +372,17 @@ public class RGBInvoiceListener : IHostedService
         wallet.InvoiceScanCursor = DurableInvoiceScan.NextCursor(
             pending.Select(i => i.Id).ToList(), DurableInvoicePageSize);
 
-        var assetIds = pending.Where(i => !string.IsNullOrEmpty(i.AssetId)).Select(i => i.AssetId!).Distinct().ToList();
-        _log.LogInformation("ProcessTransfers: Checking {Count} asset IDs", assetIds.Count);
-        if (assetIds.Count == 0)
+        var recipientIdsByAsset = pending
+            .Where(i => !string.IsNullOrEmpty(i.AssetId) && !string.IsNullOrEmpty(i.RecipientId))
+            .GroupBy(i => i.AssetId!, StringComparer.Ordinal)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyCollection<string>)g.Select(i => i.RecipientId)
+                    .Distinct(StringComparer.Ordinal).ToList(),
+                StringComparer.Ordinal);
+        _log.LogInformation("ProcessTransfers: Checking {Count} bounded asset/recipient groups",
+            recipientIdsByAsset.Count);
+        if (recipientIdsByAsset.Count == 0)
         {
             await ctx.SaveChangesAsync(ct);
             return true;
@@ -365,20 +390,15 @@ public class RGBInvoiceListener : IHostedService
 
         var pageSucceeded = true;
         var incomingTransfers = new List<(RgbTransfer Transfer, string AssetId)>();
-        foreach (var aid in assetIds)
+        foreach (var (aid, recipientIds) in recipientIdsByAsset)
         {
-            _log.LogInformation("ProcessTransfers: Fetching transfers for asset {AssetId}", aid);
             try
             {
-                var transfers = await _wallets.GetTransfersAsync(walletId, aid);
-                _log.LogInformation("ProcessTransfers: Asset {AssetId} has {Count} transfers",
-                    aid.Length > 30 ? aid[..30] : aid, transfers.Count);
-                foreach (var t in transfers)
-                {
-                    _log.LogInformation("  Transfer idx={Idx} status={Status} kind={Kind} recipientId={RecipientId}",
-                        t.Idx, t.Status, t.Kind, t.RecipientId ?? "null");
-                }
-                incomingTransfers.AddRange(transfers.Where(t => t.Kind is 1 or 2 && t.Status is 1 or 2 or 3).Select(t => (t, aid)));
+                var matches = await _wallets.GetIncomingTransfersForRecipientsAsync(
+                    walletId, recipientIds, aid, ct);
+                incomingTransfers.AddRange(matches
+                    .Where(m => m.Transfer.Kind is 1 or 2 && m.Transfer.Status is 2 or 3)
+                    .Select(m => (m.Transfer, m.AssetId)));
             }
             catch (Exception ex)
             {
@@ -388,19 +408,15 @@ public class RGBInvoiceListener : IHostedService
         }
         _log.LogInformation("ProcessTransfers: Found {Count} incoming transfers to process", incomingTransfers.Count);
 
-        var dedupedTransfers = incomingTransfers.GroupBy(t => (t.AssetId, t.Transfer.Idx)).Select(g => g.First()).ToList();
-
         foreach (var inv in pending)
         {
-            var matchingTransfers = dedupedTransfers
+            var matchingTransfers = incomingTransfers
                 .Where(t => t.Transfer.RecipientId == inv.RecipientId && IsAssetMatch(inv.AssetId, t.AssetId))
                 .Select(t => t.Transfer)
                 .ToList();
             if (matchingTransfers.Count == 0) continue;
 
             var settledTransfers = matchingTransfers.Where(t => t.Status == 3).ToList();
-            var waitingTransfers = matchingTransfers.Where(t => t.Status is 1 or 2).ToList();
-
             var result = EvaluateInvoiceState(inv, matchingTransfers);
             if (result.Decision == SettlementDecision.RejectZeroAmount)
             {
@@ -518,56 +534,37 @@ public class RGBInvoiceListener : IHostedService
             return true;
         }
 
-        List<RgbAsset> assets;
-        try { assets = await _wallets.ListAssetsRawAsync(walletId, ct); }
+        List<RgbMatchedTransfer> matches;
+        try
+        {
+            matches = await _wallets.GetIncomingTransfersForRecipientsAsync(
+                walletId,
+                stillPending.Select(i => i.RecipientId).Distinct(StringComparer.Ordinal).ToList(),
+                assetId: null,
+                ct);
+        }
         catch (Exception ex)
         {
-            _log.LogWarning(ex, "ListAssetsRawAsync failed during asset-discovery scan for wallet {WalletId}", walletId);
+            _log.LogWarning(ex,
+                "Bounded transfer lookup failed during asset-discovery scan for wallet {WalletId}",
+                walletId);
             await ctx.SaveChangesAsync(ct);
             return false;
-        }
-        if (assets.Count == 0)
-        {
-            wallet.DiscoveryScanCursor = nextInvoiceCursor;
-            wallet.DiscoveryAssetPage = 0;
-            await ctx.SaveChangesAsync(ct);
-            return true;
-        }
-        var assetPageCount = (assets.Count + DurableAssetPageSize - 1) / DurableAssetPageSize;
-        var currentAssetPage = Math.Clamp(wallet.DiscoveryAssetPage, 0, assetPageCount - 1);
-        var assetPage = DurableInvoiceScan.RotatingPage(
-            assets, a => a.AssetId, DurableAssetPageSize, currentAssetPage);
-
-        // Prefetch transfers per asset ONCE per scan: with N pending invoices and M assets,
-        // the prior structure made N×M rgb-lib calls every poll. Build the per-asset
-        // transfer list up front and let the per-invoice loop evaluate against the cache.
-        var transfersByAsset = new Dictionary<string, List<RgbTransfer>>(assetPage.Count);
-        var pageSucceeded = true;
-        foreach (var asset in assetPage)
-        {
-            try
-            {
-                transfersByAsset[asset.AssetId] = await _wallets.GetTransfersAsync(walletId, asset.AssetId, ct);
-            }
-            catch (Exception ex)
-            {
-                pageSucceeded = false;
-                _log.LogWarning(ex, "GetTransfersAsync failed for asset {AssetId} during discovery", asset.AssetId);
-            }
         }
 
         foreach (var inv in stillPending)
         {
-            foreach (var asset in assetPage)
+            foreach (var matched in matches.Where(
+                         m => string.Equals(m.Transfer.RecipientId, inv.RecipientId,
+                             StringComparison.Ordinal)))
             {
-                if (!transfersByAsset.TryGetValue(asset.AssetId, out var transfers)) continue;
-
-                var match = EvaluateAssetDiscoveryMatch(inv, asset.AssetId, transfers);
+                var match = EvaluateAssetDiscoveryMatch(
+                    inv, matched.AssetId, [matched.Transfer]);
                 if (match == null) continue;
 
                 if (match.IsZeroAmount)
                 {
-                    _log.LogCritical("Asset-discovery invoice {Id} matched zero-amount transfer — refusing to register asset {AssetId}", inv.Id, asset.AssetId);
+                    _log.LogCritical("Asset-discovery invoice {Id} matched zero-amount transfer — refusing to register asset {AssetId}", inv.Id, matched.AssetId);
                     _events.Publish(new RgbAmountVerificationFailedEvent(inv.Id, walletId, match.Transfer.Idx));
                     break;
                 }
@@ -582,9 +579,9 @@ public class RGBInvoiceListener : IHostedService
                 // Safe to register: positive amount AND not Failed. Let any DB exception
                 // propagate to the outer try in RefreshAllWallets so we retry next poll
                 // WITHOUT having advanced the invoice state.
-                await _wallets.RegisterSingleAssetIfNewAsync(walletId, asset, ct);
+                await _wallets.RegisterSingleAssetIfNewAsync(walletId, matched.Asset, ct);
 
-                inv.ReceivedAssetId = asset.AssetId;
+                inv.ReceivedAssetId = matched.AssetId;
                 inv.ReceivedAmount = match.ReceivedAmount;
                 inv.Txid = match.Transfer.Txid;
                 inv.Status = match.NewStatus;
@@ -592,23 +589,16 @@ public class RGBInvoiceListener : IHostedService
                     inv.SettledAt = DateTimeOffset.UtcNow;
 
                 _log.LogInformation("Asset-discovery invoice {Id} -> {Status} (asset={AssetId}, amount={Amount})",
-                    inv.Id, match.NewStatus, asset.AssetId, match.ReceivedAmount);
+                    inv.Id, match.NewStatus, matched.AssetId, match.ReceivedAmount);
 
                 break;
             }
         }
 
-        if (currentAssetPage + 1 < assetPageCount)
-        {
-            wallet.DiscoveryAssetPage = currentAssetPage + 1;
-        }
-        else
-        {
-            wallet.DiscoveryAssetPage = 0;
-            wallet.DiscoveryScanCursor = nextInvoiceCursor;
-        }
-        await ctx.SaveChangesAsync(ct); // also persists both durable fairness cursors
-        return pageSucceeded;
+        wallet.DiscoveryAssetPage = 0;
+        wallet.DiscoveryScanCursor = nextInvoiceCursor;
+        await ctx.SaveChangesAsync(ct);
+        return true;
     }
 
     internal enum PaymentRegistration
@@ -792,7 +782,7 @@ public class RGBInvoiceListener : IHostedService
 
     internal static SettlementDecision EvaluateTransfer(int transferStatus, long transferAmount, long? invoiceAmount)
     {
-        if (transferStatus is 1 or 2)
+        if (transferStatus == 2)
             return transferAmount > 0 ? SettlementDecision.TransitionWaiting : SettlementDecision.TransitionWaitingNoPayment;
 
         if (transferStatus == 3)
@@ -929,7 +919,7 @@ public class RGBInvoiceListener : IHostedService
         RGBInvoice invoice, IReadOnlyList<RgbTransfer> matchingTransfers)
     {
         var settled = matchingTransfers.Where(t => t.Status == 3).ToList();
-        var waiting = matchingTransfers.Where(t => t.Status is 1 or 2).ToList();
+        var waiting = matchingTransfers.Where(t => t.Status == 2).ToList();
 
         if (settled.Count > 0 && invoice.Status is not RGBInvoiceStatus.Settled)
         {
@@ -994,6 +984,10 @@ public class RGBInvoiceListener : IHostedService
 
         var first = matching[0];
 
+        // beta.30 creates an incoming WaitingCounterparty row (status 1) with the invoice itself.
+        // It is not evidence that a sender has acted, so it must leave the invoice Pending.
+        if (first.Status == 1) return null;
+
         if (first.Status == 4)
         {
             return new AssetDiscoveryMatch(candidateAssetId, first,
@@ -1010,7 +1004,7 @@ public class RGBInvoiceListener : IHostedService
                 ShouldRecordPayment: false, IsZeroAmount: true);
         }
 
-        if (first.Status is 1 or 2)
+        if (first.Status == 2)
         {
             return new AssetDiscoveryMatch(candidateAssetId, first,
                 RGBInvoiceStatus.WaitingConfirmations, first.Amount, first.Txid,

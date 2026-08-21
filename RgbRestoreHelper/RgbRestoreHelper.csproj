@@ -10,5 +10,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="RgbLib" Version="0.3.0-beta.30" />
+    <Compile Include="../Services/RgbNativeSendLease.cs" Link="RgbNativeSendLease.cs" />
+    <Compile Include="../Services/RgbWalletQuarantinedException.cs" Link="RgbWalletQuarantinedException.cs" />
   </ItemGroup>
 </Project>

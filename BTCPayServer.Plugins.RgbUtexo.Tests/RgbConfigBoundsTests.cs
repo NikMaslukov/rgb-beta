@@ -41,6 +41,45 @@ public class RgbConfigBoundsTests
         Assert.Equal(100, RgbConfigBounds.MinConfirmationsMax);
     }
 
+    [Theory]
+    [InlineData(1, 546, 1, true)]
+    [InlineData(20, 100_000, 100, true)]
+    [InlineData(0, 546, 1, false)]
+    [InlineData(21, 546, 1, false)]
+    [InlineData(1, 545, 1, false)]
+    [InlineData(1, 100_001, 1, false)]
+    [InlineData(1, 546, 0, false)]
+    [InlineData(1, 546, 101, false)]
+    public void PersistedConfigurationIsRevalidatedAtRuntime(
+        int count, int size, int confirmations, bool expected)
+    {
+        Assert.Equal(expected,
+            RgbConfigBounds.ArePaymentMethodValuesValid(count, size, confirmations));
+        if (expected)
+            RgbConfigBounds.EnsurePaymentMethodValuesValid(count, size, confirmations);
+        else
+            Assert.Throws<InvalidOperationException>(() =>
+                RgbConfigBounds.EnsurePaymentMethodValuesValid(count, size, confirmations));
+    }
+
+    [Fact]
+    public void LegacyPersistedValuesAreGuardedAtEveryOperationalSink()
+    {
+        var handler = ReadRepoFile(Path.Combine("PaymentHandler", "RGBPaymentMethodHandler.cs"));
+        var controller = ReadRepoFile(Path.Combine("Controllers", "RGBController.cs"));
+        var listener = ReadRepoFile(Path.Combine("Services", "RGBInvoiceListener.cs"));
+
+        Assert.Contains("RgbConfigBounds.EnsurePaymentMethodValuesValid(", handler,
+            StringComparison.Ordinal);
+        Assert.Contains("RgbConfigBounds.EnsurePaymentMethodValuesValid(", controller,
+            StringComparison.Ordinal);
+        var validation = listener.IndexOf(
+            "RgbConfigBounds.ArePaymentMethodValuesValid(", StringComparison.Ordinal);
+        var nativeWork = listener.IndexOf("ListUnspentsAsync(w.Id, ct)", StringComparison.Ordinal);
+        Assert.True(validation >= 0 && nativeWork > validation,
+            "automatic replenishment must reject legacy invalid config before native wallet work");
+    }
+
     // WHY a string-content assertion: the bound values live inside a SQL string literal, which a
     // numeric-literal sweep of the syntax tree cannot see.
     // NOTE this pin IS deliberately sensitive to the statement's text — it counts the @p0/@p1

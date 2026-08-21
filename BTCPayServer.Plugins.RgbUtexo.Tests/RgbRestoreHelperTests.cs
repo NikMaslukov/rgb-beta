@@ -5,6 +5,23 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 public class RgbRestoreHelperTests
 {
     [Fact]
+    public void NativeSendAddressSpaceLimitAddsOnlyTheBoundedBudgetAndHonorsExistingHardLimit()
+    {
+        var type = typeof(Program).Assembly.GetType(
+            "RgbRestoreHelper.NativeSendResourceLimiter", throwOnError: true)!;
+        var compute = type.GetMethod("ComputeUnixAddressSpaceLimit",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        ulong Invoke(ulong current, ulong budget, ulong soft, ulong hard) =>
+            (ulong)compute.Invoke(null, [current, budget, soft, hard])!;
+
+        Assert.Equal<ulong>(600, Invoke(100, 500, ulong.MaxValue, ulong.MaxValue));
+        Assert.Equal<ulong>(550, Invoke(100, 500, ulong.MaxValue, 550));
+        Assert.Equal<ulong>(400, Invoke(100, 500, 400, ulong.MaxValue));
+        Assert.Equal(ulong.MaxValue,
+            Invoke(ulong.MaxValue - 10, 100, ulong.MaxValue, ulong.MaxValue));
+    }
+
+    [Fact]
     public void MissingArgs_ReturnsNonZero()
     {
         using var stdin = new StringReader("pw\n");

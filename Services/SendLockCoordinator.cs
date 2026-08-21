@@ -34,7 +34,7 @@ public sealed class SendLockCoordinator
         await sendLock.WaitAsync(ct);
         try
         {
-            return await WriteAheadAsync(walletId, op, ct);
+            return await WriteAheadAsync(walletId, _ => op(), ct);
         }
         finally { sendLock.Release(); }
     }
@@ -49,24 +49,51 @@ public sealed class SendLockCoordinator
             return false;
         try
         {
-            await WriteAheadAsync<object?>(walletId, async () => { await op(); return null; }, ct);
+            await WriteAheadAsync<object?>(walletId, async _ => { await op(); return null; }, ct);
             return true;
         }
         finally { sendLock.Release(); }
     }
 
+    public async Task<bool> TryWithSendLockAsync(
+        string walletId, Func<bool, Task> op, CancellationToken ct = default)
+    {
+        var sendLock = _locks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
+        if (!await sendLock.WaitAsync(0, ct))
+            return false;
+        var releaseLock = true;
+        try
+        {
+            await WriteAheadAsync<object?>(walletId, async marked =>
+            {
+                await op(marked);
+                return null;
+            }, ct);
+            return true;
+        }
+        catch (NativeSendChildUnreapedException)
+        {
+            // Recovery cannot prove the authorized helper is gone. The durable worker marker blocks
+            // cross-process access; retaining this wallet's in-process semaphore supplies the matching
+            // guarantee for every background operation until restart. Other wallets remain independent.
+            releaseLock = false;
+            throw;
+        }
+        finally { if (releaseLock) sendLock.Release(); }
+    }
+
     // Write-ahead WITHOUT acquiring the send lock: callers that already hold it (in-send
     // refreshes, send_end, setup/restore reconciliation) use this to avoid self-deadlock.
     public async Task WriteAheadInlineAsync(string walletId, Func<Task> op, CancellationToken ct = default)
-        => await WriteAheadAsync<object?>(walletId, async () => { await op(); return null; }, ct);
+        => await WriteAheadAsync<object?>(walletId, async _ => { await op(); return null; }, ct);
 
-    async Task<T> WriteAheadAsync<T>(string walletId, Func<Task<T>> op, CancellationToken ct)
+    async Task<T> WriteAheadAsync<T>(string walletId, Func<bool, Task<T>> op, CancellationToken ct)
     {
         var marked = await _mark(walletId, ct);
         T result;
         try
         {
-            result = await op();
+            result = await op(marked);
         }
         catch
         {

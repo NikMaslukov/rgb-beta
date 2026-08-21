@@ -11,6 +11,10 @@ public static class TransportEndpointValidator
     // 8 is ~8x observed practice: a real RGB invoice carries one transport endpoint, the proxy.
     // A list of ten thousand is a bug on any network, so the cap ignores allowPrivateNetworks.
     public const int MaxTransportEndpoints = 8;
+    public const int MaxTransportEndpointLength = 2_048;
+    public const int MaxTransportEndpointsTotalLength = 8_192;
+    public const int MaxRgbInvoiceLength = 16_384;
+    internal const int MaxConcurrentResolvers = 16;
 
     // The count bounds how many endpoints are tried; only a clock bounds how long that takes,
     // because the platform resolver cannot be interrupted once getaddrinfo is running.
@@ -21,10 +25,15 @@ public static class TransportEndpointValidator
     // and slow-but-successful resolution is the vector this class now bounds. internal, never public:
     // production must have no injection point here.
     static readonly Func<string, CancellationToken, Task<IPAddress[]>> RealResolver = Dns.GetHostAddressesAsync;
+    static SemaphoreSlim _resolverConcurrency = new(MaxConcurrentResolvers, MaxConcurrentResolvers);
 
     internal static Func<string, CancellationToken, Task<IPAddress[]>> Resolver { get; set; } = RealResolver;
 
-    internal static void ResetResolver() => Resolver = RealResolver;
+    internal static void ResetResolver()
+    {
+        Resolver = RealResolver;
+        _resolverConcurrency = new SemaphoreSlim(MaxConcurrentResolvers, MaxConcurrentResolvers);
+    }
 
     public static async Task<List<string>> ValidateAsync(
         List<string> endpoints, bool allowPrivateNetworks = false,
@@ -36,6 +45,19 @@ public static class TransportEndpointValidator
         if (endpoints.Count > MaxTransportEndpoints)
             throw new InvalidOperationException(
                 $"Too many transport endpoints: {endpoints.Count} (maximum {MaxTransportEndpoints})");
+
+        var totalLength = 0;
+        foreach (var endpoint in endpoints)
+        {
+            if (string.IsNullOrWhiteSpace(endpoint)
+                || endpoint.Length > MaxTransportEndpointLength)
+                throw new InvalidOperationException(
+                    $"Transport endpoint exceeds the {MaxTransportEndpointLength}-character limit");
+            totalLength = checked(totalLength + endpoint.Length);
+            if (totalLength > MaxTransportEndpointsTotalLength)
+                throw new InvalidOperationException(
+                    $"Transport endpoints exceed the {MaxTransportEndpointsTotalLength}-character aggregate limit");
+        }
 
         var budget = TimeSpan.FromSeconds(ValidationBudgetSeconds);
         var sw = Stopwatch.StartNew();
@@ -104,14 +126,34 @@ public static class TransportEndpointValidator
         IPAddress[] addresses;
         try
         {
-            var resolveTask = Resolver(host, ct);
-            // WaitAsync does not observe the source fault, and the source keeps running: the
-            // resolver cannot be interrupted, only abandoned.
-            _ = resolveTask.ContinueWith(static t => _ = t.Exception,
+            var resolverConcurrency = _resolverConcurrency;
+            if (!await resolverConcurrency.WaitAsync(wait, ct))
+                throw new TimeoutException("transport resolver concurrency limit remained saturated");
+
+            Task<IPAddress[]> resolveTask;
+            try { resolveTask = Resolver(host, ct); }
+            catch
+            {
+                resolverConcurrency.Release();
+                throw;
+            }
+
+            // getaddrinfo may ignore cancellation. Keep its global permit until the actual source
+            // task completes, even when this request's deadline wins, so abandoned resolver work is
+            // bounded instead of accumulating behind repeated hostile invoices.
+            _ = resolveTask.ContinueWith(static (t, state) =>
+                {
+                    _ = t.Exception;
+                    ((SemaphoreSlim)state!).Release();
+                },
+                resolverConcurrency,
                 CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
-            addresses = await resolveTask.WaitAsync(wait, ct);
+            var resolverRemaining = budget - sw.Elapsed;
+            if (resolverRemaining < TimeSpan.Zero) resolverRemaining = TimeSpan.Zero;
+            var resolverWait = resolverRemaining < capSpan ? resolverRemaining : capSpan;
+            addresses = await resolveTask.WaitAsync(resolverWait, ct);
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or TimeoutException)
         {

@@ -13,6 +13,9 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
 public class RgbLibService : IRgbLibService
 {
+    internal const int MaxTransferListRows = 1_000;
+    static readonly ConcurrentDictionary<Lazy<RgbLibWalletHandle>, byte>
+        PendingConstructionDisposals = new(ReferenceEqualityComparer.Instance);
     readonly RGBConfiguration _config;
     readonly RGBPluginDbContextFactory _db;
     readonly ILogger<RgbLibService> _log;
@@ -91,16 +94,33 @@ public class RgbLibService : IRgbLibService
         var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
             ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
 
-        var lazyWallet = _wallets.GetOrAdd(walletId, _ =>
-            new Lazy<RgbLibWalletHandle>(() => CreateWalletInternal(
-                walletId, 
-                dbWallet.XpubVanilla, 
-                dbWallet.XpubColored, 
-                dbWallet.MasterFingerprint,
-                dbWallet.Network,
-                RGBWalletService.ResolveAllocationsPerUtxo(dbWallet.MaxAllocationsPerUtxo))));
+        var walletDir = Path.Combine(_config.GetWalletDataDir(walletId, dbWallet.Network),
+            dbWallet.MasterFingerprint);
+        // Returning an already-built handle touches no native state. Its ExecuteAsync path owns the
+        // native-access mutex, so taking that mutex here as well would turn one long healthy call into
+        // a spurious construction timeout for every concurrent request on the same wallet.
+        if (_wallets.TryGetValue(walletId, out var cachedWallet) && cachedWallet.IsValueCreated)
+            return cachedWallet.Value;
+        return RgbNativeSendLease.WithProcessGate(walletDir, () =>
+        {
+            // Recovery is admitted by execution-context lease ownership, never by a public bypass.
+            using var walletAccess = RgbNativeSendLease.AcquireWalletAccess(walletDir);
+            if (RgbNativeSendLease.Exists(walletDir)
+                && !RgbNativeSendLease.IsOwnedByCurrentContext(walletDir))
+                throw new RgbWalletQuarantinedException(
+                    "native send helper may still own this wallet — refusing concurrent rgb-lib access");
 
-        return lazyWallet.Value;
+            var lazyWallet = _wallets.GetOrAdd(walletId, _ =>
+                new Lazy<RgbLibWalletHandle>(() => CreateWalletInternal(
+                    walletId,
+                    dbWallet.XpubVanilla,
+                    dbWallet.XpubColored,
+                    dbWallet.MasterFingerprint,
+                    dbWallet.Network,
+                    RGBWalletService.ResolveAllocationsPerUtxo(dbWallet.MaxAllocationsPerUtxo))));
+
+            return lazyWallet.Value;
+        });
     }
 
     RgbLibWalletHandle CreateWalletInternal(string walletId, string xpubVanilla, string xpubColored, string masterFingerprint, string walletNetwork, int maxAllocationsPerUtxo)
@@ -146,7 +166,8 @@ public class RgbLibService : IRgbLibService
         wallet.GoOnline(networkSettings.ElectrumUrl, true);
 
         _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
-        return new RgbLibWalletHandle(wallet, walletId, _log);
+        return new RgbLibWalletHandle(wallet, walletId,
+            Path.Combine(dataDir, masterFingerprint), _log);
     }
 
     public bool UnloadWallet(string walletId) => UnloadFromCache(_wallets, walletId, _log);
@@ -161,7 +182,12 @@ public class RgbLibService : IRgbLibService
             return DisposeAndEvict(wallets, walletId, lazy, log);
         }
 
-        Task.Run(() => DisposeAndEvict(wallets, walletId, lazy, log));
+        if (PendingConstructionDisposals.TryAdd(lazy, 0))
+            _ = Task.Run(() =>
+            {
+                try { DisposeAndEvict(wallets, walletId, lazy, log); }
+                finally { PendingConstructionDisposals.TryRemove(lazy, out _); }
+            });
         return false;
     }
 
@@ -192,26 +218,35 @@ public class RgbLibService : IRgbLibService
             log?.LogWarning(
                 "Wallet {WalletId} unload timed out with an operation still running; native wallet will be freed after the operation completes",
                 walletId);
-            Task.Run(() => CompleteTimedOutDisposeAndEvict(wallets, walletId, lazy, handle, log));
+            if (handle.TryStartDeferredDispose())
+                _ = Task.Run(() => CompleteTimedOutDisposeAndEvictAsync(
+                    wallets, walletId, lazy, handle, log));
             return false;
         }
     }
 
-    static void CompleteTimedOutDisposeAndEvict(
+    static async Task CompleteTimedOutDisposeAndEvictAsync(
         ConcurrentDictionary<string, Lazy<RgbLibWalletHandle>> wallets,
         string walletId,
         Lazy<RgbLibWalletHandle> lazy,
         RgbLibWalletHandle handle,
         ILogger? log)
     {
-        try
+        while (!handle.NativeWalletFreed)
         {
-            handle.CompleteTimedOutDispose();
-        }
-        catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException and not AccessViolationException and not AppDomainUnloadedException and not BadImageFormatException)
-        {
-            log?.LogWarning(ex, "Wallet {WalletId} deferred unload failed; restart required to reclaim it", walletId);
-            return;
+            try
+            {
+                handle.CompleteTimedOutDispose();
+            }
+            catch (Exception ex) when (ex is IOException or RgbWalletQuarantinedException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250));
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException and not AccessViolationException and not AppDomainUnloadedException and not BadImageFormatException)
+            {
+                log?.LogWarning(ex, "Wallet {WalletId} deferred unload failed; restart required to reclaim it", walletId);
+                return;
+            }
         }
 
         if (handle.NativeWalletFreed)
@@ -419,11 +454,6 @@ public class RgbLibService : IRgbLibService
 
     public async Task<List<RgbTransfer>> ListTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(assetId))
-        {
-            return [];
-        }
-
         await using var ctx = _db.CreateContext();
         var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
             ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
@@ -434,10 +464,27 @@ public class RgbLibService : IRgbLibService
             _log.LogWarning("RGB sqlite db not found at {Path}", dbPath);
             return [];
         }
-        
+
+        var transfers = await QueryRecentTransfersAsync(dbPath, assetId, ct);
+        _log.LogInformation("ListTransfersAsync: Found {Count} transfers{AssetFilter}",
+            transfers.Count, assetId == null ? "" : " for the selected asset");
+        return transfers;
+    }
+
+    internal static async Task<List<RgbTransfer>> QueryRecentTransfersAsync(
+        string dbPath, string? assetId = null, CancellationToken ct = default)
+    {
+        if (assetId?.Length > 1024)
+            throw new InvalidDataException("RGB asset identifier exceeds its size bound");
+        if (!File.Exists(dbPath)) return [];
+
         var transfers = new List<RgbTransfer>();
-        var connStr = $"Data Source={dbPath};Mode=ReadOnly";
-        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(connStr);
+        var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly
+        };
+        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(builder.ConnectionString);
         await conn.OpenAsync(ct);
         
         await using var cmd = conn.CreateCommand();
@@ -456,12 +503,18 @@ public class RgbLibService : IRgbLibService
                                 FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
                            )
                    END,
-                   t.recipient_type
+                   t.recipient_type, at.asset_id, COALESCE(a.ticker, '')
             FROM transfer t
             JOIN asset_transfer at ON t.asset_transfer_idx = at.idx
             JOIN batch_transfer bt ON at.batch_transfer_idx = bt.idx
-            WHERE at.asset_id = @assetId";
-        cmd.Parameters.AddWithValue("@assetId", assetId);
+            -- beta.30 maps Asset::Id to asset.id and AssetTransfer::AssetId to
+            -- asset_transfer.asset_id; the foreign key joins those differently named columns.
+            JOIN asset a ON a.id = at.asset_id
+            WHERE (@assetId IS NULL OR at.asset_id = @assetId)
+            ORDER BY t.idx DESC
+            LIMIT @limit";
+        cmd.Parameters.AddWithValue("@assetId", (object?)assetId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@limit", MaxTransferListRows);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -485,12 +538,135 @@ public class RgbLibService : IRgbLibService
                 RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
                 Kind = kind,
-                Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
+                Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                AssetId = reader.GetString(7),
+                AssetTicker = reader.GetString(8)
             });
         }
-        
-        _log.LogInformation("ListTransfersAsync: Found {Count} transfers for asset {AssetId}", transfers.Count, assetId[..Math.Min(30, assetId.Length)]);
         return transfers;
+    }
+
+    public async Task<List<RgbMatchedTransfer>> ListIncomingTransfersForRecipientsAsync(
+        string walletId, IReadOnlyCollection<string> recipientIds, string? assetId = null,
+        CancellationToken ct = default)
+    {
+        await using var ctx = _db.CreateContext();
+        var dbWallet = await ctx.RGBWallets.FindAsync([walletId], ct)
+            ?? throw new KeyNotFoundException($"Wallet {walletId} not found");
+        var dbPath = Path.Combine(
+            _config.GetWalletDataDir(walletId, dbWallet.Network),
+            dbWallet.MasterFingerprint, "rgb_lib_db");
+        return await QueryIncomingTransfersForRecipientsAsync(
+            dbPath, recipientIds, assetId, ct);
+    }
+
+    internal static async Task<List<RgbMatchedTransfer>> QueryIncomingTransfersForRecipientsAsync(
+        string dbPath, IReadOnlyCollection<string> recipientIds, string? assetId = null,
+        CancellationToken ct = default)
+    {
+        const int maxRecipients = RGBInvoiceListener.DurableInvoicePageSize;
+        if (recipientIds.Count > maxRecipients)
+            throw new InvalidOperationException("RGB transfer recipient query exceeds its work bound");
+        var recipients = recipientIds
+            .Where(r => !string.IsNullOrWhiteSpace(r))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        if (recipients.Count == 0) return [];
+        if (recipients.Any(r => r.Length > TransportEndpointValidator.MaxRgbInvoiceLength))
+            throw new InvalidDataException("RGB transfer recipient identifier exceeds its size bound");
+        if (!File.Exists(dbPath)) return [];
+
+        var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly
+        };
+        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(builder.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        var recipientParameters = new List<string>(recipients.Count);
+        for (var i = 0; i < recipients.Count; i++)
+        {
+            var name = $"@recipient{i}";
+            recipientParameters.Add(name);
+            cmd.Parameters.AddWithValue(name, recipients[i]);
+        }
+        cmd.Parameters.AddWithValue("@assetId", (object?)assetId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@limit", maxRecipients);
+        cmd.CommandText = $$"""
+            WITH candidate AS (
+                SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
+                       COALESCE(
+                           (SELECT json_extract(c.assignment, '$.Fungible')
+                            FROM coloring c
+                            WHERE c.asset_transfer_idx = atx.idx AND c.type IN (1, 2)
+                            LIMIT 1),
+                           (SELECT json_extract(c.assignment, '$.Fungible')
+                            FROM coloring c
+                            WHERE c.asset_transfer_idx = atx.idx AND c.type != 3
+                            LIMIT 1),
+                           (SELECT json_extract(c.assignment, '$.Fungible')
+                            FROM coloring c
+                            WHERE c.asset_transfer_idx = atx.idx
+                            LIMIT 1)) AS amount,
+                       t.recipient_type,
+                       atx.asset_id AS asset_id,
+                       COALESCE(a.ticker, '') AS ticker,
+                       a.name AS name,
+                       a.precision AS precision,
+                       a.issued_supply AS issued_supply,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.recipient_id ORDER BY t.idx) AS recipient_rank
+                FROM transfer t
+                INNER JOIN asset_transfer atx ON t.asset_transfer_idx = atx.idx
+                INNER JOIN batch_transfer bt ON atx.batch_transfer_idx = bt.idx
+                -- beta.30 maps Asset::Id to asset.id and AssetTransfer::AssetId to
+                -- asset_transfer.asset_id; the foreign key joins those differently named columns.
+                INNER JOIN asset a ON a.id = atx.asset_id
+                WHERE t.incoming = 1
+                  AND bt.status IN (1, 2, 3, 4)
+                  AND t.recipient_id IN ({{string.Join(", ", recipientParameters)}})
+                  AND (@assetId IS NULL OR atx.asset_id = @assetId)
+            )
+            SELECT idx, status, recipient_id, txid, incoming, amount, recipient_type,
+                   asset_id, ticker, name, precision, issued_supply
+            FROM candidate
+            WHERE recipient_rank = 1
+            ORDER BY idx
+            LIMIT @limit
+            """;
+
+        var results = new List<RgbMatchedTransfer>(recipients.Count);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var recipientType = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var kind = recipientType == null ? 0
+                : recipientType.Contains("\"Blind\"", StringComparison.Ordinal) ? 1 : 2;
+            var issuedSupply = reader.IsDBNull(11)
+                ? 0
+                : long.TryParse(Convert.ToString(reader.GetValue(11)), out var parsedSupply)
+                    ? parsedSupply : 0;
+            var matchedAsset = new RgbAsset
+            {
+                AssetId = reader.GetString(7),
+                Ticker = reader.GetString(8),
+                Name = reader.GetString(9),
+                Precision = reader.GetInt32(10),
+                IssuedSupply = issuedSupply
+            };
+            results.Add(new RgbMatchedTransfer(matchedAsset.AssetId, matchedAsset,
+                new RgbTransfer
+                {
+                    Idx = reader.GetInt32(0),
+                    Status = reader.GetInt32(1),
+                    RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Kind = kind,
+                    Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
+                }));
+        }
+        return results;
     }
 
     public async Task RefreshAsync(string walletId, CancellationToken ct = default)
@@ -889,10 +1065,12 @@ class TransferResponse
     
     static int ParseStatus(string? s) => s?.ToLowerInvariant() switch
     {
-        "waitingcounterparty" => 0,
-        "waitingconfirmations" => 1,
+        "waitingcounterparty" => 1,
+        "waitingconfirmations" => 2,
         "settled" => 3,
         "failed" => 4,
+        "initiated" => 5,
+        "waitingsafeheight" => 6,
         _ => int.TryParse(s, out var n) ? n : -1
     };
     

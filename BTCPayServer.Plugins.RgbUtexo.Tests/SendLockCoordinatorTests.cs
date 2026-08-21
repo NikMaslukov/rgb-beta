@@ -219,4 +219,54 @@ public class SendLockCoordinatorTests
         Assert.True(acquired);
         Assert.Equal(new[] { "mark:w", "op:w", "clear:w" }, r.Events);
     }
+
+    [Fact]
+    public async Task TryWithSendLock_ReportsWhetherThisCallCreatedTheWriteAhead()
+    {
+        var r = new Recorder();
+        var c = r.Build();
+        bool? firstMarked = null;
+        Assert.True(await c.TryWithSendLockAsync("w", marked =>
+        {
+            firstMarked = marked;
+            return Task.CompletedTask;
+        }));
+        Assert.True(firstMarked);
+
+        r.Marked.Add("w");
+        bool? secondMarked = null;
+        Assert.True(await c.TryWithSendLockAsync("w", marked =>
+        {
+            secondMarked = marked;
+            return Task.CompletedTask;
+        }));
+        Assert.False(secondMarked);
+    }
+
+    [Fact]
+    public async Task RecoveryRetainsOnlyTheAffectedWalletLockWhenChildExitIsUnproven()
+    {
+        var r = new Recorder();
+        var c = r.Build();
+
+        await Assert.ThrowsAsync<NativeSendChildUnreapedException>(() =>
+            c.TryWithSendLockAsync("stuck", _ =>
+                throw new NativeSendChildUnreapedException()));
+
+        var stuckRan = false;
+        Assert.False(await c.TryWithSendLockAsync("stuck", () =>
+        {
+            stuckRan = true;
+            return Task.CompletedTask;
+        }));
+        Assert.False(stuckRan);
+
+        var otherRan = false;
+        Assert.True(await c.TryWithSendLockAsync("other", () =>
+        {
+            otherRan = true;
+            return Task.CompletedTask;
+        }));
+        Assert.True(otherRan);
+    }
 }

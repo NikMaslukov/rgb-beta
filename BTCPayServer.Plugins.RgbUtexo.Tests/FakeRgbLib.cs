@@ -30,6 +30,9 @@ public sealed class FakeRgbLib : IRgbLibService
     public Task<string> CreateUtxosBeginAsync(string walletId, int count, int size, float feeRate, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> CreateUtxosEndAsync(string walletId, string signedPsbt, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<List<RgbTransfer>> ListTransfersAsync(string walletId, string? assetId = null, CancellationToken ct = default) => throw new NotImplementedException();
+    public Task<List<RgbMatchedTransfer>> ListIncomingTransfersForRecipientsAsync(
+        string walletId, IReadOnlyCollection<string> recipientIds, string? assetId = null,
+        CancellationToken ct = default) => throw new NotImplementedException();
     public Task RefreshAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default) => throw new NotImplementedException();

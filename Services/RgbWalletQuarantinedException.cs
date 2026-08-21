@@ -7,4 +7,12 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public class RgbWalletQuarantinedException : InvalidOperationException
 {
     public RgbWalletQuarantinedException(string message) : base(message) { }
+    public RgbWalletQuarantinedException(string message, Exception inner) : base(message, inner) { }
+}
+
+// Thrown only after NativeSendProcessRunner has returned a result whose ChildReaped flag is true.
+// Recovery may therefore inspect and safely fail an authoritative Initiated row without racing a helper.
+internal sealed class NativeSendReapedFailureException : InvalidOperationException
+{
+    internal NativeSendReapedFailureException(string message) : base(message) { }
 }

@@ -115,6 +115,9 @@ public class RGBConfiguration
     [JsonPropertyName("native_send_reap_grace_seconds")]
     public int NativeSendReapGraceSeconds { get; set; } = 5;
 
+    internal const long NativeSendRamMinBytes = 64L * 1024 * 1024;
+    internal const long NativeSendRamMaxBytes = 2L * 1024 * 1024 * 1024;
+
     // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
     // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
@@ -172,7 +175,8 @@ public class RGBConfiguration
 
     public NativeSendLimits ToNativeSendLimits() => new(
         Timeout: TimeSpan.FromSeconds(Math.Clamp(NativeSendTimeoutSeconds, 1, 600)),
-        RamCapBytes: Math.Max(NativeSendRamCapBytes, 64L * 1024 * 1024),
+        RamCapBytes: Math.Clamp(NativeSendRamCapBytes,
+            NativeSendRamMinBytes, NativeSendRamMaxBytes),
         CpuLimit: TimeSpan.FromSeconds(Math.Clamp(NativeSendCpuLimitSeconds, 1, 600)),
         Poll: TimeSpan.FromMilliseconds(Math.Clamp(NativeSendPollMs, 10, 1_000)),
         ReapGrace: TimeSpan.FromSeconds(Math.Clamp(NativeSendReapGraceSeconds, 1, 30)));

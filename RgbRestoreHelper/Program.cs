@@ -10,13 +10,18 @@ public static class Program
 
     public static int Run(string[] args, TextReader stdin, TextWriter stdout, TextWriter stderr)
     {
-        if (args.Length == 2 && args[0] is "send-begin" or "send-end"
-            && int.TryParse(args[1], out var selfTimeoutMs) && selfTimeoutMs is >= 100 and <= 600_000)
+        if (args.Length == 4 && args[0] is "send-begin" or "send-end"
+            && int.TryParse(args[1], out var selfTimeoutMs) && selfTimeoutMs is >= 100 and <= 600_000
+            && long.TryParse(args[2], out var memoryLimitBytes) && memoryLimitBytes > 0
+            && int.TryParse(args[3], out var cpuLimitSeconds) && cpuLimitSeconds is >= 1 and <= 600)
         {
             using var watchdog = new Timer(_ => Environment.FailFast("native send helper self-timeout"),
                 null, selfTimeoutMs, Timeout.Infinite);
             try
             {
+                // Apply the hard limit before reading the request. No attacker-influenced native wallet
+                // construction or network work can begin unless the platform accepted the limit.
+                NativeSendResourceLimiter.Apply(memoryLimitBytes, cpuLimitSeconds);
                 var request = stdin.ReadToEnd();
                 stdout.Write(RgbNativeSend.Invoke(args[0], request));
                 return 0;
