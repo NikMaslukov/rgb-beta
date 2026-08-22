@@ -21,11 +21,43 @@ public class ReplenishDecisionTests
     static ReplenishDecision Demand(
         int colorableCount = 4, int usedByColorings = 0, int activePendingInvoices = 0,
         int maxAllocationsPerUtxo = 10, int minFreeSlots = 4, int utxoSize = 1000,
-        int maxAutoColorableUtxos = Cap) =>
+        int maxAutoColorableUtxos = Cap, bool standingAuthorizationGranted = true) =>
         RGBInvoiceListener.EvaluateReplenishDemand(
             colorableCount: colorableCount, usedByColorings: usedByColorings,
             activePendingInvoices: activePendingInvoices, maxAllocationsPerUtxo: maxAllocationsPerUtxo,
-            minFreeSlots: minFreeSlots, utxoSize: utxoSize, maxAutoColorableUtxos: maxAutoColorableUtxos);
+            minFreeSlots: minFreeSlots, utxoSize: utxoSize, maxAutoColorableUtxos: maxAutoColorableUtxos,
+            standingAuthorizationGranted: standingAuthorizationGranted);
+
+    const int DemandingColorableCount = 1;
+    const int DemandingActivePendingInvoices = 10;
+
+    static ReplenishDecision DemandUnderRealPressure(bool standingAuthorizationGranted) =>
+        Demand(colorableCount: DemandingColorableCount, usedByColorings: 0,
+            activePendingInvoices: DemandingActivePendingInvoices,
+            standingAuthorizationGranted: standingAuthorizationGranted);
+
+    [Fact]
+    public void NoStandingAuthorization_SkipsBeforeAnyArithmetic()
+        => Assert.True(
+            DemandUnderRealPressure(standingAuthorizationGranted: false).Outcome
+                == ReplenishOutcome.SkipCapReached,
+            "with no standing authorization the demand computation must refuse before it can construct a "
+            + $"request. These parameters ({DemandingColorableCount} colorable UTXO, "
+            + $"{DemandingActivePendingInvoices} active pending invoices) exhaust every free slot, so an "
+            + "authorized store returns Create here — as the granted half of "
+            + "NoStandingAuthorization_RequestsNothing asserts. Otherwise a public invoice can still "
+            + "trigger an unattended signature nobody granted.");
+
+    [Fact]
+    public void NoStandingAuthorization_RequestsNothing()
+    {
+        var granted = DemandUnderRealPressure(standingAuthorizationGranted: true);
+        Assert.True(granted.Outcome == ReplenishOutcome.Create && granted.RequestCount > 0,
+            "these parameters must be ones an AUTHORIZED store acts on, or asserting that an "
+            + $"unauthorized store requests nothing proves nothing at all; granted gives {granted.Outcome} "
+            + $"requesting {granted.RequestCount}");
+        Assert.Equal(0, DemandUnderRealPressure(standingAuthorizationGranted: false).RequestCount);
+    }
 
     [Fact]
     public void RgbExcludedForTheStore_Skips()
@@ -113,6 +145,21 @@ public class ReplenishDecisionTests
     public void CapAlreadyReached_DoesNotCreate()
         => Assert.Equal(ReplenishOutcome.SkipCapReached, Demand(colorableCount: Cap).Outcome);
 
+    [Fact]
+    public void ColorableCountExactlyAtTheCapWithNoFreeSlots_SkipsBeforeTheHeadroomClamp()
+    {
+        var outcome = Demand(
+            colorableCount: Cap, usedByColorings: Cap * 10, activePendingInvoices: 500).Outcome;
+        Assert.True(outcome == ReplenishOutcome.SkipCapReached,
+            $"a pool at the cap with every slot used resolved to {outcome}. This is the ONLY input that "
+            + "reaches the headroom clamp with a starved pool AND no headroom left: every slot is used, so "
+            + "the free-slots gate lets it through and only the cap gate stands between it and "
+            + "Math.Clamp(needed, 1, 0), which throws ArgumentException because min exceeds max. Weakening "
+            + $"that gate to a strict `>` is a one-character edit that "
+            + $"{nameof(CapAlreadyReached_DoesNotCreate)} catches on its own parameters, but only this row "
+            + "makes it reach the clamp.");
+    }
+
     // UtxoSize is the number of sats buried in each created UTXO, so returning anything but the configured
     // value changes how much the automatic path spends. It is asserted on the skip outcomes too — not
     // because the shell logs it there (it does not), but because a mutation that corrupts the size only on
@@ -128,21 +175,33 @@ public class ReplenishDecisionTests
         Assert.Equal(utxoSize, Demand(utxoSize: utxoSize, maxAutoColorableUtxos: 0).UtxoSize);
     }
 
-    // The cap must actually bind: with maxAlloc 10 and freeSlots 0, needed = ceil(minFreeSlots/10), so
-    // minFreeSlots must exceed (Cap - colorableCount) * 10 = 100 for `needed + colorableCount` to pass 50.
     [Fact]
-    public void DemandBeyondTheCap_IsClampedToTheCap()
-        => Assert.Equal(Cap, Demand(colorableCount: 40, usedByColorings: 400, minFreeSlots: 200).RequestCount);
+    public void DemandBeyondTheCap_IsClampedToTheHeadroomBelowTheCap()
+    {
+        const int colorable = 40;
+        var decision = Demand(colorableCount: colorable, usedByColorings: 400, minFreeSlots: 200);
+        Assert.True(decision.RequestCount == Cap - colorable,
+            $"with maxAlloc 10 and freeSlots 0 the shortfall is ceil(200/10) = 20 new UTXOs while the "
+            + $"headroom is Cap - {colorable} = {Cap - colorable}, and the request came out as "
+            + $"{decision.RequestCount}. The clamp to the headroom is what binds here.");
+        Assert.True(colorable + decision.RequestCount == Cap,
+            $"RequestCount is an INCREMENT of new UTXOs, not a target total, so the cap binds through the "
+            + $"headroom below it rather than through the request itself: {colorable} standing + "
+            + $"{decision.RequestCount} new must land on the {Cap} cap, not on 60.");
+    }
 
-    // Genuine int overflow: freeSlots must be 0 and maxAlloc 1, so `needed` is int.MaxValue and
-    // `needed + colorableCount` wraps negative under int arithmetic (Math.Clamp would then yield 0).
     [Fact]
-    public void HugeMinFreeSlots_DoesNotOverflow()
+    public void HugeMinFreeSlots_IsClampedToTheHeadroomBelowTheCap()
     {
         var decision = Demand(colorableCount: Cap - 1, usedByColorings: Cap - 1, maxAllocationsPerUtxo: 1,
             minFreeSlots: int.MaxValue);
         Assert.Equal(ReplenishOutcome.Create, decision.Outcome);
-        Assert.Equal(Cap, decision.RequestCount);
+        Assert.True(decision.RequestCount == 1,
+            $"freeSlots 0 with maxAllocationsPerUtxo 1 makes the shortfall int.MaxValue, which only the "
+            + $"headroom clamp brings back into range, and the request came out as {decision.RequestCount}.");
+        Assert.True(Cap - 1 + decision.RequestCount == Cap,
+            $"a request of Cap here would put the standing total at Cap + colorableCount; {Cap - 1} "
+            + $"standing + {decision.RequestCount} new must land exactly on the {Cap} cap.");
     }
 
     [Theory]
@@ -151,20 +210,62 @@ public class ReplenishDecisionTests
     public void NonPositiveMinFreeSlots_NeverCreates(int minFreeSlots)
         => Assert.Equal(ReplenishOutcome.SkipEnoughFreeSlots, Demand(minFreeSlots: minFreeSlots).Outcome);
 
-    // The invariant that makes a `request <= colorableCount` guard unreachable.
     [Fact]
-    public void EveryCreateOutcome_RequestsStrictlyMoreThanTheCurrentCount()
+    public void EveryCreateOutcome_HonoursEveryFigureTheConsentScreenStates()
     {
-        foreach (var colorable in new[] { 0, 1, 7, Cap - 1 })
+        var examined = 0;
+        foreach (var colorable in new[] { 0, 1, 7, 40, Cap - 1 })
         foreach (var maxAlloc in new[] { 1, 3, 10 })
-        foreach (var pending in new[] { 5, 50, 500 })
+        foreach (var minFreeSlots in new[] { 1, 4, 40, 200 })
+        foreach (var pending in new[] { 0, 5, 50, 500 })
         {
             var decision = Demand(colorableCount: colorable, activePendingInvoices: pending,
-                maxAllocationsPerUtxo: maxAlloc);
+                maxAllocationsPerUtxo: maxAlloc, minFreeSlots: minFreeSlots);
             if (decision.Outcome != ReplenishOutcome.Create) continue;
-            Assert.True(decision.RequestCount > colorable);
-            Assert.True(decision.RequestCount <= Cap);
+            examined++;
+
+            Assert.True(decision.RequestCount >= 1,
+                $"colorable {colorable}, maxAlloc {maxAlloc}, minFreeSlots {minFreeSlots}, pending "
+                + $"{pending}: a Create outcome requested {decision.RequestCount}. Asking rgb-lib for zero "
+                + "new outputs with up_to = false builds a transaction with no created UTXO and stamps a "
+                + "success cooldown, so the wallet stalls for a full cooldown having done nothing.");
+
+            Assert.True(colorable + decision.RequestCount <= Cap,
+                $"colorable {colorable}, maxAlloc {maxAlloc}, minFreeSlots {minFreeSlots}, pending "
+                + $"{pending}: {colorable} standing + {decision.RequestCount} new = "
+                + $"{colorable + decision.RequestCount}, over the {Cap} standing colorable UTXOs the "
+                + "consent screen states as the deployment-wide limit. The clamp to the headroom below the "
+                + "cap is the ONLY thing enforcing that limit — rgb-lib deducts nothing with up_to = false, "
+                + "and deducted only the allocatable ones with up_to = true, so a total-standing request "
+                + "would create (needed + excluded) outputs. That argument is pinned by "
+                + $"{nameof(RgbDryRunSourcePinTests)}."
+                + $"{nameof(RgbDryRunSourcePinTests.CreateUtxosBegin_PassesDryRunTrueAtItsOnlyLiveCallSite)}"
+                + ".");
+
+            Assert.True(decision.RequestCount <= minFreeSlots,
+                $"colorable {colorable}, maxAlloc {maxAlloc}, minFreeSlots {minFreeSlots}, pending "
+                + $"{pending}: requested {decision.RequestCount} new UTXOs in one attempt, over the "
+                + $"{minFreeSlots} the consent screen states are created at a time.");
+
+            Assert.True(
+                RGBWalletService.CreateUtxosMaxFeeSatsAtOneInput(decision.RequestCount)
+                <= RGBWalletService.CreateUtxosMaxFeeSatsAtOneInput(minFreeSlots)
+                && RGBWalletService.CreateUtxosMaxFeeSatsPerAdditionalInput(decision.RequestCount)
+                   <= RGBWalletService.CreateUtxosMaxFeeSatsPerAdditionalInput(minFreeSlots),
+                $"colorable {colorable}, maxAlloc {maxAlloc}, minFreeSlots {minFreeSlots}, pending "
+                + $"{pending}: the fee ceiling the signing policy derives from RequestCount "
+                + $"{decision.RequestCount} exceeds, in one of its two terms, the worst-case fee per "
+                + "attempt the consent screen prints, which PopulateSettingsViewModel computes from the "
+                + "PERSISTED UtxoCount by the same two expressions. The policy widens in lockstep with "
+                + "the request, so nothing downstream would refuse it. RequestCount is the single number "
+                + "all three consent figures are spent through: RGBWalletService builds MaxOutputCount = "
+                + "count + 1 and the MaxFeeSats / MaxFeeSatsPerAdditionalInput pair from it, and "
+                + $"{nameof(RgbVanillaInputGuardSourcePinTests)} pins those three expressions.");
         }
+
+        Assert.True(examined >= 100,
+            $"only {examined} Create outcome(s) were reached, so this grid adjudicates almost nothing. It "
+            + "must keep exercising both clamp arms — the shortfall and the headroom below the cap.");
     }
 
     // A non-positive cap must not reach Math.Clamp, whose min > max throws ArgumentException.
@@ -186,6 +287,7 @@ public class ReplenishDecisionTests
         bool enabled = true,
         bool active = true,
         bool quarantined = false,
+        bool archived = false,
         string storeId = "s1",
         RGBPaymentMethodConfig? current = null,
         RGBPaymentMethodConfig? expected = null)
@@ -198,8 +300,15 @@ public class ReplenishDecisionTests
                 Id = "w1", StoreId = storeId, IsActive = active,
                 NeedsRecovery = quarantined, MaxAllocationsPerUtxo = 10
             },
-            "s1", enabled, current, expected);
+            "s1", enabled, archived, current, expected);
     }
+
+    [Fact]
+    public void FinalAuthorization_ArchivedStore_Rejects()
+        => Assert.False(FinalAuthorization(archived: true),
+            "an archived store is one the operator has stepped away from; unattended signing on it must "
+            + "refuse. This is additional plugin policy, not BTCPay's notion of a disabled payment method "
+            + "— an archived store's RGB payment method is still enabled and its checkout still works.");
 
     [Fact]
     public void FinalAuthorization_HealthyUnchangedState_Passes()
@@ -246,8 +355,9 @@ public class ReplenishDecisionTests
     [Fact]
     public void FinalRequest_UtxoStateChangedWhileWaiting_RejectsStaleCount()
     {
-        var original = Demand(colorableCount: 4, activePendingInvoices: 37);
-        var fresh = Demand(colorableCount: 5, activePendingInvoices: 47);
+        var original = Demand(colorableCount: 48, usedByColorings: 480, minFreeSlots: 100);
+        var fresh = Demand(colorableCount: 49, usedByColorings: 490, minFreeSlots: 100);
+        Assert.Equal(ReplenishOutcome.Create, original.Outcome);
         Assert.Equal(ReplenishOutcome.Create, fresh.Outcome);
         Assert.NotEqual(original.RequestCount, fresh.RequestCount);
         Assert.False(RGBInvoiceListener.IsCurrentReplenishmentRequestAuthorized(

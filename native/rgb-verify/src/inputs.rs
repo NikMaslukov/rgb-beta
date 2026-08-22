@@ -1055,6 +1055,152 @@ mod tests {
         assert!(err.contains("changes the allocated state bytes"), "{err}");
     }
 
+    fn hostile_two_output_carry_transition(
+        stock: &Stock<MemStash, MemState, MemIndex>,
+        contract: ContractId,
+        opout: Opout,
+        value: RevealedValue,
+        first_output: u64,
+        second_output: u64,
+    ) -> Transition {
+        let mut transition = exact_carry_transition(stock, contract, opout, value);
+        let seal = match transition
+            .assignments
+            .get(&opout.ty)
+            .unwrap()
+            .as_fungible()
+            .first()
+            .unwrap()
+        {
+            Assign::Revealed { seal, .. } => *seal,
+            Assign::ConfidentialSeal { .. } => panic!("expected revealed seal"),
+        };
+        let mut split = amplify::confinement::NonEmptyVec::with(Assign::Revealed {
+            seal,
+            state: RevealedValue::new(first_output),
+        });
+        split
+            .push(Assign::Revealed {
+                seal,
+                state: RevealedValue::new(second_output),
+            })
+            .unwrap();
+        *transition
+            .assignments
+            .get_mut(&opout.ty)
+            .unwrap()
+            .as_fungible_mut()
+            .unwrap() = split;
+        transition
+    }
+
+    #[test]
+    fn rejects_foreign_carry_that_splits_the_sum_across_two_outputs() {
+        let stock = load_multi();
+        let contract = cid(CID_B);
+        let outpoint = out(OUT_MULTI);
+        let assignments = stock
+            .contract_assignments_for(contract, [outpoint])
+            .unwrap();
+        let (_, opouts) = assignments.into_iter().next().unwrap();
+        let (opout, state) = opouts.into_iter().next().unwrap();
+        let AllocatedState::Amount(value) = state else {
+            panic!("expected amount")
+        };
+        let whole = value.as_u64();
+        let first = whole / 2;
+        let transition = hostile_two_output_carry_transition(
+            &stock,
+            contract,
+            opout,
+            value,
+            first,
+            whole - first,
+        );
+
+        let err = verify_carry_forward(
+            &stock,
+            contract,
+            opout,
+            outpoint,
+            &AllocatedState::Amount(value),
+            &transition,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("has 2 outputs, expected one"),
+            "the one-output carry-forward normal form must reject a sum-preserving two-output split; got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_foreign_carry_that_duplicates_the_whole_amount_into_a_second_output() {
+        let stock = load_multi();
+        let contract = cid(CID_B);
+        let outpoint = out(OUT_MULTI);
+        let assignments = stock
+            .contract_assignments_for(contract, [outpoint])
+            .unwrap();
+        let (_, opouts) = assignments.into_iter().next().unwrap();
+        let (opout, state) = opouts.into_iter().next().unwrap();
+        let AllocatedState::Amount(value) = state else {
+            panic!("expected amount")
+        };
+        let whole = value.as_u64();
+        let transition =
+            hostile_two_output_carry_transition(&stock, contract, opout, value, whole, whole);
+
+        let err = verify_carry_forward(
+            &stock,
+            contract,
+            opout,
+            outpoint,
+            &AllocatedState::Amount(value),
+            &transition,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("has 2 outputs, expected one"),
+            "only the one-output clause stands between a carry-forward and inflation: a first output equal to the input value satisfies every downstream state-bytes check, so a duplicated second output would otherwise be accepted; got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_foreign_carry_that_uses_a_non_schema_default_transition_type() {
+        let stock = load_multi();
+        let contract = cid(CID_B);
+        let outpoint = out(OUT_MULTI);
+        let assignments = stock
+            .contract_assignments_for(contract, [outpoint])
+            .unwrap();
+        let (_, opouts) = assignments.into_iter().next().unwrap();
+        let (opout, state) = opouts.into_iter().next().unwrap();
+        let AllocatedState::Amount(value) = state else {
+            panic!("expected amount")
+        };
+        let mut transition = exact_carry_transition(&stock, contract, opout, value);
+        let expected = stock
+            .schema(stock.contract_info(contract).unwrap().schema_id)
+            .unwrap()
+            .default_transition_for_assignment(&opout.ty);
+        transition.transition_type =
+            rgbcore::TransitionType::with(expected.to_inner().wrapping_add(1));
+
+        let err = verify_carry_forward(
+            &stock,
+            contract,
+            opout,
+            outpoint,
+            &AllocatedState::Amount(value),
+            &transition,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected schema default"),
+            "the carry-forward normal form must reject a transition type other than the schema default; got: {err}"
+        );
+    }
+
     #[test]
     fn missing_or_corrupt_stock_errors() {
         let missing = unique_tmp("missing");

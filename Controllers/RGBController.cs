@@ -32,6 +32,8 @@ namespace BTCPayServer.Plugins.RgbUtexo.Controllers;
 public class RGBController : Controller
 {
     static readonly Newtonsoft.Json.JsonSerializer _blobSerializer = BlobSerializer.CreateSerializer().Serializer;
+    internal const string AutoReplenishmentNotAuthorizedDisclosure =
+        "Automatic colorable-UTXO creation is NOT authorized for this wallet — authorize it on the RGB settings page if you want RGB payments to keep working unattended once the current pool is exhausted.";
     static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _viewSeedLocks = new();
     readonly IRGBWalletService _wallets;
     readonly StoreRepository _stores;
@@ -43,15 +45,19 @@ public class RGBController : Controller
     readonly IMemoryCache _cache;
     readonly BTCPayServerOptions _btcPayOptions;
     readonly IRgbRateSource _rateSource;
+    readonly RGBConfiguration _cfg;
+    readonly RgbAutoReplenishmentAuthorizationStore _authorizations;
 
     public RGBController(IRGBWalletService wallets, StoreRepository stores,
         PaymentMethodHandlerDictionary handlers, RGBPluginDbContextFactory db, ILogger<RGBController> log,
         UserManager<ApplicationUser> userManager, EventAggregator events, IMemoryCache cache,
-        IOptions<BTCPayServerOptions> btcPayOptions, IRgbRateSource rateSource)
+        IOptions<BTCPayServerOptions> btcPayOptions, IRgbRateSource rateSource,
+        RGBConfiguration cfg, RgbAutoReplenishmentAuthorizationStore authorizations)
     {
         _wallets = wallets; _stores = stores; _handlers = handlers; _db = db; _log = log;
         _userManager = userManager; _events = events; _cache = cache;
         _btcPayOptions = btcPayOptions.Value; _rateSource = rateSource;
+        _cfg = cfg; _authorizations = authorizations;
     }
 
     [HttpGet]
@@ -221,7 +227,7 @@ public class RGBController : Controller
                 await _stores.UpdateStore(store);
             }
 
-            TempData["SuccessMessage"] = $"RGB wallet created on {model.SelectedNetwork} with max {maxAlloc} allocations per UTXO!";
+            TempData["SuccessMessage"] = $"RGB wallet created on {model.SelectedNetwork} with max {maxAlloc} allocations per UTXO! " + AutoReplenishmentNotAuthorizedDisclosure;
             return RedirectToAction(nameof(Index), new { storeId });
         }
         catch (Exception ex)
@@ -279,7 +285,7 @@ public class RGBController : Controller
                 await _stores.UpdateStore(store);
             }
 
-            TempData["SuccessMessage"] = $"RGB wallet restored on {model.SelectedNetwork}!";
+            TempData["SuccessMessage"] = $"RGB wallet restored on {model.SelectedNetwork}! " + AutoReplenishmentNotAuthorizedDisclosure;
             return RedirectToAction(nameof(Index), new { storeId, sync = true });
         }
         catch (Exception ex)
@@ -375,7 +381,7 @@ public class RGBController : Controller
                 await _stores.UpdateStore(store);
             }
 
-            TempData["SuccessMessage"] = $"RGB wallet restored from backup on {model.SelectedNetwork}!";
+            TempData["SuccessMessage"] = $"RGB wallet restored from backup on {model.SelectedNetwork}! " + AutoReplenishmentNotAuthorizedDisclosure;
             return RedirectToAction(nameof(Index), new { storeId, sync = true });
         }
         catch (Exception ex)
@@ -940,6 +946,61 @@ public class RGBController : Controller
             // Render no notice rather than a wrong one, and never break the page.
             _log.LogWarning(ex, "RGB pricing notice unavailable for store {StoreId}", storeId);
         }
+
+        try
+        {
+            var owningStore = await _stores.FindStore(storeId);
+            vm.StoreArchived = owningStore?.Archived == true;
+
+            var grant = await _authorizations.FindAsync(storeId);
+            vm.AutomaticReplenishmentDecision = grant?.Decision ?? RgbAutoReplenishmentDecision.Undecided;
+            vm.AutomaticReplenishmentDecidedAt = grant?.DecidedAt;
+            vm.AutomaticReplenishmentDecidedBy = grant?.DecidedBy;
+            vm.AutomaticReplenishmentGranted =
+                RgbAutoReplenishmentAuthorizationStore.IsGranted(grant, wallet.Id);
+            vm.MaxAutoColorableUtxos = _cfg.MaxAutoColorableUtxos;
+
+            var storedConfig = GetRgbConfig(owningStore);
+            var persistedValuesValid = ArePersistedReplenishmentFiguresValid(storedConfig);
+            if (persistedValuesValid)
+            {
+                vm.PersistedUtxoCount = storedConfig!.UtxoCount;
+                vm.PersistedUtxoSize = storedConfig.UtxoSize;
+                vm.WorstCaseReplenishFeeBaseSats =
+                    RGBWalletService.CreateUtxosMaxFeeSatsAtOneInput(storedConfig.UtxoCount);
+                vm.WorstCaseReplenishFeePerVanillaUtxoSats =
+                    RGBWalletService.CreateUtxosMaxFeeSatsPerAdditionalInput(storedConfig.UtxoCount);
+            }
+
+            vm.ReplenishmentNoticeCause = RgbReplenishmentNotice.Evaluate(
+                paymentMethodEnabled: owningStore != null
+                    && !owningStore.GetStoreBlob().IsExcluded(RGBPlugin.RGBPaymentMethodId),
+                hasStoredConfig: storedConfig != null,
+                configValuesValid: persistedValuesValid,
+                maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos,
+                standingAuthorizationGranted: vm.AutomaticReplenishmentGranted);
+            vm.ReplenishmentNoticeMessage =
+                RgbReplenishmentNotice.MessageFor(vm.ReplenishmentNoticeCause);
+            vm.ReplenishmentNoticeInvitesGrant =
+                RgbReplenishmentNotice.InvitesGrant(vm.ReplenishmentNoticeCause);
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "RGB archived-store notice unavailable for store {StoreId}", storeId);
+        }
+
+        try
+        {
+            var reservations = await _wallets.GetVanillaReservationReportAsync(wallet.Id);
+            vm.VanillaReservationState = reservations.State;
+            vm.VanillaReservationCount = reservations.Reserved.Count;
+            vm.VanillaReservationStillUnspentCount = reservations.StillUnspent.Count;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "RGB pending vanilla reservation report unavailable for wallet {WalletId}", wallet.Id);
+        }
     }
 
     // Timeout and Error deliberately set nothing upstream: they say nothing about the store's
@@ -1031,6 +1092,33 @@ public class RGBController : Controller
             TempData["ErrorMessage"] = $"Connection failed: {ex.Message}";
         }
 
+        return RedirectToAction(nameof(Settings), new { storeId });
+    }
+
+    [HttpPost("auto-replenishment")]
+    public async Task<IActionResult> SetAutomaticReplenishmentAuthorization(string storeId, bool grant)
+    {
+        var wallet = await RequireWallet(storeId);
+        if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        if (grant && !HasPersistedReplenishmentFigures(await _stores.FindStore(storeId)))
+        {
+            TempData["ErrorMessage"] =
+                "Save this store's RGB payment settings first. Automatic colorable-UTXO creation cannot "
+                + "be authorized until the UTXO count and size it would use are saved and in range, "
+                + "because until then the authorization page cannot state what it would permit.";
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
+
+        await _authorizations.RecordDecisionAsync(
+            storeId,
+            wallet.Id,
+            grant ? RgbAutoReplenishmentDecision.Granted : RgbAutoReplenishmentDecision.Revoked,
+            _userManager.GetUserId(User));
+
+        TempData["SuccessMessage"] = grant
+            ? "Automatic colorable-UTXO creation is now authorized for this store's current RGB wallet."
+            : "Automatic colorable-UTXO creation is no longer authorized for this store.";
         return RedirectToAction(nameof(Settings), new { storeId });
     }
 
@@ -1131,6 +1219,13 @@ public class RGBController : Controller
         model.AvailableNetworks = NetworkSettings.AvailableNetworks;
         model.AllNetworkSettings = BuildAllNetworkSettings();
     }
+
+    internal static bool ArePersistedReplenishmentFiguresValid(RGBPaymentMethodConfig? storedConfig)
+        => storedConfig != null && RgbConfigBounds.ArePaymentMethodValuesValid(
+            storedConfig.UtxoCount, storedConfig.UtxoSize, storedConfig.MinConfirmations);
+
+    static bool HasPersistedReplenishmentFigures(StoreData? store)
+        => ArePersistedReplenishmentFiguresValid(GetRgbConfig(store));
 
     static RGBPaymentMethodConfig? GetRgbConfig(StoreData? store)
     {

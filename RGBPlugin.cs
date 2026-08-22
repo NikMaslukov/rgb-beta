@@ -64,10 +64,14 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         services.AddSingleton<RGBCheckoutModelExtension>();
         services.AddSingleton<ICheckoutModelExtension>(sp => sp.GetRequiredService<RGBCheckoutModelExtension>());
 
+        services.AddSingleton<RgbAutoReplenishmentAuthorizationStore>();
+        services.AddSingleton<RgbReplenishmentNoticeService>();
+        services.AddSingleton<INotificationHandler, RgbReplenishmentBlockedNotification.Handler>();
         services.AddSingleton<RGBInvoiceListener>();
         services.AddHostedService(sp => sp.GetRequiredService<RGBInvoiceListener>());
         services.AddSingleton<INotificationHandler, RgbSeedViewedNotification.Handler>();
         services.AddHostedService<RgbSeedViewedEventSubscriber>();
+        services.AddHostedService<RgbVanillaReservationStartupProbe>();
         services.AddUIExtension("checkout-end", "RGB/RGBMethodCheckout");
         services.AddUIExtension("checkout-end", "/Views/RGB/RGBCheckoutStyles.cshtml");
         services.AddUIExtension("store-wallets-nav", "/Views/RGB/RGBWalletNav.cshtml");
@@ -111,13 +115,13 @@ public class RGBPlugin : BaseBTCPayServerPlugin
     }
 
     /// <summary>
-    /// Applies environment-variable overrides for the automatic-UTXO and backup-restore knobs.
+    /// Applies environment-variable overrides for the colorable-UTXO and backup-restore knobs.
     ///
     /// WHY these exist at all: rgb.json is the only other delivery mechanism, and writing that file is
     /// hazardous — it replaces the whole configuration object, so a file that omits rgb_base_dir silently
     /// resets it to the literal default "/data" and every wallet path moves, with no migration. An operator
     /// who wants to bound or disable unattended signing must not be forced to take that risk to do it, so the
-    /// three controls this change adds are settable without touching the file at all.
+    /// controls this change adds are settable without touching the file at all.
     ///
     /// An unparseable value is ignored rather than treated as zero: zero is a meaningful setting for
     /// MaxAutoColorableUtxos (it disables automatic creation) and must never be reached by accident.
@@ -128,6 +132,9 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
         if (int.TryParse(read("RGB_MAX_AUTO_COLORABLE_UTXOS"), out var cap))
             cfg.MaxAutoColorableUtxos = cap;
+
+        if (int.TryParse(read("RGB_MAX_MANUAL_COLORABLE_UTXOS"), out var manualCeiling))
+            cfg.MaxManualColorableUtxos = manualCeiling;
 
         if (int.TryParse(read("RGB_AUTO_UTXO_COOLDOWN_MINUTES"), out var cooldown))
             cfg.AutoUtxoCooldownMinutes = cooldown;

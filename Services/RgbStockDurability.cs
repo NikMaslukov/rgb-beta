@@ -5,6 +5,10 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 public static class RgbStockDurability
 {
     static readonly string[] StockFiles = ["index.dat", "stash.dat", "state.dat"];
+    // rgb-lib beta.30 selects this BDK append-log filename when the wallet is
+    // watch-only (mnemonic == null), which is how the plugin always opens wallets.
+    // This filename is independent from the append log's b"bdk_db" file magic.
+    internal const string WatchOnlyBdkStoreFileName = "bdk_db_watch_only";
 
     public static string ResolveStockDir(string walletDataDir, string fingerprint)
     {
@@ -64,11 +68,11 @@ public static class RgbStockDurability
                 File.Copy(source, Path.Combine(stockSnapshot, name));
             }
 
-            var bdkSource = Path.Combine(walletDir, "bdk_db");
+            var bdkSource = Path.Combine(walletDir, WatchOnlyBdkStoreFileName);
             if (!File.Exists(bdkSource))
                 throw new FileNotFoundException(
                     $"RGB verification BDK snapshot source is missing: {bdkSource}", bdkSource);
-            var bdkSnapshot = Path.Combine(root, "bdk_db");
+            var bdkSnapshot = Path.Combine(root, WatchOnlyBdkStoreFileName);
             File.Copy(bdkSource, bdkSnapshot);
             return new RgbVerificationSnapshot(root, stockSnapshot, bdkSnapshot);
         }

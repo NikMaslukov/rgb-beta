@@ -9,6 +9,7 @@ public class SigningPolicy
     public long MaxUnknownOutputSats { get; set; } = 546;
     public double MaxFeePercent { get; set; } = 10.0;
     public long? MaxFeeSats { get; set; }
+    public long MaxFeeSatsPerAdditionalInput { get; set; }
     public HashSet<Script>? AllowedScripts { get; set; }
     public int? MaxOutputCount { get; set; }
 
@@ -40,8 +41,7 @@ public interface IRgbWalletSigner : IDisposable
 {
     Task<string> SignPsbtAsync(string psbt, Network network, SigningPolicy policy, CancellationToken cancellationToken = default);
     string MasterFingerprint { get; }
-    string XpubVanilla { get; }
-    string XpubColored { get; }
+    string XpubRgbLibVanilla { get; }
     bool IsDisposed { get; }
 }
 

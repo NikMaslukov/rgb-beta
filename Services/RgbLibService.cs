@@ -424,7 +424,7 @@ public class RgbLibService : IRgbLibService
             var walletStruct = _walletField.GetValue(wallet)!;
             var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
 
-            var args = new object?[] { walletStruct, onlineJson, true, count.ToString(), size.ToString(), ((int)feeRate).ToString(), false, false };
+            var args = new object?[] { walletStruct, onlineJson, false, count.ToString(), size.ToString(), ((int)feeRate).ToString(), false, true };
             var result = _createUtxosBeginMethod.Invoke(null, args);
 
             _walletField.SetValue(wallet, args[0]);

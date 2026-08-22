@@ -400,29 +400,28 @@ fn descriptor_from_account_xpub(
     let master_fingerprint =
         Fingerprint::from_str(fingerprint).map_err(|_| "invalid master fingerprint".to_string())?;
     let coin = account.coin(network);
-    let keychain_index = match account.keychain() {
-        KeychainKind::External => 0,
-        KeychainKind::Internal => 1,
-    };
-    descriptor_from_parsed_account_xpub(account_xpub, master_fingerprint, coin, keychain_index)
+    // BDK's External/Internal keychain slot selects between rgb-lib's colored and vanilla
+    // descriptors. It is not the BIP32 branch within either descriptor: rgb-lib beta.30 persists
+    // both watch-only account descriptors at branch /0/*.
+    descriptor_from_parsed_account_xpub(account_xpub, master_fingerprint, coin, 0)
 }
 
 fn descriptor_from_parsed_account_xpub(
     account_xpub: Xpub,
     master_fingerprint: Fingerprint,
     coin: u32,
-    keychain_index: u32,
+    derivation_branch: u32,
 ) -> Result<String, String> {
-    let keychain = ChildNumber::from_normal_idx(keychain_index)
-        .map_err(|_| "invalid wallet keychain index".to_string())?;
+    let branch = ChildNumber::from_normal_idx(derivation_branch)
+        .map_err(|_| "invalid wallet derivation branch".to_string())?;
     let derived = account_xpub
-        .derive_pub(&Secp256k1::new(), &DerivationPath::from(vec![keychain]))
+        .derive_pub(&Secp256k1::new(), &DerivationPath::from(vec![branch]))
         .map_err(|e| format!("failed to derive account xpub: {e}"))?;
     let origin_path = DerivationPath::from(vec![
         ChildNumber::from_hardened_idx(PURPOSE).expect("valid purpose"),
         ChildNumber::from_hardened_idx(coin).expect("valid coin"),
         ChildNumber::from_hardened_idx(0).expect("valid account"),
-        keychain,
+        branch,
     ]);
     let origin: KeySource = (master_fingerprint, origin_path);
     let descriptor_key: DescriptorKey<Segwitv0> = derived
@@ -497,13 +496,13 @@ mod tests {
             "tr([{fingerprint}/{PURPOSE}'/{RGB_COIN_TESTNET}'/0'/0]"
         )));
         assert!(vanilla.starts_with(&format!(
-            "tr([{fingerprint}/{PURPOSE}'/{BTC_COIN_TESTNET}'/0'/1]"
+            "tr([{fingerprint}/{PURPOSE}'/{BTC_COIN_TESTNET}'/0'/0]"
         )));
         assert!(colored.ends_with("/*)"));
         assert!(vanilla.ends_with("/*)"));
 
         let temp_dir = tempfile::tempdir().expect("temporary fixture directory");
-        let store_path = temp_dir.path().join("bdk_db");
+        let store_path = temp_dir.path().join("bdk_db_watch_only");
         let mut store = Store::<ChangeSet>::create(BDK_MAGIC, &store_path)
             .expect("create generated BDK append log");
         let mut persisted = Wallet::create(colored.clone(), vanilla.clone())
@@ -545,21 +544,21 @@ mod tests {
             Some(vanilla.as_str())
         );
 
-        let old_branch_zero_vanilla = descriptor_from_parsed_account_xpub(
+        let wrong_branch_one_vanilla = descriptor_from_parsed_account_xpub(
             Xpub::from_str(&vanilla_xpub).expect("test vanilla xpub"),
             Fingerprint::from_str(&fingerprint).expect("test fingerprint"),
             BTC_COIN_TESTNET,
-            0,
+            1,
         )
-        .expect("old branch-zero descriptor");
+        .expect("wrong branch-one descriptor");
         let mismatch = Wallet::load()
             .descriptor(KeychainKind::External, Some(colored))
-            .descriptor(KeychainKind::Internal, Some(old_branch_zero_vanilla))
+            .descriptor(KeychainKind::Internal, Some(wrong_branch_one_vanilla))
             .check_network(network)
             .load_wallet_no_persist(changeset);
         assert!(
             mismatch.is_err(),
-            "the old vanilla /0 descriptor must fail BDK snapshot authentication"
+            "a vanilla /1 descriptor must fail production /0 BDK snapshot authentication"
         );
     }
 
@@ -588,7 +587,7 @@ mod tests {
             "tr([{fingerprint}/{PURPOSE}'/{RGB_COIN_MAINNET}'/0'/0]"
         )));
         assert!(vanilla.starts_with(&format!(
-            "tr([{fingerprint}/{PURPOSE}'/{BTC_COIN_MAINNET}'/0'/1]"
+            "tr([{fingerprint}/{PURPOSE}'/{BTC_COIN_MAINNET}'/0'/0]"
         )));
     }
 }

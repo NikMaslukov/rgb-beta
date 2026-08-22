@@ -1,5 +1,9 @@
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using BTCPayServer.Plugins.RgbUtexo.Services;
+using NBitcoin;
+using RgbLib;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
@@ -60,7 +64,7 @@ public class RgbStockDurabilityTests
         var wallet = Path.Combine(Path.GetTempPath(), $"rgb-wallet-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(wallet);
         var bdk = RandomNumberGenerator.GetBytes(1024);
-        File.WriteAllBytes(Path.Combine(wallet, "bdk_db"), bdk);
+        File.WriteAllBytes(Path.Combine(wallet, RgbStockDurability.WatchOnlyBdkStoreFileName), bdk);
         RgbVerificationSnapshot? snapshot = null;
         try
         {
@@ -75,6 +79,64 @@ public class RgbStockDurabilityTests
             if (snapshot != null) RgbStockDurability.DeleteSnapshot(snapshot.RootDir);
             Directory.Delete(stock, true);
             Directory.Delete(wallet, true);
+        }
+    }
+
+    [Fact]
+    public void PinnedRgbLibBeta30_WatchOnlyWalletCreatesProductionBdkLayout()
+    {
+        // Artifact-compatibility test using the actual pinned rgb-lib binding. This is intentionally
+        // offline and is not a send E2E test: it proves the filename and serialized descriptor
+        // branches that SnapshotVerificationState and the native verifier must authenticate.
+        const string mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        var restoredJson = RgbLibWallet.RestoreKeys("Regtest", mnemonic);
+        using var restored = JsonDocument.Parse(restoredJson);
+        var restoredRoot = restored.RootElement;
+        var fingerprint = restoredRoot.GetProperty("master_fingerprint").GetString()!;
+        var vanillaAccountXpub = restoredRoot.GetProperty("account_xpub_vanilla").GetString()!;
+        var coloredAccountXpub = restoredRoot.GetProperty("account_xpub_colored").GetString()!;
+        var dataDir = Path.Combine(Path.GetTempPath(), $"rgb-real-layout-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dataDir);
+
+        var configJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["data_dir"] = dataDir,
+            ["bitcoin_network"] = "Regtest",
+            ["database_type"] = "Sqlite",
+            ["max_allocations_per_utxo"] = 5,
+            ["supported_schemas"] = new[] { "Nia", "Cfa" }
+        });
+        var keysJson = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["account_xpub_vanilla"] = vanillaAccountXpub,
+            ["account_xpub_colored"] = coloredAccountXpub,
+            ["master_fingerprint"] = fingerprint,
+            ["vanilla_keychain"] = (int?)null,
+            ["mnemonic"] = (string?)null
+        });
+
+        try
+        {
+            using (var wallet = new RgbLibWallet(configJson, keysJson)) { }
+
+            var walletDir = Path.Combine(dataDir, fingerprint);
+            var watchOnlyStore = Path.Combine(walletDir, RgbStockDurability.WatchOnlyBdkStoreFileName);
+            Assert.True(File.Exists(watchOnlyStore));
+            Assert.False(File.Exists(Path.Combine(walletDir, "bdk_db")));
+
+            // BDK's append log contains its public descriptors as UTF-8. Match only the derivation
+            // origins, never xpubs or fingerprints, so no host/user wallet material enters fixtures.
+            var persisted = Encoding.UTF8.GetString(File.ReadAllBytes(watchOnlyStore));
+            Assert.Contains("86'/827167'/0'/0", persisted);
+            Assert.Contains("86'/1'/0'/0", persisted);
+            Assert.DoesNotContain("86'/1'/0'/1", persisted);
+            Assert.Contains(ExtPubKey.Parse(coloredAccountXpub, Network.RegTest).Derive(0).ToString(Network.RegTest), persisted);
+            Assert.Contains(ExtPubKey.Parse(vanillaAccountXpub, Network.RegTest).Derive(0).ToString(Network.RegTest), persisted);
+            Assert.DoesNotContain(ExtPubKey.Parse(vanillaAccountXpub, Network.RegTest).Derive(1).ToString(Network.RegTest), persisted);
+        }
+        finally
+        {
+            Directory.Delete(dataDir, true);
         }
     }
 

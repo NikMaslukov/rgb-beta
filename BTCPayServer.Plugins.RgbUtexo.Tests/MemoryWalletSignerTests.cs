@@ -343,10 +343,9 @@ public class MemoryWalletSignerTests
         using var regtest = new MemoryWalletSigner(TestMnemonic, Network.RegTest);
         using var mainnet = new MemoryWalletSigner(TestMnemonic, Network.Main);
 
-        Assert.NotEqual(regtest.XpubVanilla, mainnet.XpubVanilla);
-        Assert.NotEqual(regtest.XpubColored, mainnet.XpubColored);
-        Assert.StartsWith("tpub", regtest.XpubVanilla);
-        Assert.StartsWith("xpub", mainnet.XpubVanilla);
+        Assert.NotEqual(regtest.XpubRgbLibVanilla, mainnet.XpubRgbLibVanilla);
+        Assert.StartsWith("tpub", regtest.XpubRgbLibVanilla);
+        Assert.StartsWith("xpub", mainnet.XpubRgbLibVanilla);
     }
 
     [Fact]

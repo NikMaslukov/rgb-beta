@@ -19,11 +19,24 @@ public class RgbListenerSourcePinTests
     const string ListenerFile = "Services/RGBInvoiceListener.cs";
     const string RgbLibFile = "Services/RgbLibService.cs";
     const string WalletServiceFile = "Services/RGBWalletService.cs";
+    const string ControllerFile = "Controllers/RGBController.cs";
+    const string StoreDataFullType = "BTCPayServer.Data.StoreData";
     const string ListenerType = "RGBInvoiceListener";
     // Fully qualified for symbol comparison: a same-simple-named type in another namespace, inherited
     // by the listener, supplies members that pass a simple-name compare — measured.
     const string ListenerFullType = "BTCPayServer.Plugins.RgbUtexo.Services.RGBInvoiceListener";
     const string Replenish = "ReplenishUtxosAsync";
+    const string Recheck = "RecheckAutomaticReplenishmentAuthorizationAsync";
+    const string PollLoop = "PollLoop";
+    const string Refresh = "RefreshAllWallets";
+    const string DemandFunction = "EvaluateReplenishDemand";
+    const string ExactRequestCheck = "IsCurrentReplenishmentRequestAuthorized";
+    const string GrantParameter = "standingAuthorizationGranted";
+    const string GrantRead = "IsGrantedForWalletAsync";
+    const string AuthorizationStoreType = "RgbAutoReplenishmentAuthorizationStore";
+    const string AuthorizationStoreFullType =
+        "BTCPayServer.Plugins.RgbUtexo.Services.RgbAutoReplenishmentAuthorizationStore";
+    const string AuthorizationStoreField = "_authorizations";
 
     static MethodDeclarationSyntax ReplenishMethod(PluginCompilation plugin) =>
         RoslynPins.Method(plugin.Tree(ListenerFile), ListenerType, Replenish);
@@ -64,6 +77,61 @@ public class RgbListenerSourcePinTests
         _ => expression
     };
 
+    static List<ReturnStatementSyntax> ReturnsYieldingToTheFrameItself(SyntaxNode body)
+    {
+        var found = new List<ReturnStatementSyntax>();
+        var pending = new Stack<SyntaxNode>();
+        pending.Push(body);
+        while (pending.Count > 0)
+            foreach (var child in pending.Pop().ChildNodes())
+            {
+                if (child is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax) continue;
+                if (child is ReturnStatementSyntax statement) found.Add(statement);
+                pending.Push(child);
+            }
+        return found.OrderBy(statement => statement.SpanStart).ToList();
+    }
+
+    static bool IsFalseLiteral(ExpressionSyntax? expression) =>
+        expression is LiteralExpressionSyntax literal && literal.Token.IsKind(SyntaxKind.FalseKeyword);
+
+    static bool YieldsNothingButResultOf(PluginCompilation plugin, SyntaxTree tree,
+        SyntaxNode body, ExpressionSyntax? value, InvocationExpressionSyntax producer)
+    {
+        if (ReferenceEquals(value, producer)) return true;
+        if (value is not IdentifierNameSyntax name) return false;
+        if (RoslynPins.BoundSymbol(plugin, tree, name) is not ILocalSymbol) return false;
+        var local = name.Identifier.ValueText;
+        if (IsWrittenAfterDeclaration(body, local)) return false;
+        var declarators = body.DescendantNodes()
+            .OfType<VariableDeclaratorSyntax>()
+            .Where(declarator => declarator.Identifier.ValueText == local)
+            .ToList();
+        return declarators.Count == 1
+               && declarators[0].Initializer?.Value is { } initializer
+               && ReferenceEquals(Unwrap(initializer), producer);
+    }
+
+    static bool IsWrittenAfterDeclaration(SyntaxNode body, string local)
+    {
+        static bool Names(ExpressionSyntax expression, string local) =>
+            expression is IdentifierNameSyntax identifier && identifier.Identifier.ValueText == local;
+
+        return body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                   .Any(assignment => Names(assignment.Left, local))
+               || body.DescendantNodes().OfType<PrefixUnaryExpressionSyntax>()
+                   .Any(unary => (unary.IsKind(SyntaxKind.PreIncrementExpression)
+                                  || unary.IsKind(SyntaxKind.PreDecrementExpression))
+                                 && Names(unary.Operand, local))
+               || body.DescendantNodes().OfType<PostfixUnaryExpressionSyntax>()
+                   .Any(unary => (unary.IsKind(SyntaxKind.PostIncrementExpression)
+                                  || unary.IsKind(SyntaxKind.PostDecrementExpression))
+                                 && Names(unary.Operand, local))
+               || body.DescendantNodes().OfType<ArgumentSyntax>()
+                   .Any(argument => !argument.RefKindKeyword.IsKind(SyntaxKind.None)
+                                    && Names(argument.Expression, local));
+    }
+
     /// <summary>The single declarator's initializer for a local, with `await` unwrapped.</summary>
     static ExpressionSyntax InitializerOf(MethodDeclarationSyntax method, string localName)
     {
@@ -72,7 +140,8 @@ public class RgbListenerSourcePinTests
             .Where(v => v.Identifier.ValueText == localName)
             .ToList();
         Assert.True(declarators.Count == 1,
-            $"expected exactly one declarator named '{localName}' in {Replenish}, found {declarators.Count}");
+            $"expected exactly one declarator named '{localName}' in {method.Identifier.ValueText}, "
+            + $"found {declarators.Count}");
         var value = declarators[0].Initializer?.Value;
         Assert.True(value != null, $"'{localName}' has no initializer");
         return Unwrap(value!);
@@ -294,7 +363,19 @@ public class RgbListenerSourcePinTests
         var recheckSymbol = RoslynPins.BoundSymbol(plugin, tree, recheck.Expression);
         Assert.True(recheckSymbol.Name == "RecheckAutomaticReplenishmentAuthorizationAsync"
                     && recheckSymbol.ContainingType?.Name == ListenerType,
-            $"the automatic callback must bind to {ListenerType}.RecheckAutomaticReplenishmentAuthorizationAsync");
+            $"the automatic callback must bind to {ListenerType}.RecheckAutomaticReplenishmentAuthorizationAsync. "
+            + "SCOPE OF THIS TEST, stated because it was read for one round as covering more than it "
+            + $"does: it pins that the delegate handed to CreateColorableUtxosAutomaticallyAsync CALLS "
+            + $"{Recheck} with those six arguments, and NOTHING about the value the delegate yields. "
+            + "`authorizationCt => { await Recheck(the same six arguments); return true; }` satisfies "
+            + "every clause here — it is still a SimpleLambdaExpressionSyntax, still contains exactly one "
+            + $"{Recheck} invocation, and every argument still binds — while discarding the grant read, "
+            + "the store-disabled and archived checks, the config-change check and the exact-request "
+            + "check all at once, so one unattended transaction is signed per sweep for a store that "
+            + "never granted or has revoked. Measured: the whole suite stayed green. What the delegate "
+            + $"yields is pinned by {nameof(PC4h_TheAuthorizeDelegateYieldsNothingButTheFreshAuthorizationResult)}, "
+            + $"and {nameof(PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck)} "
+            + $"covers the returns of the {Recheck} METHOD, one frame further in.");
 
         Assert.Equal(6, recheck.ArgumentList.Arguments.Count);
         foreach (var (position, member) in new[] { (0, "Id"), (1, "StoreId") })
@@ -317,6 +398,153 @@ public class RgbListenerSourcePinTests
     }
 
     [Fact]
+    public void PC4h_TheAuthorizeDelegateYieldsNothingButTheFreshAuthorizationResult()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+        var replenish = ReplenishMethod(plugin);
+        var create = Single(replenish, "CreateColorableUtxosAutomaticallyAsync");
+        var function = Assert.IsAssignableFrom<AnonymousFunctionExpressionSyntax>(
+            NamedArgument(create, "authorize").Expression);
+        var recheck = Single(function, Recheck);
+
+        var whitelist =
+            $"WHAT THIS PINS, as a WHITELIST rather than a list of ways to break it: the DELEGATE passed "
+            + $"as 'authorize:' must yield nothing but what its single {Recheck} call returned. Its "
+            + $"expression body must BE that call; or, if it has a block body, every `return` belonging "
+            + "to the delegate itself must be EITHER the literal `return false;` — refusal is always "
+            + "allowed, it is the fail-closed direction — OR must yield nothing but that call's result, "
+            + "either directly or through one bare local initialized from it and never written again. "
+            + "Nothing else, and exactly one return must be the authorizing one.\n"
+            + "WHY THIS FRAME AND NOT THE METHOD'S: the value "
+            + "CreateColorableUtxosAutomaticallyAsync branches on before it signs is what this DELEGATE "
+            + $"yields, not what {Recheck} returns. "
+            + $"{nameof(PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck)} "
+            + "pins the method's returns and deliberately exempts returns inside nested lambdas, which is "
+            + "correct for lambdas written INSIDE that method — but this lambda is written OUTSIDE it, so "
+            + "no clause of it reaches here. "
+            + $"{nameof(PC4b_AutomaticCreationCarriesAFreshStoreAuthorizationCallback)} pins that this "
+            + "lambda CALLS the method with the right six arguments and says nothing about its result.\n"
+            + "WHAT IT REFUSES, and why each is a false-ACCEPT and not a style objection: the "
+            + $"demonstrated disarm `async authorizationCt => {{ await {Recheck}(…); return true; }}`, "
+            + "which was MEASURED, before this clause existed, to leave every other pin green and the "
+            + "whole suite passing while the grant read, the "
+            + "revoke check, the store-disabled and archived checks, the config-change check and the "
+            + "exact-request check are all computed and thrown away — one unattended signature per sweep "
+            + "for a store that never granted or has revoked; an early `return true;` guarded by any "
+            + $"condition; `return await {Recheck}(…) || true;`; `return !await {Recheck}(…);`; and "
+            + $"wrapping the call as `return Wrapped(await {Recheck}(…));`, which lets the wrapper decide.\n"
+            + "WHAT IT DELIBERATELY DOES NOT REFUSE, so the boundary is auditable rather than guessed: "
+            + "either lambda body form; `async` or not; renaming the lambda's cancellation-token "
+            + "parameter; assigning the call's result to a local and returning that local; and a "
+            + "`return false;` added anywhere, which stops replenishment but cannot sign anything.";
+
+        if (function is LambdaExpressionSyntax { ExpressionBody: { } expressionBody })
+        {
+            Assert.True(ReferenceEquals(Unwrap(expressionBody), recheck),
+                $"{ListenerFile} {Replenish}: the 'authorize:' lambda's expression body is "
+                + $"`{expressionBody}`, which is not the {Recheck} call itself. {whitelist}");
+            return;
+        }
+
+        var block = function.Block;
+        Assert.True(block != null,
+            $"{ListenerFile} {Replenish}: the 'authorize:' delegate has neither an expression body nor "
+            + $"a block body. {whitelist}");
+        var returns = ReturnsYieldingToTheFrameItself(block!);
+        Assert.True(returns.Count > 0,
+            $"{ListenerFile} {Replenish}: the 'authorize:' lambda has a block body and no `return` of "
+            + $"its own, so it cannot be yielding the authorization result. {whitelist}");
+
+        var authorizing = new List<ReturnStatementSyntax>();
+        foreach (var statement in returns)
+        {
+            var value = statement.Expression is null ? null : Unwrap(statement.Expression);
+            if (IsFalseLiteral(value)) continue;
+            if (YieldsNothingButResultOf(plugin, tree, block!, value, recheck))
+            {
+                authorizing.Add(statement);
+                continue;
+            }
+            Assert.Fail(
+                $"{ListenerFile} {Replenish}: `{statement.ToString().Trim()}` is not a legal return of "
+                + $"the 'authorize:' lambda. {whitelist}");
+        }
+
+        Assert.True(authorizing.Count == 1,
+            $"{ListenerFile} {Replenish}: {authorizing.Count} of the 'authorize:' lambda's "
+            + $"{returns.Count} `return`(s) yield the result of {Recheck}; exactly one must. Zero means "
+            + "the call is made and its value never leaves the delegate, so the delegate authorizes "
+            + $"unconditionally while every clause of "
+            + $"{nameof(PC4b_AutomaticCreationCarriesAFreshStoreAuthorizationCallback)} still holds. "
+            + $"{whitelist}");
+    }
+
+    [Fact]
+    public void PC4i_TheDelegateTheSignatureGateInvokesIsTheOneTheSweepConstructed()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(WalletServiceFile);
+        const string automatic = "CreateColorableUtxosAutomaticallyAsync";
+        const string shared = "CreateColorableUtxosWithAuthorizationAsync";
+        const string inner = "CreateColorableUtxosInternalAsync";
+        const string parameter = "authorize";
+
+        var reason =
+            $"WHAT THIS PINS: the delegate {inner} invokes at its two authorization gates is the SAME "
+            + $"object the sweep constructed. {nameof(PC4d_ManualAdminPathBypassesOnlyTheAutomaticAuthorizationCallback)} "
+            + $"pins the hop from {automatic} into {shared}; "
+            + $"{nameof(PC4c_AuthorizationIsRecheckedImmediatelyBeforeBothTheNativeBeginAndTheSignature)} "
+            + $"pins that {inner} invokes it twice, each time as the statement immediately before "
+            + "create_utxos_begin and the signature; and "
+            + $"{nameof(PC4h_TheAuthorizeDelegateYieldsNothingButTheFreshAuthorizationResult)} pins what "
+            + $"the delegate yields. This clause is the remaining hop — {shared} forwarding its own "
+            + $"'{parameter}' parameter into {inner} — plus the requirement that no method on the chain "
+            + $"WRITES that parameter. Without it, `{inner}(walletId, count, size, null, ct)` disarms the "
+            + "whole gate silently: the parameter is nullable, both invocations inside "
+            + $"{inner} are guarded by `{parameter} != null`, so no clause of the pins above notices. "
+            + "MEASURED: that substitution reddens THIS clause and no other test in the suite, while each "
+            + "sweep would sign and broadcast one unattended transaction. A THIRD caller of either "
+            + "forwarding method is refused here for the same "
+            + $"reason: {shared} accepts null to mean 'operator-driven, already authorized by the "
+            + "request', so a new internal caller that passes null is a new unattended signing path with "
+            + "no authorization at all.";
+
+        var innerCalls = RepoWideInvocationsNamed(plugin, inner);
+        Assert.True(innerCalls.Count == 1
+                    && ContainingMethod(innerCalls[0]) == shared,
+            $"{inner} is invoked {innerCalls.Count} time(s) "
+            + $"({string.Join(", ", innerCalls.Select(ContainingMethod))}); exactly one call, from "
+            + $"{shared}, is mandated. {reason}");
+
+        var sharedCalls = RepoWideInvocationsNamed(plugin, shared);
+        Assert.True(sharedCalls.Count == 2
+                    && sharedCalls.Select(ContainingMethod).OrderBy(name => name, StringComparer.Ordinal)
+                        .SequenceEqual(new[] { "CreateColorableUtxosAsync", automatic }),
+            $"{shared} is invoked from [{string.Join(", ", sharedCalls.Select(ContainingMethod))}]; "
+            + $"exactly CreateColorableUtxosAsync and {automatic} are mandated. {reason}");
+
+        var forward = Single(RoslynPins.Method(tree, "RGBWalletService", shared), inner);
+        var forwarded = forward.ArgumentList.Arguments
+            .Where(argument => Unwrap(argument.Expression) is IdentifierNameSyntax identifier
+                               && identifier.Identifier.ValueText == parameter)
+            .ToList();
+        Assert.True(forwarded.Count == 1,
+            $"{shared} passes `{forward.ArgumentList}` to {inner}; exactly one argument must be the bare "
+            + $"'{parameter}' parameter. {reason}");
+        Assert.IsAssignableFrom<IParameterSymbol>(
+            RoslynPins.BoundSymbol(plugin, tree, Unwrap(forwarded[0].Expression)));
+
+        foreach (var name in new[] { automatic, shared })
+        {
+            var method = RoslynPins.Method(tree, "RGBWalletService", name);
+            Assert.False(IsWrittenAfterDeclaration(RoslynPins.BodyOf(method), parameter),
+                $"{name} writes its '{parameter}' parameter. A reassignment to a delegate that returns "
+                + $"true leaves every other clause green and removes the gate entirely. {reason}");
+        }
+    }
+
+    [Fact]
     public void PC4e_FinalAuthorizationRecomputesFreshDemandAndRequiresAnExactRequest()
     {
         var plugin = PluginCompilation.Shared;
@@ -328,16 +556,53 @@ public class RgbListenerSourcePinTests
         var count = Single(recheck, "CountAsync");
         var predicate = Single(recheck, "ActivePendingInvoicePredicate");
         var demand = Single(recheck, "EvaluateReplenishDemand");
-        var exact = Single(recheck, "IsCurrentReplenishmentRequestAuthorized");
+        var exact = Single(recheck, ExactRequestCheck);
         var finalStore = Single(recheck, "FindStore");
+        var grant = Single(recheck, "IsGrantedForWalletAsync");
+        Assert.True(finalStore.SpanStart < grant.SpanStart,
+            "the operator's standing-authorization read must come AFTER the final store read, and be the "
+            + "LAST await in the callback. This is a PRIORITY CHOICE, not an invariant: exactly one of the "
+            + "two reads can be last, and whichever runs first can be invalidated while the later one is in "
+            + "flight. FindStore is a real Postgres round-trip on a fresh DbContext with no cache, so "
+            + "reading the grant first left a revoke POST — the operator's emergency stop, which takes "
+            + "neither the per-wallet send lock nor the native send lease — able to commit inside that "
+            + "round-trip while this callback still returned true. The enabled/config snapshot loses the "
+            + "tighter window instead, because invalidating it takes a deliberate settings edit. SCOPE OF "
+            + "THIS CLAUSE, stated because an earlier wording overclaimed it: it pins WHERE the read "
+            + $"happens and nothing about what is done with the value. `await …{GrantRead}(…) || true` "
+            + "satisfies it, and satisfies every other clause in this test, while signing for a store that "
+            + "never granted. That the value gates this callback's return is asserted in THREE HOPS, and "
+            + "no hop alone suffices: "
+            + $"{nameof(PC4f_BothAutomaticDemandDecisionsGateOnTheOperatorsStandingAuthorizationValue)} "
+            + $"binds the grant local to {DemandFunction}'s '{GrantParameter}:' argument; the "
+            + $"'currentDecision:' clause at the end of THIS test binds {ExactRequestCheck}'s "
+            + $"'currentDecision:' ARGUMENT to the result of that same {DemandFunction} call — it says "
+            + "nothing about what this callback returns; and "
+            + $"{nameof(PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck)} "
+            + $"binds the value this callback yields to the result of that {ExactRequestCheck} call. Each "
+            + "hop was unpinned in turn and each gap was independently demonstrated to leave the whole "
+            + "suite green while one unattended transaction was signed per sweep.");
         Assert.True(list.SpanStart < demand.SpanStart && count.SpanStart < demand.SpanStart,
             "the final demand decision must use UTXOs and invoices re-read inside the authorization callback");
         Assert.True(list.SpanStart < finalStore.SpanStart && count.SpanStart < finalStore.SpanStart,
             "slow UTXO and invoice reads must finish before the final enabled/config store read");
         Assert.True(demand.SpanStart < exact.SpanStart,
             "the freshly recomputed demand must feed the exact-request authorization");
-        Assert.DoesNotContain(RoslynPins.BodyOf(recheck).DescendantNodes().OfType<AwaitExpressionSyntax>(),
-            await_ => await_.SpanStart > finalStore.Span.End);
+        Assert.False(
+            RoslynPins.BodyOf(recheck).DescendantNodes().OfType<AwaitExpressionSyntax>()
+                .Any(await_ => await_.SpanStart > grant.Span.End),
+            "nothing may await after the standing-authorization read. This NARROWS the revocation window "
+            + "to the synchronous tail; it does not close it. ACCEPTED RESIDUAL: a sub-millisecond "
+            + "check-then-act interval always remains — the demand evaluation, this callback's return, the "
+            + "caller's branch on it and the await on the signature all run after the last grant read, so a "
+            + "revoke that commits inside that interval is still followed by one signature. Closing it "
+            + "would require the revoke path to take the per-wallet send lock and the native send lease. "
+            + "This clause, like the ordering clause above, is about POSITION only: the narrowing it "
+            + "describes is a property of the pair (read here, value consumed), and the second half is "
+            + $"asserted by {nameof(PC4f_BothAutomaticDemandDecisionsGateOnTheOperatorsStandingAuthorizationValue)}, "
+            + "the 'currentDecision:' clause below and "
+            + $"{nameof(PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck)} "
+            + "together.");
 
         var countArgument = count.ArgumentList.Arguments[0].Expression;
         Assert.Same(predicate, countArgument);
@@ -360,33 +625,343 @@ public class RgbListenerSourcePinTests
             Assert.Equal(parameter, identifier.Identifier.ValueText);
             Assert.IsAssignableFrom<IParameterSymbol>(RoslynPins.BoundSymbol(plugin, tree, identifier));
         }
+
+        var decisionArgument = NamedArgument(exact, "currentDecision").Expression;
+        Assert.True(decisionArgument is IdentifierNameSyntax,
+            $"'currentDecision:' is written as '{decisionArgument}'. It must be a bare local holding "
+            + $"nothing but what {DemandFunction} returned. SCOPE OF THIS CLAUSE, stated because an "
+            + $"earlier wording overclaimed it: it constrains the ARGUMENT handed to {ExactRequestCheck} "
+            + "and nothing about what this callback returns — "
+            + $"{nameof(PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck)} "
+            + "is what does that, and this clause was shipped for one round claiming to. Every other "
+            + $"clause of this test constrains where the grant is READ and where {DemandFunction} is "
+            + "CALLED. `currentDecision: new ReplenishDecision(ReplenishOutcome.Create, "
+            + "expectedRequestCount, expectedUtxoSize)` satisfies all of them — the grant read still "
+            + "happens last, the demand call still happens after the fresh UTXO and invoice reads, and "
+            + "PC4f still binds that call's grant argument — while making the final pre-signature "
+            + "authorization unconditionally true, so a revoked or disabled store gets one unattended "
+            + "signature per sweep. Measured: the whole suite stayed green.");
+        var decision = (IdentifierNameSyntax)decisionArgument;
+        Assert.IsAssignableFrom<ILocalSymbol>(RoslynPins.BoundSymbol(plugin, tree, decision));
+        RoslynPins.AssertNeverReassigned(recheck, decision.Identifier.ValueText);
+        Assert.Same(demand, InitializerOf(recheck, decision.Identifier.ValueText));
     }
 
     [Fact]
-    public void PC4c_FinalAuthorizationRunsAfterSerializationAndImmediatelyBeforeNativeBegin()
+    public void PC4g_EveryReturnInTheFinalAuthorizationCallbackIsRefusalOrTheExactRequestCheck()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+        var recheck = RoslynPins.Method(tree, ListenerType, Recheck);
+        var exact = Single(recheck, ExactRequestCheck);
+
+        var exactSymbol = RoslynPins.BoundSymbol(plugin, tree, exact.Expression);
+        Assert.True(exactSymbol.Name == ExactRequestCheck
+                    && exactSymbol.ContainingType?.ToDisplayString() == ListenerFullType,
+            $"the exact-request check must bind to {ListenerFullType}.{ExactRequestCheck}, not to a "
+            + $"same-simple-named member reached through a base type or another namespace; it bound to "
+            + $"'{exactSymbol.ContainingType?.ToDisplayString()}.{exactSymbol.Name}'");
+
+        foreach (var argument in exact.ArgumentList.Arguments)
+        {
+            if (Unwrap(argument.Expression) is not IdentifierNameSyntax name) continue;
+            if (RoslynPins.BoundSymbol(plugin, tree, name) is not IParameterSymbol) continue;
+            Assert.False(IsWrittenAfterDeclaration(RoslynPins.BodyOf(recheck), name.Identifier.ValueText),
+                $"{ListenerFile} {Recheck}: parameter '{name.Identifier.ValueText}' is written inside the "
+                + $"method before it reaches {ExactRequestCheck}. The sweep's already-decided request "
+                + "count and UTXO size arrive here as parameters and are the ONLY record of what "
+                + "CreateColorableUtxosAutomaticallyAsync is about to sign; the exact-request check is "
+                + "meaningful precisely because it compares the freshly recomputed demand against them "
+                + "and nothing else. A clamp, a reassignment or a `++` on one of them makes the check "
+                + "compare the recomputed demand against a value this method invented, so the stale "
+                + "request the sweep decided is authorized anyway — the exact gap this callback exists "
+                + "to close. An adjustment you believe is needed belongs in the sweep, before the "
+                + "authorize callback is built.");
+        }
+
+        var whitelist =
+            $"WHAT THIS PINS, as a WHITELIST rather than a list of ways to break it: every `return` "
+            + $"belonging to {Recheck} itself must be EITHER the literal `return false;` — refusal is "
+            + $"always allowed, it is the fail-closed direction — OR must yield nothing but what the "
+            + $"single {ExactRequestCheck} call returned, either directly or through one bare local that "
+            + "is initialized from that call and never written again. Nothing else. That is the whole "
+            + "legal shape of this callback's authorization tail.\n"
+            + "WHY A SHAPE AND NOT ONE MORE POSITION: three separate rounds each closed one more link of "
+            + $"this same chain — the grant's '{GrantParameter}:' argument, then {ExactRequestCheck}'s "
+            + "'currentDecision:' argument, then this return — and each fix left the next link open, "
+            + "because a pin on a position says nothing about the positions beside it. The set of "
+            + "positions a value can be discarded at is unbounded; the set of legal return shapes is "
+            + "not. Enumerating the shapes closes the sequence: with the grant local bound to the demand "
+            + "call (PC4f), the demand result bound to the exact check's argument (PC4e) and every "
+            + $"return bound here, the value THE {Recheck} METHOD RETURNS is a pure function of the "
+            + "freshly read grant, the freshly recomputed demand and the two unwritable expected-request "
+            + "parameters, and no statement in the method can bypass, discard, override or invert it. "
+            + "THAT IS A CLAIM ABOUT THE METHOD, NOT ABOUT THE DELEGATE THE SIGNING PATH BRANCHES ON, "
+            + "and an earlier wording of this sentence said 'this callback', which licensed stopping "
+            + "here: the 'authorize:' argument is a lambda written in "
+            + $"{Replenish}, one frame further out, and `async ct => {{ await {Recheck}(…); return true; }}` "
+            + "satisfies every clause of this test — the method is byte-identical — while discarding its "
+            + "result. That frame is pinned by "
+            + $"{nameof(PC4h_TheAuthorizeDelegateYieldsNothingButTheFreshAuthorizationResult)}, and the "
+            + "forwarding of the delegate from the sweep to the signature gate by "
+            + $"{nameof(PC4i_TheDelegateTheSignatureGateInvokesIsTheOneTheSweepConstructed)}. SCOPE, so "
+            + $"this is not read as more than it is: the NON-grant arguments of {DemandFunction} in this "
+            + "method are NOT pinned, and are on the debt list rather than closed. A wrong value there "
+            + "can only make the recomputed demand disagree with the sweep's, which this check turns "
+            + "into a refusal, and the grant is still ANDed ahead of it inside "
+            + $"{DemandFunction} — so that gap cannot authorize anything the operator did not grant.\n"
+            + "WHAT IT REFUSES, and why each is a false-ACCEPT and not a style objection: `return true;` "
+            + $"anywhere — including after calling {ExactRequestCheck} as a bare expression statement, "
+            + "which is the exact shape that was demonstrated to keep the whole suite green while "
+            + "discarding the grant read, the fresh UTXO and invoice re-reads and the exact-request "
+            + $"check all at once; `return Wrapped({ExactRequestCheck}(…));`, which lets a wrapper "
+            + $"decide instead; `return !{ExactRequestCheck}(…);`; `return {ExactRequestCheck}(…) || "
+            + "true;`; and a second conditional `return` yielding anything but `false`.\n"
+            + "IF THIS FIRES ON A CHANGE YOU BELIEVE IS CORRECT: an extra condition you want ANDed onto "
+            + "the result belongs above the tail as its own `if (…) return false;`, which this clause "
+            + "accepts unchanged. Do not relax the clause to admit a compound return expression: `… || "
+            + "true` and `!…` are both compound, and both authorize where they must not.\n"
+            + "WHAT IT DELIBERATELY DOES NOT REFUSE, so the boundary is auditable rather than guessed: a "
+            + "`return false;` inserted anywhere, which stops replenishment outright but cannot sign "
+            + "anything; renaming any local; extracting the call into a local; and any `return` inside a "
+            + $"nested lambda or local function DECLARED IN THIS METHOD, which yields to that function "
+            + $"and not to {Recheck}. The 'authorize:' lambda is NOT such a case — it is declared in "
+            + $"{Replenish}, outside this method, so nothing here reaches it and "
+            + $"{nameof(PC4h_TheAuthorizeDelegateYieldsNothingButTheFreshAuthorizationResult)} is what "
+            + "pins it.";
+
+        var returns = ReturnsYieldingToTheFrameItself(RoslynPins.BodyOf(recheck));
+        Assert.True(returns.Count > 0, $"{Recheck} has no `return` of its own to pin. {whitelist}");
+
+        var authorizing = new List<ReturnStatementSyntax>();
+        foreach (var statement in returns)
+        {
+            var value = statement.Expression is null ? null : Unwrap(statement.Expression);
+            if (IsFalseLiteral(value)) continue;
+            if (YieldsNothingButResultOf(plugin, tree, RoslynPins.BodyOf(recheck), value, exact))
+            {
+                authorizing.Add(statement);
+                continue;
+            }
+            Assert.Fail(
+                $"{ListenerFile} {Recheck}: `{statement.ToString().Trim()}` is not a legal return of the "
+                + $"authorization tail. {whitelist}");
+        }
+
+        Assert.True(authorizing.Count == 1,
+            $"{ListenerFile} {Recheck}: {authorizing.Count} of its {returns.Count} `return`(s) yield the "
+            + $"result of {ExactRequestCheck}; exactly one must. Zero means the check is computed and its "
+            + "value never leaves the method — the call is still present, so every clause of "
+            + $"{nameof(PC4e_FinalAuthorizationRecomputesFreshDemandAndRequiresAnExactRequest)} still "
+            + "holds, and the callback authorizes unconditionally. Moving the call into a delegate that "
+            + $"is never invoked counts as zero here for the same reason. {whitelist}");
+    }
+
+    [Fact]
+    public void PC4f_BothAutomaticDemandDecisionsGateOnTheOperatorsStandingAuthorizationValue()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+
+        var demands = RepoWideInvocationsNamed(plugin, DemandFunction);
+        Assert.True(demands.Count == 2,
+            $"the plugin has {demands.Count} {DemandFunction} invocation(s) "
+            + $"({string.Join(", ", demands.Select(ContainingMethod))}); exactly two are mandated — the "
+            + $"sweep's initial decision in {Replenish} and the final pre-signature recheck in {Recheck}. "
+            + "Any further site also decides whether an unattended signature happens, so it has to appear "
+            + "here and bind its own grant explicitly rather than inherit this pin's silence.");
+        Assert.Equal(
+            new[] { Replenish, Recheck }.OrderBy(x => x, StringComparer.Ordinal),
+            demands.Select(ContainingMethod).OrderBy(x => x, StringComparer.Ordinal));
+
+        foreach (var demand in demands)
+        {
+            var site = ContainingMethod(demand);
+            var where = $"{ListenerFile} {site}";
+            var method = demand.Ancestors().OfType<MethodDeclarationSyntax>().First();
+
+            var argument = NamedArgument(demand, GrantParameter).Expression;
+            Assert.True(argument is IdentifierNameSyntax,
+                $"{where}: '{GrantParameter}:' is written as '{argument}'. It must be a bare local holding "
+                + $"nothing but what {AuthorizationStoreType}.{GrantRead} returned. A literal, or any "
+                + "expression containing one, decouples the decision from the operator's grant while the "
+                + $"whole suite stays green: ReplenishDecisionTests drives {DemandFunction} directly and "
+                + "never observes the value a call site hands it. Neutered here, the sweep re-arms "
+                + "unattended colorable-UTXO creation for every store that never granted — the shipped "
+                + "default — and the recheck signs one transaction after a Revoke lands mid-flight.");
+            var identifier = (IdentifierNameSyntax)argument;
+            var local = identifier.Identifier.ValueText;
+            Assert.IsAssignableFrom<ILocalSymbol>(RoslynPins.BoundSymbol(plugin, tree, identifier));
+            RoslynPins.AssertNeverReassigned(method, local);
+
+            var initializer = InitializerOf(method, local);
+            Assert.True(initializer is InvocationExpressionSyntax,
+                $"{where}: '{local}' is initialized from '{initializer}'. It must be initialized from the "
+                + $"awaited {GrantRead} call and from nothing else. `await …{GrantRead}(…) || true` leaves "
+                + "the read, its position and its last-await placement all intact, so every clause of "
+                + $"{nameof(PC4e_FinalAuthorizationRecomputesFreshDemandAndRequiresAnExactRequest)} is "
+                + "satisfied by it, and the callback still authorizes a signature for a store that has "
+                + "revoked.");
+            var read = (InvocationExpressionSyntax)initializer;
+            RoslynPins.AssertBindsToMemberOf(plugin, tree, read.Expression, SymbolKind.Method,
+                AuthorizationStoreFullType, GrantRead, where);
+            var access = Assert.IsType<MemberAccessExpressionSyntax>(read.Expression);
+            RoslynPins.AssertBindsToMemberOf(plugin, tree, access.Expression, SymbolKind.Field,
+                ListenerFullType, AuthorizationStoreField, where);
+
+            Assert.True(read.ArgumentList.Arguments.Count == 3,
+                $"{where}: the grant read is written {GrantRead}{read.ArgumentList}. It must pass the "
+                + "store, the configured wallet and a cancellation token: the grant is recorded per store "
+                + "FOR a named wallet, and dropping the wallet argument would let a grant made for a "
+                + "replaced wallet authorize signing for its successor.");
+            foreach (var passed in read.ArgumentList.Arguments)
+                Assert.True(passed.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax,
+                    $"{where}: the grant read is passed '{passed.Expression}'. Every argument must be a "
+                    + "reference to this site's own state; a constant identity reads whatever grant some "
+                    + "other store recorded, or none at all.");
+        }
+    }
+
+    [Fact]
+    public void PC4c_AuthorizationIsRecheckedImmediatelyBeforeBothTheNativeBeginAndTheSignature()
     {
         var plugin = PluginCompilation.Shared;
         var tree = plugin.Tree(WalletServiceFile);
         var internalCreate = RoslynPins.Method(
             tree, "RGBWalletService", "CreateColorableUtxosInternalAsync");
-        var authorize = Single(internalCreate, "authorize");
+        var authorizations = InvocationsNamed(internalCreate, "authorize");
+        Assert.True(authorizations.Count == 2,
+            "CreateColorableUtxosInternalAsync must invoke the authorization callback exactly twice — once "
+            + "immediately before create_utxos_begin and once immediately before the signature — and it "
+            + $"invokes it {authorizations.Count} time(s). The second recheck is what NARROWS the window in "
+            + "which a disable, a revocation or a settings edit lands after the unsigned transaction has "
+            + "been built; without it that window spans the whole of the slow native create_utxos_begin and "
+            + "yields one signed transaction the operator no longer authorized. It does not narrow that "
+            + "window to nothing: the recheck's own synchronous tail and the await on the signature remain "
+            + "after its last read, which is the accepted residual PC4e records.");
+
         var nativeBegin = Single(internalCreate, "CreateUtxosBeginAsync");
-        var guard = authorize.Ancestors().OfType<IfStatementSyntax>().Single();
+        var signature = Single(internalCreate, "SignPsbtWithSignerAsync");
+        Assert.True(nativeBegin.SpanStart < signature.SpanStart,
+            "create_utxos_begin must precede the signature");
 
-        Assert.True(authorize.SpanStart < nativeBegin.SpanStart,
-            "the current store/payment-method authorization must run before native UTXO creation");
-        Assert.Empty(guard.Statement.DescendantNodes().OfType<InvocationExpressionSyntax>());
-        var refusal = guard.Statement.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Single();
-        var creation = Assert.IsType<ObjectCreationExpressionSyntax>(refusal.Expression);
-        Assert.Equal("RgbAutomaticReplenishmentNotAuthorizedException", creation.Type.ToString());
+        var guards = authorizations
+            .Select(a => a.Ancestors().OfType<IfStatementSyntax>().First())
+            .OrderBy(g => g.SpanStart)
+            .ToList();
 
-        var statements = RoslynPins.BodyOf(internalCreate).DescendantNodes()
-            .OfType<BlockSyntax>()
-            .Single(b => b.Statements.Contains(guard));
-        var guardIndex = statements.Statements.IndexOf(guard);
-        var nativeStatement = nativeBegin.Ancestors().OfType<StatementSyntax>()
-            .First(s => s.Parent == statements);
-        Assert.Equal(guardIndex + 1, statements.Statements.IndexOf(nativeStatement));
+        foreach (var guard in guards)
+        {
+            Assert.Empty(guard.Statement.DescendantNodes().OfType<InvocationExpressionSyntax>());
+            var refusal = guard.Statement.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Single();
+            var creation = Assert.IsType<ObjectCreationExpressionSyntax>(refusal.Expression);
+            Assert.Equal("RgbAutomaticReplenishmentNotAuthorizedException", creation.Type.ToString());
+        }
+
+        void AssertImmediatelyFollowedBy(IfStatementSyntax guard, InvocationExpressionSyntax gated,
+            string what)
+        {
+            var block = RoslynPins.BodyOf(internalCreate).DescendantNodes()
+                .OfType<BlockSyntax>()
+                .Single(b => b.Statements.Contains(guard));
+            var gatedStatement = gated.Ancestors().OfType<StatementSyntax>()
+                .FirstOrDefault(s => s.Parent == block);
+            Assert.True(gatedStatement != null,
+                $"{what} must sit in the same statement block as the authorization guard that gates it, so "
+                + "no statement can be inserted between them");
+            Assert.True(block.Statements.IndexOf(gatedStatement!) == block.Statements.IndexOf(guard) + 1,
+                $"the authorization guard must be the statement IMMEDIATELY before {what}. Anything "
+                + "between them — in particular any await — reopens the window this pin exists to close.");
+        }
+
+        AssertImmediatelyFollowedBy(guards[0], nativeBegin, "create_utxos_begin");
+        AssertImmediatelyFollowedBy(guards[1], signature, "the signature");
+    }
+
+    [Fact]
+    public void PC4f_ArchivedIsReadOnlyOnTheUnattendedSigningAuthorizationPath()
+    {
+        var plugin = PluginCompilation.Shared;
+        var listenerTree = plugin.Tree(ListenerFile);
+        var controllerTree = plugin.Tree(ControllerFile);
+        const string recheckName = "RecheckAutomaticReplenishmentAuthorizationAsync";
+        const string predicateName = "IsAutomaticReplenishmentAuthorized";
+        const string settingsViewModelPopulator = "PopulateSettingsViewModel";
+        var authorizationMethods = new[] { recheckName, predicateName };
+        var allowedSites = new[]
+        {
+            (Tree: listenerTree, Method: recheckName),
+            (Tree: listenerTree, Method: predicateName),
+            (Tree: controllerTree, Method: settingsViewModelPopulator)
+        };
+        const string allowedSitesReason =
+            "Only RGBInvoiceListener.RecheckAutomaticReplenishmentAuthorizationAsync and "
+            + "RGBInvoiceListener.IsAutomaticReplenishmentAuthorized — the unattended-signing "
+            + "authorization decision, the one place archiving is allowed to pause anything — plus "
+            + "RGBController.PopulateSettingsViewModel, whose read only fills the settings page's "
+            + "StoreArchived display flag and gates no payment at all, may consult it. This clause binds the SYMBOL behind "
+            + "every name spelled 'Archived', not a MemberAccess node shape, because store?.Archived "
+            + "parses as ConditionalAccess + MemberBinding and a property pattern parses as neither — "
+            + "both were invisible to the shape-based scan this replaced.";
+
+        var everySpellingOfTheName = plugin.AllTrees
+            .SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<SimpleNameSyntax>()
+                .Where(n => n.Identifier.ValueText == "Archived")
+                .Select(n => (tree, node: (SyntaxNode)n)))
+            .ToList();
+
+        var reads = new List<(SyntaxTree Tree, SyntaxNode Node)>();
+        foreach (var (tree, node) in everySpellingOfTheName)
+        {
+            if (RoslynPins.BoundSymbol(plugin, tree, node) is IPropertySymbol property
+                && property.Name == "Archived"
+                && property.ContainingType?.ToDisplayString() == StoreDataFullType)
+                reads.Add((tree, node));
+        }
+
+        Assert.True(reads.Any(r => r.Tree == listenerTree && ContainingMethod(r.Node) == recheckName),
+            $"{StoreDataFullType}.Archived is never read inside {recheckName}, so archiving no longer "
+            + "pauses unattended replenishment at all");
+
+        foreach (var (tree, node) in reads)
+        {
+            var member = ContainingMethod(node);
+            Assert.True(allowedSites.Any(s => s.Tree == tree && s.Method == member),
+                $"{tree.FilePath}: {StoreDataFullType}.Archived is read in '{member}'. "
+                + allowedSitesReason
+                + " Archiving is a store-LIST visibility flag in BTCPay: an archived store's RGB payment "
+                + "method is still enabled and its checkout still works. Extending this check to the "
+                + "receive or settlement path would stop the listener detecting or settling payments on "
+                + "invoices that already exist, stranding real customer money.");
+        }
+
+        var parameterUses = plugin.AllTrees
+            .SelectMany(tree => tree.GetRoot().DescendantNodes()
+                .OfType<IdentifierNameSyntax>()
+                .Where(i => i.Identifier.ValueText == "storeArchived")
+                .Select(i => (tree, node: (SyntaxNode)i)))
+            .ToList();
+        Assert.True(parameterUses.All(u => u.tree == listenerTree
+                                           && authorizationMethods.Contains(ContainingMethod(u.node))),
+            "the archived flag is threaded only through the unattended-signing authorization predicate: "
+            + string.Join(", ", parameterUses.Select(u => ContainingMethod(u.node))));
+
+        var recheck = RoslynPins.Method(listenerTree, ListenerType, recheckName);
+        var archivedWarnings = RoslynPins.BodyOf(recheck).DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Where(i => NameOf(i) == "LogWarning"
+                        && i.ArgumentList.Arguments.Count > 0
+                        && i.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax message
+                        && ((string?)message.Token.Value ?? string.Empty)
+                            .Contains("archived", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        Assert.True(archivedWarnings.Count == 1,
+            $"{recheckName} must log exactly one Warning naming archiving as the reason replenishment "
+            + $"stopped; it logs {archivedWarnings.Count}. Each refusal cause — disabled, config changed, "
+            + "revoked authorization, archived — must be separately identifiable, because a silent stop "
+            + "drains the colorable pool and makes the RGB option vanish from checkout with nothing "
+            + "pointing at the cause.");
     }
 
     [Fact]
@@ -1663,5 +2238,41 @@ public class RgbListenerSourcePinTests
         Assert.DoesNotContain("SubscribeAsync<InvoiceEvent>", text, StringComparison.Ordinal);
         Assert.DoesNotContain("GetMonitoredInvoices", text);
         Assert.DoesNotContain("EnqueuePendingInvoices", text);
+    }
+
+    [Fact]
+    public void PD4_RefreshPrecedesReplenishInsideTheSamePollLoopBody()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ListenerFile);
+        var poll = RoslynPins.Method(tree, ListenerType, PollLoop);
+
+        RoslynPins.AssertNoLocalShadow(poll, Refresh, Replenish);
+
+        var refresh = Single(poll, Refresh);
+        var replenish = Single(poll, Replenish);
+
+        RoslynPins.AssertBindsToMemberOf(plugin, tree, refresh.Expression, SymbolKind.Method,
+            ListenerFullType, Refresh, PollLoop);
+        RoslynPins.AssertBindsToMemberOf(plugin, tree, replenish.Expression, SymbolKind.Method,
+            ListenerFullType, Replenish, PollLoop);
+
+        foreach (var (name, invocation) in new[] { (Refresh, refresh), (Replenish, replenish) })
+            Assert.True(invocation.Ancestors().OfType<AwaitExpressionSyntax>()
+                    .Any(a => a.Expression.Span.Contains(invocation.Span)),
+                $"{PollLoop}: '{name}' must be awaited; a fire-and-forget call establishes no order at all");
+
+        Assert.True(refresh.SpanStart < replenish.SpanStart,
+            $"{PollLoop}: 'await {Refresh}' must precede 'await {Replenish}'. {Refresh} is the call that "
+            + $"reconciles each wallet's rgb-lib state, and {Replenish} decides how many colorable UTXOs to "
+            + "sign for from that state, so the refresh comes first. Do not swap them.");
+
+        var loop = RoslynPins.BodyOf(poll).DescendantNodes().OfType<WhileStatementSyntax>()
+            .Single(w => w.Parent == RoslynPins.BodyOf(poll));
+        foreach (var (name, invocation) in new[] { (Refresh, refresh), (Replenish, replenish) })
+            Assert.True(loop.Statement.Span.Contains(invocation.Span),
+                $"{PollLoop}: '{name}' must stay inside the SAME while-loop body as the other. Moving either "
+                + "out of the loop body — including into a helper invoked after the loop — leaves both calls "
+                + $"present and textually ordered while destroying the per-iteration order this pin asserts.");
     }
 }

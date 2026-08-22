@@ -122,8 +122,10 @@ public class RGBConfiguration
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
     // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
     // never fire on a settle path, so audit clause 3 shipped its cap and not its rate limit. Because
-    // create_utxos is `up_to` a target total, one successful creation reaches the goal, so a longer gap
-    // costs almost no liveness. Pinned by CooldownMustOutlastTheSweepPeriod.
+    // EvaluateReplenishDemand requests exactly the shortfall — create_utxos_begin is called with
+    // up_to = false, so the request is a count of NEW outputs, not a target total — one successful
+    // creation reaches the goal unless the cap itself is the binding constraint, so a longer gap costs
+    // almost no liveness. Pinned by CooldownMustOutlastTheSweepPeriod.
     const int DefaultAutoUtxoCooldownMinutes = 30;
     const int DefaultAutoUtxoMaxBackoffMinutes = 160;
 
@@ -132,6 +134,18 @@ public class RGBConfiguration
 
     [JsonPropertyName("max_auto_colorable_utxos")]
     public int MaxAutoColorableUtxos { get; set; } = 50;
+
+    const int DefaultMaxManualColorableUtxos = 250;
+
+    int _maxManualColorableUtxos = DefaultMaxManualColorableUtxos;
+
+    [JsonPropertyName("max_manual_colorable_utxos")]
+    public int MaxManualColorableUtxos
+    {
+        get => _maxManualColorableUtxos;
+        set => _maxManualColorableUtxos =
+            value > 0 ? value : DefaultMaxManualColorableUtxos;
+    }
 
     // WHY the clamping lives in the accessors: the listener's tracker construction is pinned to the literal
     // expression TimeSpan.FromMinutes(_cfg.AutoUtxoCooldownMinutes), so the value has to be safe by the time

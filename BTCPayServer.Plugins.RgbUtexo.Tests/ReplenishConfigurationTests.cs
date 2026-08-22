@@ -169,4 +169,69 @@ public class ReplenishConfigurationTests
         var cfg = new RGBConfiguration { MaxAutoColorableUtxos = configured };
         Assert.Equal(configured, cfg.MaxAutoColorableUtxos);
     }
+
+    [Fact]
+    public void ManualCeilingJsonKey_DeserializesOntoItsOwnKnob()
+    {
+        var cfg = JsonSerializer.Deserialize<RGBConfiguration>(
+            """{ "max_manual_colorable_utxos": 12, "max_auto_colorable_utxos": 0 }""");
+        Assert.NotNull(cfg);
+        Assert.Equal(12, cfg!.MaxManualColorableUtxos);
+        Assert.Equal(0, cfg.MaxAutoColorableUtxos);
+    }
+
+    [Fact]
+    public void ManualCeilingDefault_IsAPositiveBoundOnTheColorablePool()
+    {
+        var cfg = new RGBConfiguration();
+        Assert.Equal(250, cfg.MaxManualColorableUtxos);
+        Assert.True(cfg.MaxManualColorableUtxos >= RgbConfigBounds.UtxoCountMax,
+            $"the default manual ceiling ({cfg.MaxManualColorableUtxos}) must admit at least one "
+            + $"maximum-size batch ({RgbConfigBounds.UtxoCountMax}) or a first press could be refused");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(int.MinValue)]
+    public void NonPositiveManualCeiling_FallsBackToTheDefaultInsteadOfDisablingTheButton(int configured)
+    {
+        var cfg = new RGBConfiguration { MaxManualColorableUtxos = configured };
+        Assert.True(cfg.MaxManualColorableUtxos > 0,
+            $"a configured manual ceiling of {configured} resolved to {cfg.MaxManualColorableUtxos}. "
+            + "Unlike MaxAutoColorableUtxos, zero is NOT a meaningful setting here: there is no "
+            + "\"disable the Create UTXOs button\" feature, and a non-positive value would leave every "
+            + "wallet already holding a colorable UTXO with no way to provision another.");
+        Assert.Equal(250, cfg.MaxManualColorableUtxos);
+    }
+
+    [Fact]
+    public void EnvironmentManualCeiling_IsSettableAndCannotBeDrivenNonPositive()
+    {
+        var raised = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(raised, Env(("RGB_MAX_MANUAL_COLORABLE_UTXOS", "900")));
+        Assert.Equal(900, raised.MaxManualColorableUtxos);
+
+        var zeroed = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(zeroed, Env(("RGB_MAX_MANUAL_COLORABLE_UTXOS", "0")));
+        Assert.Equal(250, zeroed.MaxManualColorableUtxos);
+
+        var typo = new RGBConfiguration { MaxManualColorableUtxos = 77 };
+        RGBPlugin.ApplyEnvironmentOverrides(typo, Env(("RGB_MAX_MANUAL_COLORABLE_UTXOS", "12x")));
+        Assert.Equal(77, typo.MaxManualColorableUtxos);
+    }
+
+    [Fact]
+    public void TheAutomaticCapAndTheManualCeiling_AreIndependentKnobs()
+    {
+        var autoDisabled = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(autoDisabled, Env(("RGB_MAX_AUTO_COLORABLE_UTXOS", "0")));
+        Assert.Equal(0, autoDisabled.MaxAutoColorableUtxos);
+        Assert.Equal(250, autoDisabled.MaxManualColorableUtxos);
+
+        var manualLowered = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(manualLowered, Env(("RGB_MAX_MANUAL_COLORABLE_UTXOS", "5")));
+        Assert.Equal(5, manualLowered.MaxManualColorableUtxos);
+        Assert.Equal(50, manualLowered.MaxAutoColorableUtxos);
+    }
 }

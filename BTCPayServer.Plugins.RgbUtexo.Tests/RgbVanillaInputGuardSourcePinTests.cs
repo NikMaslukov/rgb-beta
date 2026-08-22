@@ -15,6 +15,74 @@ public class RgbVanillaInputGuardSourcePinTests
     const string SignerType = "MemoryWalletSigner";
     const string Guard = "EnsureInputsOnRgbVanillaAccount";
     const string Flag = "RequireRgbVanillaKeychainInputs";
+    const string CreateUtxos = "CreateColorableUtxosInternalAsync";
+
+    [Fact]
+    public void CreateUtxosPolicy_BindsEverySecurityCriticalValue()
+    {
+        var tree = PluginCompilation.Shared.Tree(ServiceFile);
+        var method = RoslynPins.Method(tree, "RGBWalletService", CreateUtxos);
+        var policy = RoslynPins.BodyOf(method).DescendantNodes()
+            .OfType<ObjectCreationExpressionSyntax>()
+            .Single(o => o.Type.ToString() == "SigningPolicy");
+
+        var assignments = policy.Initializer?.Expressions.OfType<AssignmentExpressionSyntax>().ToList()
+            ?? [];
+        var byMember = assignments.ToDictionary(a => a.Left.ToString(), a => a.Right);
+
+        var expected = new Dictionary<string, string>
+        {
+            ["MaxUnknownOutputSats"] = "0",
+            ["MaxFeeSats"] = "CreateUtxosMaxFeeSatsAtOneInput(count)",
+            ["MaxFeeSatsPerAdditionalInput"] = "CreateUtxosMaxFeeSatsPerAdditionalInput(count)",
+            ["MaxOutputCount"] = "count+1",
+            [Flag] = "true"
+        };
+
+        Assert.True(byMember.Count == expected.Count + 1,
+            $"{CreateUtxos}'s SigningPolicy assigns {byMember.Count} member(s): "
+            + $"{string.Join(", ", byMember.Keys)}. It must assign exactly "
+            + $"{string.Join(", ", expected.Keys)} and AllowedScripts — no more, no fewer. A dropped "
+            + "member falls back to a permissive default; an added one is an unpinned policy decision.");
+
+        foreach (var (member, value) in expected)
+        {
+            Assert.True(byMember.TryGetValue(member, out var actual),
+                $"{CreateUtxos}'s SigningPolicy no longer assigns {member}; its default is more "
+                + "permissive than the value this path requires");
+            var normalized = string.Concat(actual!.ToString().Where(c => !char.IsWhiteSpace(c)));
+            Assert.True(normalized == value,
+                $"{CreateUtxos}: {member} must be `{value}`, it is `{normalized}`. These six values are "
+                + "the whole of the Create-UTXOs signing policy; any drift is a security regression, not "
+                + "a refactor. MaxFeeSats and MaxFeeSatsPerAdditionalInput must stay a PAIR: rgb-lib's "
+                + "create_utxos_begin folds EVERY non-reserved vanilla UTXO of the wallet into the "
+                + "transaction (create_utxos_begin_impl collects all of internal_unspents() and "
+                + "create_split_tx calls add_utxos(inputs).manually_selected_only()), so `num` sets the "
+                + "recipient count and NOT the input count. A ceiling of the single form "
+                + "EstimateTaprootFee(count, count + 1, 2.0f) * 3 therefore models a one-input "
+                + "transaction and refuses the honest fee of a wallet holding as few as seven separate "
+                + "vanilla deposits — a PERMANENT false-reject that empties the colorable pool and stops "
+                + "RGB payments. Collapsing the pair back into one absolute number reintroduces exactly "
+                + "that; raising it to a constant instead makes the guard unfalsifiable.");
+        }
+
+        var allowed = Assert.IsType<ObjectCreationExpressionSyntax>(byMember["AllowedScripts"]);
+        Assert.True(allowed.Type.ToString() == "HashSet<Script>",
+            $"{CreateUtxos}: AllowedScripts must be a HashSet<Script>, it is `{allowed.Type}`");
+        var element = Assert.Single(allowed.Initializer?.Expressions ?? default);
+        var access = Assert.IsType<MemberAccessExpressionSyntax>(element);
+        Assert.True(access.Name.Identifier.ValueText == "ScriptPubKey",
+            $"{CreateUtxos}: the single allowed script must be a ScriptPubKey, it is `{element}`");
+
+        var addressLocal = Assert.IsType<IdentifierNameSyntax>(access.Expression).Identifier.ValueText;
+        var declarator = RoslynPins.BodyOf(method).DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == addressLocal);
+        var initializer = declarator.Initializer?.Value.ToString() ?? string.Empty;
+        Assert.True(initializer.Contains("BitcoinAddress.Create", StringComparison.Ordinal)
+                    && initializer.Contains("GetAddressAsync", StringComparison.Ordinal),
+            $"{CreateUtxos}: the single allowed script must derive from this wallet's own address, "
+            + $"obtained through GetAddressAsync; '{addressLocal}' is initialised from `{initializer}`");
+    }
 
     // (a) The flag belongs on exactly the two paths that sign a PSBT they did not build, and must NOT
     // reach asset-send, whose purpose is spending colored inputs.

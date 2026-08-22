@@ -296,6 +296,23 @@ public class RGBWalletService : IRGBWalletService
         return await CreateColorableUtxosWithAuthorizationAsync(walletId, count, size, authorize, ct);
     }
 
+    internal static void EnsureStandingColorableRoom(
+        int standingColorable, int requested, int manualCeiling)
+    {
+        var ceilingNeverBelowOneBatch = Math.Max(manualCeiling, requested);
+        if ((long)standingColorable + requested <= ceilingNeverBelowOneBatch) return;
+        throw new RgbColorableUtxoCeilingReachedException(
+            $"refusing to create {requested} more colorable UTXOs: this wallet already holds "
+            + $"{standingColorable} and the manual ceiling is {ceilingNeverBelowOneBatch}. Colorable "
+            + "UTXOs cannot be spent by this plugin's BTC send, so each extra one parks vanilla BTC "
+            + "beyond its reach. Spend the colorable UTXOs this wallet already holds on RGB sends, or "
+            + $"raise the manual ceiling to at least {(long)standingColorable + requested} by setting "
+            + "the RGB_MAX_MANUAL_COLORABLE_UTXOS environment variable (or max_manual_colorable_utxos "
+            + "in rgb.json) and restarting BTCPay Server. This ceiling belongs to this button alone: "
+            + "RGB_MAX_AUTO_COLORABLE_UTXOS bounds automatic creation only, and setting it to 0 to stop "
+            + "unattended signing never blocks manual provisioning.");
+    }
+
     async Task<int> CreateColorableUtxosWithAuthorizationAsync(
         string walletId, int count, int size,
         Func<CancellationToken, Task<bool>>? authorize,
@@ -305,6 +322,12 @@ public class RGBWalletService : IRGBWalletService
         await sendLock.WaitAsync(ct);
         try
         {
+            var isManualOperatorPath = authorize == null;
+            if (isManualOperatorPath)
+                EnsureStandingColorableRoom(
+                    (await _rgbLib.ListUnspentsAsync(walletId, ct)).Count(u => u.Utxo.Colorable),
+                    count, _cfg.MaxManualColorableUtxos);
+
             var wallet = await GetWalletOrThrow(walletId, ct);
             var walletDir = Path.Combine(
                 _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network), wallet.MasterFingerprint);
@@ -332,24 +355,32 @@ public class RGBWalletService : IRGBWalletService
 
         try
         {
+            var ownAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
+            var policy = new SigningPolicy
+            {
+                MaxUnknownOutputSats = 0,
+                MaxFeeSats = CreateUtxosMaxFeeSatsAtOneInput(count),
+                MaxFeeSatsPerAdditionalInput = CreateUtxosMaxFeeSatsPerAdditionalInput(count),
+                AllowedScripts = new HashSet<Script> { ownAddr.ScriptPubKey },
+                MaxOutputCount = count + 1,
+                RequireRgbVanillaKeychainInputs = true
+            };
+            var signer = await ResolveSignerOrThrowAsync(walletId, ct);
+
             if (authorize != null && !await authorize(ct))
                 throw new RgbAutomaticReplenishmentNotAuthorizedException(
                     "automatic RGB UTXO creation is no longer authorized by current store state");
 
-            var result = await _rgbLib.CreateUtxosBeginAsync(walletId, count, size, 2.0f, ct);
+            var result = await _rgbLib.CreateUtxosBeginAsync(walletId, count, size, CreateUtxosFeeRate, ct);
             if (string.IsNullOrEmpty(result)) return 0;
 
-            var ownAddr = BitcoinAddress.Create(await _rgbLib.GetAddressAsync(walletId, ct), network);
             var psbt = ExtractPsbt(result);
-            var signed = await SignPsbtLocallyAsync(walletId, psbt, network,
-                new SigningPolicy
-                {
-                    MaxUnknownOutputSats = 0,
-                    MaxFeeSats = EstimateTaprootFee(count, count + 1, 2.0f) * 3,
-                    AllowedScripts = new HashSet<Script> { ownAddr.ScriptPubKey },
-                    MaxOutputCount = count + 1,
-                    RequireRgbVanillaKeychainInputs = true
-                }, ct);
+
+            if (authorize != null && !await authorize(ct))
+                throw new RgbAutomaticReplenishmentNotAuthorizedException(
+                    "automatic RGB UTXO creation stopped being authorized while the unsigned transaction was built — discarding it unsigned");
+
+            var signed = await SignPsbtWithSignerAsync(signer, walletId, psbt, network, policy, ct);
             await _rgbLib.CreateUtxosEndAsync(walletId, signed, ct);
             return count;
         }
@@ -360,12 +391,17 @@ public class RGBWalletService : IRGBWalletService
         }
     }
 
-    async Task<string> SignPsbtLocallyAsync(string walletId, string psbt, Network network, SigningPolicy policy, CancellationToken ct = default)
+    async Task<IRgbWalletSigner> ResolveSignerOrThrowAsync(string walletId, CancellationToken ct)
     {
         var signer = await _signerProvider.GetSignerAsync(walletId, ct);
         if (signer == null)
             throw new InvalidOperationException($"No local signer available for wallet {walletId}. Keys may not be loaded.");
+        return signer;
+    }
 
+    async Task<string> SignPsbtWithSignerAsync(IRgbWalletSigner signer, string walletId, string psbt,
+        Network network, SigningPolicy policy, CancellationToken ct)
+    {
         _log.LogDebug("Signing PSBT locally for wallet {WalletId}", walletId);
         try
         {
@@ -375,6 +411,12 @@ public class RGBWalletService : IRGBWalletService
         {
             throw new InvalidOperationException($"Signer for wallet {walletId} was disposed (wallet may have been deleted). Retry the operation.");
         }
+    }
+
+    async Task<string> SignPsbtLocallyAsync(string walletId, string psbt, Network network, SigningPolicy policy, CancellationToken ct = default)
+    {
+        var signer = await ResolveSignerOrThrowAsync(walletId, ct);
+        return await SignPsbtWithSignerAsync(signer, walletId, psbt, network, policy, ct);
     }
 
     public async Task<List<RgbAsset>> ListAssetsAsync(string walletId, CancellationToken ct = default)
@@ -689,6 +731,31 @@ public class RGBWalletService : IRGBWalletService
                     "staged-send recovery made no durable progress");
             page = next;
         }
+    }
+
+    public async Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+        string walletId, CancellationToken ct = default)
+    {
+        var wallet = await GetWalletOrThrow(walletId, ct);
+        var walletDir = Path.Combine(
+            _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network), wallet.MasterFingerprint);
+        var reserved = await RgbVanillaReservationInspector.ReadReservedOutpointsAsync(
+            Path.Combine(walletDir, "rgb_lib_db"), ct);
+        if (reserved.Count == 0) return RgbVanillaReservationInspector.Clean;
+
+        List<Outpoint>? bdkUnspentOutpoints = null;
+        try
+        {
+            var unspents = await _rgbLib.ListUnspentsAsync(walletId, ct);
+            bdkUnspentOutpoints = unspents.Select(u => u.Utxo.Outpoint).ToList();
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex,
+                "Wallet {WalletId}: cannot classify pending vanilla reservations without the unspent set",
+                walletId);
+        }
+        return RgbVanillaReservationInspector.Classify(reserved, bdkUnspentOutpoints);
     }
 
     async Task ReconcileWalletRecoveryAsync(RGBWallet wallet, CancellationToken ct,
@@ -1860,6 +1927,16 @@ public class RGBWalletService : IRGBWalletService
         var vsize = 10.5 + numInputs * 57.5 + numOutputs * 43.0;
         return (long)Math.Ceiling(vsize * feeRate);
     }
+
+    internal const float CreateUtxosFeeRate = 2.0f;
+    internal const int CreateUtxosFeeCeilingMultiplier = 3;
+
+    internal static long CreateUtxosMaxFeeSatsAtOneInput(int requestCount)
+        => EstimateTaprootFee(1, requestCount + 1, CreateUtxosFeeRate) * CreateUtxosFeeCeilingMultiplier;
+
+    internal static long CreateUtxosMaxFeeSatsPerAdditionalInput(int requestCount)
+        => EstimateTaprootFee(2, requestCount + 1, CreateUtxosFeeRate) * CreateUtxosFeeCeilingMultiplier
+           - CreateUtxosMaxFeeSatsAtOneInput(requestCount);
 
     async Task<RGBWallet> GetWalletOrThrow(string id, CancellationToken ct = default) =>
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");

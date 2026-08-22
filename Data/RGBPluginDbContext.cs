@@ -19,6 +19,8 @@ public class RGBPluginDbContext : DbContext
     public DbSet<RGBWallet> RGBWallets { get; set; } = null!;
     public DbSet<RGBInvoice> RGBInvoices { get; set; } = null!;
     public DbSet<RGBAsset> RGBAssets { get; set; } = null!;
+    public DbSet<RGBStoreAutoReplenishment> RGBStoreAutoReplenishments { get; set; } = null!;
+    public DbSet<RGBStoreNoticeState> RGBStoreNoticeStates { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -52,6 +54,18 @@ public class RGBPluginDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(e => e.WalletId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<RGBStoreAutoReplenishment>(entity =>
+        {
+            entity.ToTable("RGB_StoreAutoReplenishment");
+            entity.HasKey(e => e.StoreId);
+        });
+
+        modelBuilder.Entity<RGBStoreNoticeState>(entity =>
+        {
+            entity.ToTable("RGB_StoreNoticeState");
+            entity.HasKey(e => e.StoreId);
         });
 
         modelBuilder.Entity<RGBAsset>(entity =>

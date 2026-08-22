@@ -16,6 +16,10 @@ public class ReceiveAnyAssetControllerTests
 {
     class RecordingWalletService : IRGBWalletService
     {
+        public Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+            string walletId, CancellationToken ct = default)
+            => Task.FromResult(RgbVanillaReservationInspector.Clean);
+
         public Func<string, Task<RGBWallet?>>? GetWalletForStoreImpl;
         public Func<string, string?, long?, TimeSpan?, string?, int, CancellationToken, Task<RGBInvoice>>? CreateInvoiceImpl;
 
@@ -60,7 +64,9 @@ public class ReceiveAnyAssetControllerTests
             events: null!,
             cache: null!,
             btcPayOptions: Options.Create(new BTCPayServerOptions()),
-            rateSource: null!);
+            rateSource: null!,
+            cfg: new RGBConfiguration(Path.Combine(Path.GetTempPath(), "rgb-controller-tests")),
+            authorizations: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new TestTempDataProvider());

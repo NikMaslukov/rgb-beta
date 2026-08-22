@@ -100,6 +100,10 @@ public class RgbPricingHandlerTests
     // fault before reaching the pricing path.
     sealed class PricingWalletStub : IRGBWalletService, IRgbPricingCodeCollisionGuard
     {
+        public Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+            string walletId, CancellationToken ct = default)
+            => Task.FromResult(RgbVanillaReservationInspector.Clean);
+
         public RGBAsset? Asset;
         public long? RecordedAmount;
         public bool Unambiguous = true;

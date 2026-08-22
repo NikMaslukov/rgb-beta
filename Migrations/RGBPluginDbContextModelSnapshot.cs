@@ -198,6 +198,47 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
                     b.ToTable("RGB_Wallets", (string)null);
                 });
 
+            modelBuilder.Entity("BTCPayServer.Plugins.RgbUtexo.Data.Entities.RGBStoreAutoReplenishment", b =>
+                {
+                    b.Property<string>("StoreId")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("DecidedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("DecidedBy")
+                        .HasColumnType("text");
+
+                    b.Property<string>("DecidedForWalletId")
+                        .HasColumnType("text");
+
+                    b.Property<int>("Decision")
+                        .HasColumnType("integer");
+
+                    b.HasKey("StoreId");
+
+                    b.ToTable("RGB_StoreAutoReplenishment", (string)null);
+                });
+
+            modelBuilder.Entity("BTCPayServer.Plugins.RgbUtexo.Data.Entities.RGBStoreNoticeState", b =>
+                {
+                    b.Property<string>("StoreId")
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("CapDisabledNoticeSentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ConfigOutOfBoundsNoticeSentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("NotAuthorizedNoticeSentAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("StoreId");
+
+                    b.ToTable("RGB_StoreNoticeState", (string)null);
+                });
+
             modelBuilder.Entity("BTCPayServer.Plugins.RgbUtexo.Data.Entities.RGBAsset", b =>
                 {
                     b.HasOne("BTCPayServer.Plugins.RgbUtexo.Data.Entities.RGBWallet", "Wallet")

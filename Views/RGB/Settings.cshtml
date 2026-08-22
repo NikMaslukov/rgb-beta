@@ -1,3 +1,4 @@
+@using BTCPayServer.Plugins.RgbUtexo.Data.Entities
 @using BTCPayServer.Plugins.RgbUtexo.Services
 @model RGBSettingsViewModel
 @{
@@ -14,6 +15,66 @@
 </div>
 
 <partial name="_StatusMessage" />
+
+@if (Model.ReplenishmentNoticeCause != RgbReplenishmentNoticeCause.None)
+{
+    <div class="alert alert-warning" id="rgb-replenishment-notice">
+        <strong>@Model.ReplenishmentNoticeMessage</strong>
+        @if (Model.ReplenishmentNoticeInvitesGrant)
+        {
+            <form method="post" asp-action="SetAutomaticReplenishmentAuthorization"
+                  asp-route-storeId="@Model.StoreId" class="mt-2">
+                <input type="hidden" name="grant" value="true" />
+                <button type="submit" class="btn btn-primary btn-sm" id="rgb-grant-auto-replenishment">
+                    Authorize automatic colorable-UTXO creation
+                </button>
+            </form>
+        }
+    </div>
+}
+
+@if (Model.StoreArchived)
+{
+    <div class="alert alert-warning" id="rgb-archived-notice">
+        <strong>Automatic colorable-UTXO creation is paused because this store is archived.</strong>
+        RGB payments will stop once the current pool of colorable UTXOs is exhausted.
+        Unarchive the store to resume automatic creation, or press <strong>Create UTXOs</strong> to
+        provision manually. Archiving does not stop payments on invoices that already exist from being
+        detected and settled.
+    </div>
+}
+
+@if (Model.VanillaReservationState == RgbVanillaReservationState.LiveAndConstraining)
+{
+    <div class="alert alert-warning" id="rgb-vanilla-reservation-notice">
+        <strong>@Model.VanillaReservationStillUnspentCount reserved BTC output(s) are excluded from this
+        wallet's coin selection.</strong>
+        An earlier colorable-UTXO creation was started and never completed, and its reservation still
+        stands, so the spendable BTC balance reads low and automatic colorable-UTXO creation cannot fund
+        itself.
+        <strong>Remedy:</strong> use <strong>Send BTC</strong> to send from this wallet to an address of
+        your own, then press <strong>Refresh</strong> so the wallet re-syncs. The reserved outputs are
+        spent by that transaction and normal operation resumes. The refresh is required — without it the
+        wallet still believes the outputs are unspent.
+    </div>
+}
+else if (Model.VanillaReservationState == RgbVanillaReservationState.InertAlreadyRecovered)
+{
+    <div class="alert alert-info" id="rgb-vanilla-reservation-notice">
+        @Model.VanillaReservationCount reserved BTC output record(s) remain in this wallet's database, but
+        all of them are already spent, so they exclude nothing and constrain no spend.
+        <strong>This is the expected residue of the send-to-self remedy and is not a fault.</strong>
+        Nothing needs doing.
+    </div>
+}
+else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
+{
+    <div class="alert alert-info" id="rgb-vanilla-reservation-notice">
+        @Model.VanillaReservationCount reserved BTC output record(s) are recorded for this wallet, but
+        their spent-ness could not be determined because the wallet's unspent set is unavailable right
+        now. No conclusion is drawn — reload this page once the connection is healthy.
+    </div>
+}
 
 <div class="row">
     <div class="col-lg-8">
@@ -216,6 +277,93 @@
                 </div>
             </div>
         </form>
+
+        <div class="card mb-4" id="rgb-auto-replenishment-card">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="fa fa-robot"></i> Automatic colorable-UTXO creation</h5>
+            </div>
+            <div class="card-body">
+                <p>
+                    When authorized, this store's RGB wallet will <strong>sign and broadcast on-chain
+                    Bitcoin transactions unattended</strong> — with no operator present and no per-transaction
+                    approval — to keep a pool of colorable UTXOs available for incoming RGB payments.
+                </p>
+                <ul>
+                    <li>Up to <strong>@Model.MaxAutoColorableUtxos</strong> standing colorable UTXOs
+                        (deployment-wide limit).</li>
+                    @if (Model.PersistedUtxoCount.HasValue)
+                    {
+                        <li>Each of the <strong>@Model.PersistedUtxoSize sat</strong> size saved in this
+                            store's payment settings, created
+                            <strong>@Model.PersistedUtxoCount</strong> at a time.</li>
+                        <li>At most once per cooldown period, worst case
+                            <strong>@Model.WorstCaseReplenishFeeBaseSats sat</strong> in fees per attempt,
+                            plus <strong>@Model.WorstCaseReplenishFeePerVanillaUtxoSats sat</strong> for
+                            every vanilla BTC UTXO beyond the first that this wallet holds &mdash; the
+                            transaction spends all of them at once.</li>
+                    }
+                    else
+                    {
+                        <li>The size, batch and fee figures cannot be stated because this store has no
+                            saved, in-range RGB payment settings. Automatic creation cannot run without
+                            them either. Save the payment settings above, reload this page, and the exact
+                            figures an authorization would permit will appear here.</li>
+                    }
+                    <li><strong>The trigger includes invoices created by anyone who can reach this store's
+                        public checkout page</strong>, not only invoices you created.</li>
+                </ul>
+                <p>
+                    Status:
+                    @if (Model.AutomaticReplenishmentGranted)
+                    {
+                        <span class="badge bg-success" id="rgb-auto-replenishment-status">Authorized</span>
+                    }
+                    else if (Model.AutomaticReplenishmentDecision == RgbAutoReplenishmentDecision.Granted)
+                    {
+                        <span class="badge bg-warning" id="rgb-auto-replenishment-status">Authorized for a different wallet — re-authorize to use it</span>
+                    }
+                    else if (Model.AutomaticReplenishmentDecision == RgbAutoReplenishmentDecision.Revoked)
+                    {
+                        <span class="badge bg-secondary" id="rgb-auto-replenishment-status">Revoked</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary" id="rgb-auto-replenishment-status">Not authorized</span>
+                    }
+                    @if (Model.AutomaticReplenishmentDecidedAt.HasValue)
+                    {
+                        <span class="text-muted small">
+                            (last changed @Model.AutomaticReplenishmentDecidedAt.Value.ToString("u"))
+                        </span>
+                    }
+                </p>
+                <form method="post" asp-action="SetAutomaticReplenishmentAuthorization"
+                      asp-route-storeId="@Model.StoreId">
+                    @if (Model.AutomaticReplenishmentGranted)
+                    {
+                        <input type="hidden" name="grant" value="false" />
+                        <button type="submit" class="btn btn-outline-danger" id="rgb-revoke-auto-replenishment">
+                            Revoke authorization
+                        </button>
+                    }
+                    else if (Model.PersistedUtxoCount.HasValue)
+                    {
+                        <input type="hidden" name="grant" value="true" />
+                        <button type="submit" class="btn btn-primary" id="rgb-authorize-auto-replenishment">
+                            Authorize automatic colorable-UTXO creation
+                        </button>
+                    }
+                    else
+                    {
+                        <p class="text-muted mb-0" id="rgb-authorize-auto-replenishment-unavailable">
+                            Save this store's RGB payment settings above, then reload this page, to
+                            authorize automatic colorable-UTXO creation. Authorizing is withheld until the
+                            figures above state what it would permit.
+                        </p>
+                    }
+                </form>
+            </div>
+        </div>
 
         <div class="card mb-4">
             <div class="card-header">

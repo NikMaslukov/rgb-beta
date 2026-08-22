@@ -62,6 +62,10 @@ public class RgbSettingsReadOnlyTests
     // stub would break them. RgbPricingHandlerTests and RgbSendBtcDisplayTests set the same precedent.
     class SettingsWalletService : IRGBWalletService
     {
+        public Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+            string walletId, CancellationToken ct = default)
+            => Task.FromResult(RgbVanillaReservationInspector.Clean);
+
         public int MaxAllocationsPerUtxo { get; init; }
 
         // Network is not optional: PopulateSettingsViewModel resolves the network settings before either
@@ -111,7 +115,9 @@ public class RgbSettingsReadOnlyTests
             events: null!,
             cache: null!,
             btcPayOptions: Options.Create(new BTCPayServerOptions()),
-            rateSource: null!);
+            rateSource: null!,
+            cfg: new RGBConfiguration(Path.Combine(Path.GetTempPath(), "rgb-controller-tests")),
+            authorizations: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new TestTempDataProvider());

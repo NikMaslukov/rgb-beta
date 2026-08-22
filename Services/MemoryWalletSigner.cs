@@ -16,11 +16,11 @@ public class MemoryWalletSigner : IRgbWalletSigner
     const uint GapLimitScanBuffer = 200;
     const uint MinScanBaseline = 1000;
     const uint MaxReasonableIndex = 100_000;
+    internal const long ValueProportionalFeeCeilingFloorSats = 10_000;
     KeyPath[]? _allowedAccountPrefixes;
 
     public string MasterFingerprint { get; }
-    public string XpubVanilla { get; }
-    public string XpubColored { get; }
+    public string XpubRgbLibVanilla { get; }
     public bool IsDisposed { get; private set; }
 
     public MemoryWalletSigner(string mnemonic, Network network, ILogger? logger = null)
@@ -42,8 +42,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
         var rgbCoinType = isTestnet ? 827167 : 827166;
         _rgbColoredAccountKey = _masterKey.Derive(new KeyPath($"m/86'/{rgbCoinType}'/0'"));
 
-        XpubVanilla = _vanillaAccountKey.Neuter().ToString(network);
-        XpubColored = _coloredAccountKey.Neuter().ToString(network);
+        XpubRgbLibVanilla = _coloredAccountKey.Neuter().ToString(network);
 
         _allowedAccountPrefixes = [vanillaPath, coloredPath, new KeyPath($"m/86'/{rgbCoinType}'/0'")];
     }
@@ -312,10 +311,20 @@ public class MemoryWalletSigner : IRgbWalletSigner
         {
             var totalOutputValue = psbt.GetGlobalTransaction().Outputs.Sum(o => o.Value.Satoshi);
             var fee = totalInputValue - totalOutputValue;
-            var maxFee = (long)(totalOutputValue * policy.MaxFeePercent / 100.0);
-            if (maxFee < 10_000) maxFee = 10_000;
-            if (policy.MaxFeeSats.HasValue && policy.MaxFeeSats.Value < maxFee)
-                maxFee = policy.MaxFeeSats.Value;
+            long maxFee;
+            if (policy.MaxFeeSats.HasValue && policy.MaxFeeSatsPerAdditionalInput != 0)
+            {
+                maxFee = policy.MaxFeeSats.Value
+                    + policy.MaxFeeSatsPerAdditionalInput * Math.Max(psbt.Inputs.Count - 1, 0);
+            }
+            else
+            {
+                maxFee = (long)(totalOutputValue * policy.MaxFeePercent / 100.0);
+                if (maxFee < ValueProportionalFeeCeilingFloorSats)
+                    maxFee = ValueProportionalFeeCeilingFloorSats;
+                if (policy.MaxFeeSats.HasValue && policy.MaxFeeSats.Value < maxFee)
+                    maxFee = policy.MaxFeeSats.Value;
+            }
             if (fee > maxFee)
                 throw new InvalidOperationException(
                     $"PSBT fee ({fee} sat) exceeds max allowed {maxFee} sat");

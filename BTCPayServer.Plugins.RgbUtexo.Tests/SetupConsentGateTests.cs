@@ -26,7 +26,9 @@ public class SetupConsentGateTests
             events: null!,
             cache: null!,
             btcPayOptions: Options.Create(new BTCPayServerOptions()),
-            rateSource: null!);
+            rateSource: null!,
+            cfg: new RGBConfiguration(Path.Combine(Path.GetTempPath(), "rgb-controller-tests")),
+            authorizations: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new TestTempDataProvider());

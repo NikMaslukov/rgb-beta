@@ -5,6 +5,10 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests.Stubs;
 
 public sealed class FakeRGBWalletService : IRGBWalletService
 {
+        public Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+            string walletId, CancellationToken ct = default)
+            => Task.FromResult(RgbVanillaReservationInspector.Clean);
+
     static InvalidOperationException Reg() =>
         new("regression: consent gate was bypassed and a wallet-service method was called");
 

@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 using Microsoft.AspNetCore.Http;
 
@@ -248,6 +249,24 @@ public class RGBSettingsViewModel : StoreViewModel
     public string? QuoteCurrency { get; set; }
     public bool RateRuleMissing { get; set; }
     public bool UsesDefaultRules { get; set; }
+
+    public bool AutomaticReplenishmentGranted { get; set; }
+    public RgbAutoReplenishmentDecision AutomaticReplenishmentDecision { get; set; }
+    public DateTimeOffset? AutomaticReplenishmentDecidedAt { get; set; }
+    public string? AutomaticReplenishmentDecidedBy { get; set; }
+    public RgbReplenishmentNoticeCause ReplenishmentNoticeCause { get; set; }
+    public string ReplenishmentNoticeMessage { get; set; } = "";
+    public bool ReplenishmentNoticeInvitesGrant { get; set; }
+    public int MaxAutoColorableUtxos { get; set; }
+    public int? PersistedUtxoCount { get; set; }
+    public int? PersistedUtxoSize { get; set; }
+    public long WorstCaseReplenishFeeBaseSats { get; set; }
+    public long WorstCaseReplenishFeePerVanillaUtxoSats { get; set; }
+
+    public RgbVanillaReservationState VanillaReservationState { get; set; } = RgbVanillaReservationState.Clean;
+    public int VanillaReservationCount { get; set; }
+    public int VanillaReservationStillUnspentCount { get; set; }
+    public bool StoreArchived { get; set; }
 }
 
 public class RGBBlindReceiveViewModel : StoreViewModel

@@ -18,6 +18,10 @@ public class RgbSendBtcDisplayTests
     // success arm; this one answers the two calls the balance helper makes and nothing else.
     class BalanceWalletService : IRGBWalletService
     {
+        public Task<RgbVanillaReservationReport> GetVanillaReservationReportAsync(
+            string walletId, CancellationToken ct = default)
+            => Task.FromResult(RgbVanillaReservationInspector.Clean);
+
         public Func<BtcBalance>? Balance;
         public Func<List<UnspentOutput>>? Unspents;
 
@@ -52,7 +56,9 @@ public class RgbSendBtcDisplayTests
         var controller = new RGBController(
             wallets: wallets, stores: null!, handlers: null!, db: null!,
             log: NullLogger<RGBController>.Instance, userManager: null!, events: null!, cache: null!,
-            btcPayOptions: Options.Create(new BTCPayServerOptions()), rateSource: null!);
+            btcPayOptions: Options.Create(new BTCPayServerOptions()), rateSource: null!,
+            cfg: new RGBConfiguration(Path.Combine(Path.GetTempPath(), "rgb-controller-tests")),
+            authorizations: null!);
         var httpContext = new DefaultHttpContext();
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
         controller.TempData = new TempDataDictionary(httpContext, new Stubs.TestTempDataProvider());

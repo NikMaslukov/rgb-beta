@@ -28,6 +28,8 @@ public class RGBInvoiceListener : IHostedService
     readonly StoreRepository _stores;
     readonly RGBConfiguration _cfg;
     readonly ReplenishCooldownTracker _cooldowns;
+    readonly RgbAutoReplenishmentAuthorizationStore _authorizations;
+    readonly RgbReplenishmentNoticeService _notices;
     readonly ILogger<RGBInvoiceListener> _log;
 
     // The channel is a latency hint only; RGBInvoices + each wallet's rgb-lib database are the durable
@@ -51,11 +53,13 @@ public class RGBInvoiceListener : IHostedService
     public RGBInvoiceListener(IMemoryCache cache, InvoiceRepository invoices, RGBPaymentMethodHandler handler,
         RGBWalletService wallets, RGBPluginDbContextFactory db,
         EventAggregator events, PaymentService payments, StoreRepository stores, RGBConfiguration cfg,
+        RgbAutoReplenishmentAuthorizationStore authorizations, RgbReplenishmentNoticeService notices,
         ILogger<RGBInvoiceListener> log)
     {
         _ = cache; // Kept in the public constructor for plugin/ABI compatibility; invoice entities are no longer cached.
         _invoices = invoices; _handler = handler; _wallets = wallets;
         _db = db; _events = events; _payments = payments; _stores = stores; _cfg = cfg; _log = log;
+        _authorizations = authorizations; _notices = notices;
         _cooldowns = new ReplenishCooldownTracker(
             baseCooldown: TimeSpan.FromMinutes(_cfg.AutoUtxoCooldownMinutes),
             maxBackoff: TimeSpan.FromMinutes(_cfg.AutoUtxoMaxBackoffMinutes));
@@ -229,6 +233,23 @@ public class RGBInvoiceListener : IHostedService
                     ? tok.ToObject<RGBPaymentMethodConfig>(_blobSerializer)
                     : null;
 
+                var standingAuthorizationGranted =
+                    await _authorizations.IsGrantedForWalletAsync(w.StoreId, w.Id, ct);
+                var noticeCause = RgbReplenishmentNotice.Evaluate(
+                    paymentMethodEnabled: enabled,
+                    hasStoredConfig: config != null,
+                    configValuesValid: config != null && RgbConfigBounds.ArePaymentMethodValuesValid(
+                        config.UtxoCount, config.UtxoSize, config.MinConfirmations),
+                    maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos,
+                    standingAuthorizationGranted: standingAuthorizationGranted);
+                if (noticeCause != RgbReplenishmentNoticeCause.None)
+                {
+                    await _notices.RaiseOncePerCauseAsync(w.StoreId, noticeCause, ct);
+                    if (RgbReplenishmentNotice.LogsPerSweep(noticeCause))
+                        _log.LogWarning("Wallet {WalletId}: {NoticeMessage}",
+                            w.Id, RgbReplenishmentNotice.MessageFor(noticeCause));
+                }
+
                 // Validation on Greenfield writes cannot repair values persisted by an older vulnerable
                 // build. Refuse those values again at the signing sink, before any rgb-lib or UTXO work.
                 if (config != null && !RgbConfigBounds.ArePaymentMethodValuesValid(
@@ -282,7 +303,8 @@ public class RGBInvoiceListener : IHostedService
                     maxAllocationsPerUtxo: w.MaxAllocationsPerUtxo,
                     minFreeSlots: config.UtxoCount,
                     utxoSize: config.UtxoSize,
-                    maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos);
+                    maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos,
+                    standingAuthorizationGranted: standingAuthorizationGranted);
 
                 if (decision.Outcome != ReplenishOutcome.Create)
                 {
@@ -301,7 +323,7 @@ public class RGBInvoiceListener : IHostedService
                 }
 
                 _log.LogInformation(
-                    "Wallet {WalletId}: {Outcome} — requesting {Request} total colorable UTXOs ({Colorings} colorings + {Pending} active pending, {Colorable}/{Cap} standing)",
+                    "Wallet {WalletId}: {Outcome} — requesting {Request} new colorable UTXOs ({Colorings} colorings + {Pending} active pending, {Colorable}/{Cap} standing)",
                     w.Id, decision.Outcome, decision.RequestCount, usedByColorings, activePendingInvoices,
                     colorableCount, _cfg.MaxAutoColorableUtxos);
 
@@ -370,14 +392,15 @@ public class RGBInvoiceListener : IHostedService
         var activePendingInvoices = await ctx.RGBInvoices.CountAsync(
             ActivePendingInvoicePredicate(walletId, freshNowUnix), ct);
 
-        // Keep the authoritative authorization read after the slower native and invoice work. There are
-        // no awaits after the store lookup: a disable or settings edit that lands while those reads wait
-        // cannot authorize the native begin with a stale enabled/config snapshot.
         var current = await ctx.RGBWallets.AsNoTracking()
             .FirstOrDefaultAsync(w => w.Id == walletId, ct);
         if (current == null) return false;
         var store = await _stores.FindStore(expectedStoreId);
         if (store == null) return false;
+        if (store.Archived)
+            _log.LogWarning(
+                "Wallet {WalletId}: automatic UTXO replenishment is paused because store {StoreId} is archived; unarchive the store to resume it",
+                walletId, expectedStoreId);
         var configs = store.GetPaymentMethodConfigs(onlyEnabled: true);
         var enabled = configs.TryGetValue(RGBPlugin.RGBPaymentMethodId, out var token);
         RGBPaymentMethodConfig? currentConfig = null;
@@ -387,9 +410,12 @@ public class RGBInvoiceListener : IHostedService
             catch { return false; }
         }
         if (!IsAutomaticReplenishmentAuthorized(
-                current, expectedStoreId, enabled, currentConfig, expectedConfig)
+                current, expectedStoreId, enabled, store.Archived, currentConfig, expectedConfig)
             || currentConfig == null)
             return false;
+
+        var standingAuthorizationGranted =
+            await _authorizations.IsGrantedForWalletAsync(expectedStoreId, walletId, ct);
 
         var currentDecision = EvaluateReplenishDemand(
             colorableCount: colorable.Count,
@@ -398,7 +424,8 @@ public class RGBInvoiceListener : IHostedService
             maxAllocationsPerUtxo: current.MaxAllocationsPerUtxo,
             minFreeSlots: currentConfig.UtxoCount,
             utxoSize: currentConfig.UtxoSize,
-            maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos);
+            maxAutoColorableUtxos: _cfg.MaxAutoColorableUtxos,
+            standingAuthorizationGranted: standingAuthorizationGranted);
 
         return IsCurrentReplenishmentRequestAuthorized(
             currentDecision: currentDecision,
@@ -410,6 +437,7 @@ public class RGBInvoiceListener : IHostedService
         RGBWallet? current,
         string expectedStoreId,
         bool paymentMethodEnabled,
+        bool storeArchived,
         RGBPaymentMethodConfig? currentConfig,
         RGBPaymentMethodConfig expectedConfig)
     {
@@ -419,6 +447,7 @@ public class RGBInvoiceListener : IHostedService
             || current.MaxAllocationsPerUtxo <= 0
             || !RGBPaymentMethodHandler.WalletBelongsToStore(current.StoreId, expectedStoreId)
             || !paymentMethodEnabled
+            || storeArchived
             || currentConfig == null
             || !RgbConfigBounds.ArePaymentMethodValuesValid(
                 currentConfig.UtxoCount, currentConfig.UtxoSize, currentConfig.MinConfirmations))
@@ -917,14 +946,14 @@ public class RGBInvoiceListener : IHostedService
         return null;
     }
 
-    // All arithmetic is long and narrowed once at the end: with a greenfield-written utxoCount the int form
-    // wraps negative, and Math.Clamp then turns that into 0 — a silent skip instead of a capped batch.
     internal static ReplenishDecision EvaluateReplenishDemand(
         int colorableCount, int usedByColorings, int activePendingInvoices,
-        int maxAllocationsPerUtxo, int minFreeSlots, int utxoSize, int maxAutoColorableUtxos)
+        int maxAllocationsPerUtxo, int minFreeSlots, int utxoSize, int maxAutoColorableUtxos,
+        bool standingAuthorizationGranted)
     {
         // Must precede the Math.Clamp below, whose min > max throws ArgumentException.
-        if (maxAutoColorableUtxos <= 0 || colorableCount >= maxAutoColorableUtxos)
+        if (!standingAuthorizationGranted || maxAutoColorableUtxos <= 0
+            || colorableCount >= maxAutoColorableUtxos)
             return new ReplenishDecision(ReplenishOutcome.SkipCapReached, 0, utxoSize);
 
         var totalSlots = (long)colorableCount * maxAllocationsPerUtxo;
@@ -934,7 +963,8 @@ public class RGBInvoiceListener : IHostedService
             return new ReplenishDecision(ReplenishOutcome.SkipEnoughFreeSlots, 0, utxoSize);
 
         var needed = (long)Math.Ceiling((double)(minFreeSlots - freeSlots) / maxAllocationsPerUtxo);
-        var request = (int)Math.Clamp(needed + colorableCount, 0L, (long)maxAutoColorableUtxos);
+        var headroomBelowCap = (long)maxAutoColorableUtxos - colorableCount;
+        var request = (int)Math.Clamp(needed, 1L, headroomBelowCap);
         return new ReplenishDecision(ReplenishOutcome.Create, request, utxoSize);
     }
 
