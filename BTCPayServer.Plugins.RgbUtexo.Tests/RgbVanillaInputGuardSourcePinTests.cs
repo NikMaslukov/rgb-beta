@@ -5,26 +5,192 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
-// These pins guard the vanilla-keychain input policy against edits that leave it compiling and its
-// behavioural tests green. Two of them exist because a specific defect was found during review and
-// would otherwise be silently reintroducible.
+// No behavioural test observes the policy this code hands its signer: the signer tests build their
+// own policies and the regtest fixture builds a mirror, so these pins are the only constraint on the
+// shipped policy, and each binds the value at the call site that consumes it.
 public class RgbVanillaInputGuardSourcePinTests
 {
     const string SignerFile = "Services/MemoryWalletSigner.cs";
     const string ServiceFile = "Services/RGBWalletService.cs";
     const string SignerType = "MemoryWalletSigner";
+    const string ServiceType = "RGBWalletService";
     const string Guard = "EnsureInputsOnRgbVanillaAccount";
     const string Flag = "RequireRgbVanillaKeychainInputs";
     const string CreateUtxos = "CreateColorableUtxosInternalAsync";
+    const string SendBtc = "SendBtcInternalAsync";
+    const string SendAsset = "SendAssetInternalAsync";
+    const string ServiceSink = "SignPsbtWithSignerAsync";
+    const string SignerSink = "SignPsbtAsync";
+    const string LocalSink = "SignPsbtLocallyAsync";
+    const string PolicyFullType = "BTCPayServer.Plugins.RgbUtexo.Services.SigningPolicy";
+
+    static string WhyBoundAtTheSink(string method, string sink, int position) =>
+        $"WHAT THIS PINS: the SigningPolicy whose members are asserted is the object {method} actually "
+        + $"hands to {sink} at argument {position}, reached FROM that argument — not the first "
+        + "`new SigningPolicy` the method happens to contain. WHY, and this is not hypothetical: a pin "
+        + $"that reads the initializer alone is vacuous. MEASURED on this tree, inserting `policy.{Flag} "
+        + "= false;` between the initializer and the signature left every member assertion intact, "
+        + "preserved the authorization-check/signature adjacency other pins require, compiled, and kept "
+        + "the whole managed suite green — while making a wallet-owned colored-keychain input signable "
+        + "(RgbVanillaKeychainInputGuardTests.ColoredInput_WithGuardOff_Signs is that behaviour), so a "
+        + "create-UTXOs PSBT carrying an input that holds an RGB allocation would be signed with no "
+        + "asset-intent accounting and the allocation burned. Nothing behavioural can catch it: "
+        + "RgbVanillaKeychainInputGuardTests.Policy builds its own policies and "
+        + "RgbDryRunCreateUtxosRegtestTests.SignAsProductionCreateUtxosDoesAsync builds a parallel "
+        + "mirror, so not even the live integration run observes this handoff.\n"
+        + "THE PROPERTY, as a whitelist and not a list of ways to break it: the method constructs "
+        + "exactly one SigningPolicy; and that object reaches the signer either AS the argument, or "
+        + "through a local that is declared exactly once from that object-creation expression and is "
+        + "MENTIONED EXACTLY ONCE in the whole method — as that argument. The single-mention rule is "
+        + $"what makes every member value final. It refuses `policy.{Flag} = false`, a write to any "
+        + "other member, `policy = somethingElse`, `policy.AllowedScripts.Add(...)`, `F(ref policy)` and "
+        + "handing the object to a mutator, without enumerating any of them, and it refuses a second "
+        + "signature in this method fed a policy of its own.\n"
+        + "WHAT IT DELIBERATELY DOES NOT REFUSE, because a pin that reddens on a correct refactor gets "
+        + "deleted and takes the protection with it: renaming the local; reordering the member "
+        + "initializers; writing the policy inline at the call; passing it by name rather than by "
+        + "position; and `new()` in place of `new SigningPolicy` — the construction and the parameter "
+        + "are matched by BOUND TYPE, not by spelling. WHAT IT REDDENS ON THAT IS NOT AN ATTACK: a new "
+        + "READ-ONLY mention such as a log line, and lifting the initializer into a helper method — the "
+        + "member clauses read it in place. That is deliberate; widen the clause explicitly rather than "
+        + "deleting it.\n"
+        + "NAMED DEBT, deliberately open: the mirror policy in RgbDryRunCreateUtxosRegtestTests is not "
+        + "pinned to this one, so the two can diverge. Graded and left open — divergence weakens an "
+        + "integration row but cannot make production accept anything, and closing it needs either a "
+        + "production factory (this initializer must stay inline for the member clauses to read it) or "
+        + "a third proxy pin over a test helper, which is the very defect class this pin closes.";
+
+    static INamedTypeSymbol PolicyType(PluginCompilation plugin)
+    {
+        var type = plugin.Compilation.GetTypeByMetadataName(PolicyFullType);
+        Assert.True(type != null, $"{PolicyFullType} does not resolve in the plugin compilation");
+        return type!;
+    }
+
+    static List<BaseObjectCreationExpressionSyntax> PolicyConstructionsIn(
+        PluginCompilation plugin, SyntaxTree tree, SyntaxNode scope)
+    {
+        var model = plugin.Model(tree);
+        var policyType = PolicyType(plugin);
+        return scope.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>()
+            .Where(o => SymbolEqualityComparer.Default.Equals(
+                (model.GetSymbolInfo(o).Symbol as IMethodSymbol)?.ContainingType, policyType))
+            .ToList();
+    }
+
+    static string EnclosingMethodName(SyntaxNode node) =>
+        node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault()?.Identifier.ValueText
+        ?? $"<no enclosing method in {node.SyntaxTree.FilePath}>";
+
+    static BaseObjectCreationExpressionSyntax PolicyReaching(
+        PluginCompilation plugin, string methodName, string sink, int position)
+    {
+        var tree = plugin.Tree(ServiceFile);
+        var model = plugin.Model(tree);
+        var method = RoslynPins.Method(tree, ServiceType, methodName);
+        var body = RoslynPins.BodyOf(method);
+        var why = WhyBoundAtTheSink(methodName, sink, position);
+
+        var policyType = PolicyType(plugin);
+        var calls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression switch
+            {
+                MemberAccessExpressionSyntax m => m.Name.Identifier.ValueText == sink,
+                MemberBindingExpressionSyntax b => b.Name.Identifier.ValueText == sink,
+                IdentifierNameSyntax id => id.Identifier.ValueText == sink,
+                _ => false
+            })
+            .ToList();
+        Assert.True(calls.Count == 1,
+            $"{methodName} invokes {sink} {calls.Count} time(s); exactly one is mandated. {why}");
+
+        var constructions = PolicyConstructionsIn(plugin, tree, body);
+        Assert.True(constructions.Count == 1,
+            $"{methodName} constructs {constructions.Count} SigningPolicy object(s); exactly one is "
+            + $"mandated, or the one {sink} receives is not the one these clauses read. {why}");
+        var creation = constructions[0];
+
+        var callee = model.GetSymbolInfo(calls[0]).Symbol as IMethodSymbol;
+        Assert.True(callee != null && callee.Parameters.Length > position
+                    && SymbolEqualityComparer.Default.Equals(callee.Parameters[position].Type, policyType),
+            $"{methodName}: parameter {position} of the {sink} it calls is not of type SigningPolicy "
+            + $"(`{callee?.ToDisplayString() ?? "unbound"}`). {why}");
+        var byName = calls[0].ArgumentList.Arguments
+            .FirstOrDefault(a => a.NameColon?.Name.Identifier.ValueText == callee!.Parameters[position].Name);
+        Assert.True(byName != null || calls[0].ArgumentList.Arguments.Count > position,
+            $"{methodName}: the {sink} call passes {calls[0].ArgumentList.Arguments.Count} argument(s) "
+            + $"and none of them is '{callee!.Parameters[position].Name}'. {why}");
+        var argument = (byName ?? calls[0].ArgumentList.Arguments[position]).Expression;
+        if (ReferenceEquals(argument, creation)) return creation;
+
+        var identifier = argument as IdentifierNameSyntax;
+        Assert.True(identifier != null,
+            $"{methodName}: argument {position} of {sink} is `{argument}` — neither the SigningPolicy "
+            + $"object-creation expression itself nor a bare local. {why}");
+
+        var local = model.GetSymbolInfo(identifier!).Symbol as ILocalSymbol;
+        Assert.True(local != null,
+            $"{methodName}: `{identifier}` does not bind to a local of this method. {why}");
+
+        var mentions = body.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(n => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(n).Symbol, local))
+            .ToList();
+        Assert.True(mentions.Count == 1 && ReferenceEquals(mentions[0], identifier),
+            $"{methodName}: '{local!.Name}' is mentioned {mentions.Count} time(s) — "
+            + $"[{string.Join(" | ", mentions.Select(m => m.Parent?.ToString().Trim()))}] — and must be "
+            + $"mentioned exactly once, as argument {position} of {sink}. {why}");
+
+        var declarators = body.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(v), local))
+            .ToList();
+        Assert.True(declarators.Count == 1,
+            $"{methodName}: '{local.Name}' has {declarators.Count} declarator(s); exactly one is "
+            + $"mandated. {why}");
+        Assert.True(ReferenceEquals(declarators[0].Initializer?.Value, creation),
+            $"{methodName}: '{local.Name}' is initialized from `{declarators[0].Initializer?.Value}`, "
+            + $"not from the SigningPolicy object-creation expression {sink} must receive. {why}");
+        return creation;
+    }
+
+    [Fact]
+    public void PoliciesReachingASigner_CarryTheGuardFlagTheirPathRequires()
+    {
+        var plugin = PluginCompilation.Shared;
+        var mandated = new (string Method, string Sink, int Position, bool Flag)[]
+        {
+            (CreateUtxos, ServiceSink, 4, true),
+            (SendBtc, SignerSink, 2, true),
+            (SendAsset, LocalSink, 3, false)
+        };
+
+        foreach (var (methodName, sink, position, flag) in mandated)
+        {
+            var creation = PolicyReaching(plugin, methodName, sink, position);
+            var set = creation.Initializer?.Expressions.OfType<AssignmentExpressionSyntax>()
+                .Any(a => a.Left.ToString() == Flag && a.Right.ToString() == "true") == true;
+            var direction = flag
+                ? $"the policy {methodName} hands to {sink} must set {Flag} = true: it signs a PSBT it "
+                  + "did not build, and without the flag a wallet-owned colored-keychain input carrying "
+                  + "an RGB allocation is signable with no asset-intent accounting, which burns it."
+                : $"the policy {methodName} hands to {sink} must NOT set {Flag} = true: spending colored "
+                  + "inputs is that path's purpose, and setting it makes every RGB asset send refuse "
+                  + "its own inputs — a PERMANENT false-reject, which is fund loss.";
+            Assert.True(set == flag,
+                direction
+                + $"\n{nameof(Flag_IsSetOnExactlyTheTwoIntendedSigningPolicies)} decides WHICH methods "
+                + "may set the flag, by enclosing method; this clause is what makes each of its rows "
+                + "non-vacuous, by proving the initializer it read is the object the signer gets. "
+                + WhyBoundAtTheSink(methodName, sink, position));
+        }
+    }
 
     [Fact]
     public void CreateUtxosPolicy_BindsEverySecurityCriticalValue()
     {
-        var tree = PluginCompilation.Shared.Tree(ServiceFile);
-        var method = RoslynPins.Method(tree, "RGBWalletService", CreateUtxos);
-        var policy = RoslynPins.BodyOf(method).DescendantNodes()
-            .OfType<ObjectCreationExpressionSyntax>()
-            .Single(o => o.Type.ToString() == "SigningPolicy");
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ServiceFile);
+        var method = RoslynPins.Method(tree, ServiceType, CreateUtxos);
+        var policy = PolicyReaching(plugin, CreateUtxos, ServiceSink, 4);
 
         var assignments = policy.Initializer?.Expressions.OfType<AssignmentExpressionSyntax>().ToList()
             ?? [];
@@ -101,11 +267,19 @@ public class RgbVanillaInputGuardSourcePinTests
             ["SendAssetInternalAsync"] = false
         };
 
-        var tree = PluginCompilation.Shared.Tree(ServiceFile);
-        var initializers = Enumerable.OfType<ObjectCreationExpressionSyntax>(tree.GetRoot().DescendantNodes())
-            .Where(o => o.Type.ToString() == "SigningPolicy")
+        var plugin = PluginCompilation.Shared;
+        var initializers = plugin.AllTrees
+            .SelectMany(t => PolicyConstructionsIn(plugin, t, t.GetRoot()))
             .ToList();
-        Assert.Equal(expected.Count, initializers.Count);
+        Assert.True(initializers.Count == expected.Count,
+            $"the plugin constructs {initializers.Count} SigningPolicy object(s) — "
+            + $"[{string.Join(", ", initializers.Select(EnclosingMethodName))}]; exactly "
+            + $"{expected.Count} are mandated. This enumeration is REPO-WIDE and by BOUND TYPE, not "
+            + "file-scoped and matched on the spelling of the type name: `SigningPolicy p = new() { … }` "
+            + "in another service class is a new signing path that a text-matched, single-file "
+            + "enumeration never sees, so it would reach a signer with no flag decision recorded "
+            + "anywhere. Test sources are outside the plugin compile set, so the regtest fixture's "
+            + "mirror policy is deliberately not counted here.");
 
         var seen = new Dictionary<string, bool>();
         foreach (var init in initializers)
