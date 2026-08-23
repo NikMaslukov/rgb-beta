@@ -1,3 +1,6 @@
 /target
 rgbverify.h
-/runtimes
+/runtimes/*
+!/runtimes/linux-x64/
+/runtimes/linux-x64/*
+!/runtimes/linux-x64/native/

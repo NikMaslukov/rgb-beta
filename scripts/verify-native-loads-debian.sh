@@ -3,9 +3,9 @@
 # Loads the staged linux-x64 gate native inside Debian 12 and resolves all five exports.
 #
 # This is what catches a glibc-floor mistake at pack time instead of at a merchant's startup: a
-# native linked against a newer glibc than the deployment target fails to dlopen, and the plugin's
-# own release pipeline builds on ubuntu-latest against a Debian target. ctypes needs no .NET, so the
-# check runs in seconds.
+# native linked against a newer glibc than the deployment target fails to dlopen there. Every
+# pipeline that builds this native does so in rust:1-bookworm, and this is the check that proves
+# the floor held. ctypes needs no .NET, so the check runs in seconds.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

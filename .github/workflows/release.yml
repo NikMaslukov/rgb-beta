@@ -50,6 +50,11 @@ jobs:
       PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
       MANIFEST_FILE: btcpay.plugin.json
       TAG: v${{ inputs.version }}
+      # Cargo's own output, deliberately NOT the tracked runtimes/ copy. native/rgb-verify/.gitignore
+      # ignores /target, so this path cannot exist in a clean checkout: if the build step is removed or
+      # silently does nothing, the gate has no source to bind to and fails, instead of comparing the
+      # shipped entry against the tracked bytes it was copied from.
+      GATE_NATIVE_BUILD: native/rgb-verify/target/release/librgbverifycffi.so
 
     steps:
       - name: Checkout
@@ -90,22 +95,28 @@ jobs:
           dotnet-version: |
             10.0.x
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Runs BEFORE the build, and that ordering is the whole point: the build rewrites the manifest,
+      # so afterwards this would compare a record against one the same step had just written. ci.yml
+      # only triggers on pull_request and on push to main, while this workflow is dispatchable on any
+      # ref, so without this step a release cut from a branch could tag a commit whose tracked native
+      # was never freshness-checked. plugin-builder.btcpayserver.org builds from that tag and ships the
+      # tracked binary, so the check has to happen here too.
+      - name: Require the tagged commit's tracked gate native to match its recorded sources
+        run: bash scripts/verify-tracked-gate-native-freshness.sh
 
-      - name: Build rgbverifycffi native (linux-x64 = prod RID)
+      # Built in rust:1-bookworm, not on the runner: ubuntu-latest links against a newer glibc than
+      # BTCPay's Debian 12 images and the result fails to dlopen there. The script deletes both output
+      # paths before building, so a build that compiles nothing cannot leave the tracked binary behind
+      # to be mistaken for a fresh one.
+      - name: Build rgbverifycffi native in rust:1-bookworm (linux-x64 = prod RID)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq cmake clang
-          rustc --version && cargo --version
-          bash native/rgb-verify/build-native.sh
-          NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
-          test -f "$NATIVE" || { echo "::error::rgbverifycffi native not produced at $NATIVE"; exit 1; }
+          bash scripts/build-gate-native-linux-x64.sh
           for sym in rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free; do
-            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
+            nm -D --defined-only "$GATE_NATIVE_BUILD" | grep -q "$sym" \
               || { echo "::error::rgbverifycffi native missing expected export $sym"; exit 1; }
           done
-          echo "built $NATIVE ($(stat -c %s "$NATIVE") bytes)"
+          echo "built $GATE_NATIVE_BUILD ($(wc -c < "$GATE_NATIVE_BUILD") bytes)"
 
       - name: Restore (locked mode — packages.lock.json must match)
         run: |
@@ -128,7 +139,8 @@ jobs:
         run: |
           python3 scripts/verify_plugin_artifact.py publish-out \
             --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages"
+            --package-cache "$HOME/.nuget/packages" \
+            --gate-native-source "linux-x64=$GATE_NATIVE_BUILD"
 
       - name: Pack .btcpay
         run: |
@@ -141,7 +153,14 @@ jobs:
         run: |
           python3 scripts/verify_plugin_artifact.py "$ARTIFACT_NAME" \
             --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages"
+            --package-cache "$HOME/.nuget/packages" \
+            --gate-native-source "linux-x64=$GATE_NATIVE_BUILD"
+
+      # Loads the gate native extracted from the archive that actually ships, inside Debian 12, and
+      # resolves all five exports. Content checks cannot see staleness, but they do see a wrong
+      # architecture, a truncated file, and a glibc floor above the deployment target.
+      - name: Assert the packed gate native loads on Debian 12
+        run: bash scripts/verify-artifact-native-loads.sh "$ARTIFACT_NAME"
 
       - name: Configure git identity
         run: |

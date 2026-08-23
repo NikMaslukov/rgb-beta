@@ -7,7 +7,9 @@
 #                        as artifacts)
 #   --require-all-rids   fail the pack unless every declared RID is present
 #   --version <v>        package version, e.g. 0.11.1-rc.10-native.1 (required to pack)
-#   --verify             run the pack-pipeline checks (layout, both guards, Debian load)
+#   --verify             run the pack-pipeline checks (layout, all three pack-time guards, and a
+#                        Debian load of the native extracted from a package this run packed; requires
+#                        the tracked linux-x64 native to be present and fails if it is not)
 #
 # --stage and --pack-only are independent switches, not modes: passing both stages then packs, and
 # passing neither does both.
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
     --require-all-rids) REQUIRE_ALL_RIDS=1 ;;
     --verify) VERIFY=1 ;;
     --version) shift; VERSION="${1:-}" ;;
-    -h|--help) sed -n '2,17p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "pack-rgbverify: unknown flag '$1'" >&2; exit 2 ;;
   esac
   shift
@@ -152,6 +154,26 @@ pack() {
   fi
   dotnet pack "$PROJECT" "$@"
 
+  # Re-read the architecture of the entries that were actually PACKED, not the ones that were staged.
+  # The pack-time guard cannot see a packaging mistake -- a wrong PackagePath, a stale obj/ copy -- and
+  # this is RID-set-agnostic, so it never rejects an interim pack for carrying fewer RIDs. A rejected
+  # package is DELETED rather than left in the feed: a consumable artifact that a guard has already
+  # refused is the same defect this check exists to prevent, one directory further on.
+  # NuGet normalizes the version in the file name (a two-part "2.0" is written as "2.0.0"), so name the
+  # cause here rather than letting the architecture check report a missing file. pack-native.yml makes
+  # the same assumption about this path.
+  packed_nupkg="$FEED/RgbVerifyCffi.$VERSION.nupkg"
+  if [ ! -f "$packed_nupkg" ]; then
+    echo "pack-rgbverify: packed no file at $packed_nupkg. If --version was not already a normalized" >&2
+    echo "  three-part NuGet version, pass the normalized form (for example 2.0.0 rather than 2.0)." >&2
+    exit 1
+  fi
+  if ! python3 "$REPO_ROOT/scripts/native_architecture.py" --package "$packed_nupkg"; then
+    rm -f "$packed_nupkg"
+    echo "pack-rgbverify: removed $packed_nupkg because its packed natives failed the architecture check" >&2
+    exit 1
+  fi
+
   # A rebuilt nupkg at the same version is otherwise served from the extracted cache and the new
   # bytes never reach a consumer. Honour NUGET_PACKAGES or the eviction silently no-ops.
   rm -rf "${NUGET_PACKAGES:-$HOME/.nuget/packages}/rgbverifycffi/$VERSION"
@@ -166,20 +188,32 @@ pack() {
 # P3-P5 run against a scratch copy of the packaging project with dummy natives, so they are
 # deterministic on any host and cannot touch the real runtimes/ tree — a git clean there would
 # irreversibly destroy the container-built linux-x64 artifact.
+# The scratch tree mirrors the repo's directory layout, not just the project file, because the
+# packaging project's architecture guard resolves scripts/native_architecture.py relative to its own
+# location. A flat scratch/packaging/ would put that script out of reach and the guard would fail for
+# a reason that has nothing to do with what P3-P5 assert.
 scratch_tree() {
   scratch="$(mktemp -d)"
-  mkdir -p "$scratch/packaging"
-  cp "$PROJECT" "$scratch/packaging/"
-  cp "$PACKAGING_DIR/_._" "$scratch/packaging/"
+  mkdir -p "$scratch/native/rgb-verify/packaging" "$scratch/scripts"
+  cp "$PROJECT" "$scratch/native/rgb-verify/packaging/"
+  cp "$PACKAGING_DIR/_._" "$scratch/native/rgb-verify/packaging/"
+  cp "$REPO_ROOT/scripts/native_architecture.py" "$scratch/scripts/"
   echo "$scratch"
 }
 
+scratch_project() {
+  echo "$1/native/rgb-verify/packaging/RgbVerifyCffi.csproj"
+}
+
+# Synthetic object headers rather than the literal string "dummy": the pack now reads e_machine, so a
+# text file would make P3 fail for the wrong reason, and a header carrying the RID's real machine type
+# is what lets P3 exercise the guard's accept path.
 plant_dummy_natives() {
   scratch="$1"; skip="${2:-}"
   declared_rids | while read -r rid lib; do
     [ "$rid" = "$skip" ] && continue
-    mkdir -p "$scratch/runtimes/$rid/native"
-    printf 'dummy' > "$scratch/runtimes/$rid/native/$lib"
+    python3 "$REPO_ROOT/scripts/native_architecture.py" \
+      --synthesize "$rid" "$scratch/native/rgb-verify/runtimes/$rid/native/$lib" >/dev/null
   done
 }
 
@@ -189,7 +223,7 @@ verify() {
   echo "=== P3: pack layout ==="
   scratch="$(scratch_tree)"
   plant_dummy_natives "$scratch"
-  if dotnet pack "$scratch/packaging/RgbVerifyCffi.csproj" -c Release \
+  if dotnet pack "$(scratch_project "$scratch")" -c Release \
       -p:Version=0.0.0-verify -p:RequireAllRids=true -o "$scratch/out" >"$scratch/pack.log" 2>&1; then
     if python3 "$REPO_ROOT/scripts/verify_plugin_artifact.py" \
         "$scratch/out/RgbVerifyCffi.0.0.0-verify.nupkg" \
@@ -207,7 +241,7 @@ verify() {
   echo "=== P4: pack fails without the production RID ==="
   scratch="$(scratch_tree)"
   plant_dummy_natives "$scratch" linux-x64
-  if dotnet pack "$scratch/packaging/RgbVerifyCffi.csproj" -c Release \
+  if dotnet pack "$(scratch_project "$scratch")" -c Release \
       -p:Version=0.0.0-verify -o "$scratch/out" >"$scratch/pack.log" 2>&1; then
     echo "P4 FAIL: pack succeeded without runtimes/linux-x64"; failures=$((failures + 1))
   else
@@ -220,7 +254,7 @@ verify() {
   echo "=== P5: pack fails without every declared RID ==="
   scratch="$(scratch_tree)"
   plant_dummy_natives "$scratch" linux-arm64
-  if dotnet pack "$scratch/packaging/RgbVerifyCffi.csproj" -c Release \
+  if dotnet pack "$(scratch_project "$scratch")" -c Release \
       -p:Version=0.0.0-verify -p:RequireAllRids=true -o "$scratch/out" >"$scratch/pack.log" 2>&1; then
     echo "P5 FAIL: pack succeeded with a declared RID absent"; failures=$((failures + 1))
   else
@@ -230,13 +264,40 @@ verify() {
   fi
   rm -rf "$scratch"
 
-  echo "=== P6: the real linux-x64 native loads on Debian ==="
-  if [ -f "$CRATE_DIR/runtimes/linux-x64/native/librgbverifycffi.so" ]; then
-    bash "$REPO_ROOT/scripts/verify-native-loads-debian.sh" \
-      && echo "P6 ok" \
-      || { echo "P6 FAIL"; failures=$((failures + 1)); }
+  # Absence is a FAILURE, not a skip. This check previously printed "P6 SKIPPED" and let the script
+  # report that all pack-pipeline checks passed on a tree carrying no trust core at all, which is worse
+  # than having no check, because an engineer runs it and believes the green.
+  #
+  # It also loads the native extracted from a package THIS RUN PACKED, rather than from the staging
+  # tree. P3 verifies a scratch package built from synthetic natives, so before this change nothing in
+  # --verify ever loaded bytes that had been through a real pack.
+  echo "=== P6: the real linux-x64 native, packed by this run, loads on Debian ==="
+  real_native="$CRATE_DIR/runtimes/linux-x64/native/librgbverifycffi.so"
+  if [ ! -f "$real_native" ]; then
+    echo "P6 FAIL: $real_native is absent, so nothing was verified."
+    echo "  That file is tracked in git, so a checkout has it. Restore it with:"
+    echo "    git restore -- native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
+    echo "  or rebuild it with:"
+    echo "    bash scripts/build-gate-native-linux-x64.sh"
+    failures=$((failures + 1))
   else
-    echo "P6 SKIPPED: runtimes/linux-x64 is not staged on this host"
+    scratch="$(mktemp -d)"
+    if dotnet pack "$PROJECT" -c Release -p:Version=0.0.0-verify-real -o "$scratch/out" \
+        >"$scratch/pack.log" 2>&1; then
+      packed="$scratch/out/RgbVerifyCffi.0.0.0-verify-real.nupkg"
+      if bash "$REPO_ROOT/scripts/verify-artifact-native-loads.sh" \
+          "$packed" runtimes/linux-x64/native/librgbverifycffi.so; then
+        echo "P6 ok: the gate native inside $(basename "$packed") loaded on Debian 12"
+      else
+        echo "P6 FAIL: the packed gate native did not load on Debian 12"
+        failures=$((failures + 1))
+      fi
+    else
+      echo "P6 FAIL: packing the real project failed, so no packed native could be loaded"
+      sed -n '1,20p' "$scratch/pack.log"
+      failures=$((failures + 1))
+    fi
+    rm -rf "$scratch"
   fi
 
   [ "$failures" -eq 0 ] || { echo "pack-rgbverify: $failures verification check(s) failed" >&2; exit 1; }

@@ -36,18 +36,36 @@
     <GateRid Include="linux-arm64" Lib="librgbverifycffi.so" />
   </ItemGroup>
 
-  <Target Name="RequireProdNative" BeforeTargets="Pack">
+  <Target Name="RequireProdNative" BeforeTargets="GenerateNuspec;Pack">
     <!-- A package without the production RID would reproduce audit finding A: the artifact
          publishes cleanly but the pre-sign gate cannot load, so every RGB send fails. -->
     <Error Condition="!Exists('../runtimes/linux-x64/native/librgbverifycffi.so')"
            Text="RgbVerifyCffi: runtimes/linux-x64/native/librgbverifycffi.so missing — build it before packing (see scripts/pack-rgbverify.sh)" />
   </Target>
 
-  <Target Name="RequireAllRids" BeforeTargets="Pack" Condition="'$(RequireAllRids)' == 'true'">
+  <Target Name="RequireAllRids" BeforeTargets="GenerateNuspec;Pack" Condition="'$(RequireAllRids)' == 'true'">
     <!-- A missing RID becomes a hard startup failure on that platform once the package is what
          delivers the native, so the canonical pack must carry every declared RID. -->
     <Error Condition="!Exists('../runtimes/%(GateRid.Identity)/native/%(GateRid.Lib)')"
            Text="RgbVerifyCffi: declared RID %(GateRid.Identity) has no native at ../runtimes/%(GateRid.Identity)/native/%(GateRid.Lib)" />
+  </Target>
+
+  <!-- Existence is not architecture. An x86-64 ELF staged into runtimes/linux-arm64 satisfied both
+       guards above, so the package could claim a RID it cannot load on. This reads the ELF e_machine,
+       the Mach-O cputype or the PE COFF machine of every native the None glob at the top of this file
+       will pack. Deliberately unconditional, because that glob is not gated on RequireAllRids either,
+       so gating this on RequireAllRids would leave a plain `dotnet pack` unchecked. Declared last so
+       RequireProdNative and RequireAllRids still report a missing file with their own precise message.
+       It never demands that a RID be present, only that whatever is present is what it says it is.
+
+       All three guards hook GenerateNuspec, not Pack alone. Measured: BeforeTargets="Pack" runs AFTER
+       the dependency that writes the file, so a rejecting guard still left a complete .nupkg on disk:
+       a 7.2 MB package carrying an x86-64 ELF at runtimes/linux-arm64 survived a pack that exited 1,
+       and a consumer restoring from the output folder would have found it. Pack is kept as a second
+       hook so that if GenerateNuspec is ever renamed, BeforeTargets does not silently match nothing and
+       drop the guard; MSBuild runs a target at most once per build, so this costs nothing. -->
+  <Target Name="AssertNativeArchitecture" BeforeTargets="GenerateNuspec;Pack">
+    <Exec Command="python3 &quot;$(MSBuildProjectDirectory)/../../../scripts/native_architecture.py&quot; --staging-tree &quot;$(MSBuildProjectDirectory)/../runtimes&quot;" />
   </Target>
 
 </Project>
