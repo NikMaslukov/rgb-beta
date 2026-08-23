@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_TREE="${1:?usage: verify-gate-native-controls.sh <publish-dir> [package-cache]}"
 PACKAGE_CACHE="${2:-$HOME/.nuget/packages}"
 ENTRY="runtimes/linux-x64/native/librgbverifycffi.so"
+ENTRY_RELATIVE="native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -177,6 +178,38 @@ elif ! grep -Fq "native/rgb-verify/src/lib.rs" <<<"$FRESHNESS_OUTPUT"; then
   failures=$((failures + 1))
 else
   echo "  freshness: FAIL as required, naming native/rgb-verify/src/lib.rs"
+fi
+
+COMMITTED="$REPO_ROOT/scripts/verify-committed-gate-native.sh"
+
+echo "=== row: the committed-bytes gate accepts this repo's own HEAD ==="
+if bash "$COMMITTED" "$REPO_ROOT" >/dev/null 2>&1; then
+  echo "  committed gate: PASS"
+else
+  echo "  FAIL: the committed-bytes gate rejected this repo's own HEAD" >&2
+  bash "$COMMITTED" "$REPO_ROOT" 2>&1 | sed 's/^/    /' >&2
+  failures=$((failures + 1))
+fi
+
+echo "=== row: the committed-bytes gate rejects a commit carrying a mislabelled native ==="
+COMMIT_ROOT="$WORK/committed-row"
+mkdir -p "$COMMIT_ROOT/native/rgb-verify/runtimes/linux-x64/native"
+cp "$EXPECTED" "$COMMIT_ROOT/$ENTRY_RELATIVE"
+printf '\xb7\x00' | dd of="$COMMIT_ROOT/$ENTRY_RELATIVE" bs=1 seek=18 conv=notrunc status=none
+git -C "$COMMIT_ROOT" init -q . >/dev/null 2>&1
+git -C "$COMMIT_ROOT" add -f "$ENTRY_RELATIVE" >/dev/null 2>&1
+git -C "$COMMIT_ROOT" -c user.email=controls@local -c user.name=controls commit -qm "mislabelled native" >/dev/null 2>&1
+COMMITTED_OUTPUT="$(bash "$COMMITTED" "$COMMIT_ROOT" 2>&1)"
+COMMITTED_STATUS=$?
+if [ "$COMMITTED_STATUS" -eq 0 ]; then
+  echo "  FAIL: the committed-bytes gate ACCEPTED a commit whose native is not the architecture it claims" >&2
+  failures=$((failures + 1))
+elif ! grep -Fq "declares ELF-64 AArch64" <<<"$COMMITTED_OUTPUT"; then
+  echo "  FAIL: the committed-bytes gate rejected for the wrong reason; expected the architecture check to name ELF-64 AArch64" >&2
+  echo "$COMMITTED_OUTPUT" | sed 's/^/    /' >&2
+  failures=$((failures + 1))
+else
+  echo "  committed gate: FAIL as required -- architecture check named ELF-64 AArch64"
 fi
 
 if [ "$failures" -ne 0 ]; then

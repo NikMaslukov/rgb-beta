@@ -64,8 +64,24 @@
        and a consumer restoring from the output folder would have found it. Pack is kept as a second
        hook so that if GenerateNuspec is ever renamed, BeforeTargets does not silently match nothing and
        drop the guard; MSBuild runs a target at most once per build, so this costs nothing. -->
-  <Target Name="AssertNativeArchitecture" BeforeTargets="GenerateNuspec;Pack">
-    <Exec Command="python3 &quot;$(MSBuildProjectDirectory)/../../../scripts/native_architecture.py&quot; --staging-tree &quot;$(MSBuildProjectDirectory)/../runtimes&quot;" />
+  <!-- The interpreter is resolved rather than assumed: `python3` is absent on plenty of machines and
+       is normally spelled `python` or `py` on Windows, and hardcoding it turned a working `dotnet pack`
+       into a hard failure there. Deliberately NOT a skip condition — a guard with an opt-out is not a
+       guard, so if neither interpreter exists the pack still fails. -->
+  <Target Name="ResolveGateArchitectureInterpreter">
+    <Exec Command="python3 -c &quot;pass&quot;" ContinueOnError="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="GateInterpreterProbeExitCode" />
+    </Exec>
+    <PropertyGroup>
+      <GateArchitectureInterpreter Condition="'$(GateInterpreterProbeExitCode)' == '0'">python3</GateArchitectureInterpreter>
+      <GateArchitectureInterpreter Condition="'$(GateArchitectureInterpreter)' == ''">python</GateArchitectureInterpreter>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="AssertNativeArchitecture" BeforeTargets="GenerateNuspec;Pack"
+          DependsOnTargets="ResolveGateArchitectureInterpreter">
+    <Exec Command="&quot;$(GateArchitectureInterpreter)&quot; &quot;$(MSBuildProjectDirectory)/../../../scripts/native_architecture.py&quot; --staging-tree &quot;$(MSBuildProjectDirectory)/../runtimes&quot;" />
   </Target>
 
 </Project>

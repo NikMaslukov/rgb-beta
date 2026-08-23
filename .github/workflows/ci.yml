@@ -79,6 +79,12 @@ jobs:
       - name: Require the tracked gate native's source manifest to match the tree
         run: bash scripts/verify-tracked-gate-native-freshness.sh
 
+      # The same committed-bytes gate release.yml runs, so a branch that commits an unloadable native
+      # goes red here rather than at release time. A manifest binds hashes; it cannot see a glibc
+      # floor, an architecture, an export set or loadability.
+      - name: Require the COMMITTED gate native to pass architecture, exact exports and a Debian 12 load
+        run: bash scripts/verify-committed-gate-native.sh
+
       # Asserting success is not a control. This mutates the published artifact into each deficient
       # variant in turn and requires the gate to reject it, naming which check fired, so the job goes
       # red if the gate stops working rather than only if the artifact is bad.

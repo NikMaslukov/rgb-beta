@@ -87,7 +87,7 @@
         <None Include="native/rgb-verify/runtimes/**">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
             <Pack>true</Pack>
-            <PackagePath>runtimes/%(RecursiveDir)</PackagePath>
+            <PackagePath>runtimes/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
             <Link>runtimes/%(RecursiveDir)%(Filename)%(Extension)</Link>
         </None>
     </ItemGroup>

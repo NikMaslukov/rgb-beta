@@ -21,8 +21,6 @@ PACKAGING_DIR="$CRATE_DIR/packaging"
 PROJECT="$PACKAGING_DIR/RgbVerifyCffi.csproj"
 FEED="$REPO_ROOT/local-nuget-feed"
 
-EXPORTS="rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free"
-
 STAGE=0
 PACK=0
 REQUIRE_ALL_RIDS=0
@@ -104,6 +102,7 @@ assert_exports() {
         return 0
       fi
       symbols="$(nm -gU "$path")"
+      object_format=macho
       ;;
     *.so)
       if [ "$(uname -s)" = "Darwin" ]; then
@@ -112,6 +111,7 @@ assert_exports() {
       else
         symbols="$(nm -D --defined-only "$path")"
       fi
+      object_format=elf
       ;;
     *)
       echo "==> skipping export check for $rid: unsupported object format $lib"
@@ -119,11 +119,9 @@ assert_exports() {
       ;;
   esac
 
-  for symbol in $EXPORTS; do
-    echo "$symbols" | grep -q "$symbol" \
-      || { echo "pack-rgbverify: $rid native is missing export $symbol" >&2; return 1; }
-  done
-  echo "==> $rid exports all five gate symbols"
+  printf '%s\n' "$symbols" | python3 "$REPO_ROOT/scripts/assert-native-exports.py" \
+    --symbol-table - --format "$object_format" \
+    || { echo "pack-rgbverify: $rid native failed the exact export check" >&2; return 1; }
 }
 
 stage() {
@@ -289,7 +287,7 @@ verify() {
           "$packed" runtimes/linux-x64/native/librgbverifycffi.so; then
         echo "P6 ok: the gate native inside $(basename "$packed") loaded on Debian 12"
       else
-        echo "P6 FAIL: the packed gate native did not load on Debian 12"
+        echo "P6 FAIL: the packed gate native did not pass the Debian 12 load check; its own reason is printed above"
         failures=$((failures + 1))
       fi
     else

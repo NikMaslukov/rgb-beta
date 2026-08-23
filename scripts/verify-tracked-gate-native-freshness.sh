@@ -33,6 +33,7 @@ python3 - "$ROOT" "$MODE" <<'PY'
 import hashlib
 import pathlib
 import re
+import subprocess
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -57,6 +58,7 @@ fixed_inputs = [
     tracked_native,
 ]
 binary_inputs = {tracked_native}
+recognised_source_suffixes = {".rs"}
 
 source_dir = root / "native/rgb-verify/src"
 if not source_dir.is_dir():
@@ -76,9 +78,63 @@ for ancestor in recipe_ancestors:
         if candidate.is_file():
             discovered_recipe.append(candidate)
 
-relatives = sorted(
+recipe_relatives = {path.relative_to(root).as_posix() for path in discovered_recipe}
+candidates = sorted(
     {path.relative_to(root).as_posix() for path in source_dir.rglob("*") if path.is_file()}
-    | {path.relative_to(root).as_posix() for path in discovered_recipe}
+    | recipe_relatives
+)
+
+
+def ask_git(arguments, feed=None):
+    try:
+        finished = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            input=feed,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if finished.returncode > 1:
+        return None
+    return finished.stdout.decode("utf-8", "replace")
+
+
+committed_names = None
+ignored_names = None
+if candidates:
+    committed_names = ask_git(
+        ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *candidates]
+    )
+    ignored_names = ask_git(
+        ["check-ignore", "-z", "--stdin"],
+        "".join(f"{candidate}\0" for candidate in candidates).encode("utf-8"),
+    )
+
+git_answered = candidates and committed_names is not None and ignored_names is not None
+committed = set(committed_names.split("\0")) - {""} if git_answered else set()
+ignored = set(ignored_names.split("\0")) - {""} if git_answered else set()
+
+
+def counts_as_build_input(relative):
+    if relative in committed:
+        return True
+    recognised = (
+        relative in recipe_relatives
+        or pathlib.PurePosixPath(relative).suffix in recognised_source_suffixes
+    )
+    return recognised and relative not in ignored
+
+
+for relative in sorted(candidates):
+    if relative in ignored and relative not in committed:
+        print(
+            "gate-native manifest: git ignores this path, so it is not a build input and was not"
+            f" recorded: {relative}"
+        )
+
+relatives = sorted(
+    {relative for relative in candidates if counts_as_build_input(relative)}
     | set(fixed_inputs)
 )
 

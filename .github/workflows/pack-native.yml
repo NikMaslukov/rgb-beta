@@ -17,9 +17,6 @@ on:
 permissions:
   contents: read
 
-env:
-  EXPORTS: rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free
-
 jobs:
   linux-x64:
     runs-on: ubuntu-latest
@@ -40,15 +37,16 @@ jobs:
           rustc --version && cargo --version
           bash build-native.sh
 
-      - name: Assert ELF exports
+      # An exact-export LOAD probe, not `nm | grep`: grep matched substrings, so an object exporting
+      # rgbverify_validate_v2 but not rgbverify_validate satisfied the check for both. dlsym resolves
+      # each name exactly, and this job runs on the architecture it just built for, so the object can
+      # actually be opened here. rust:1-bookworm ships python3.
+      - name: Assert exact exports by loading the object
         run: |
           set -euo pipefail
           NATIVE=native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
           test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
-          for sym in $EXPORTS; do
-            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
-              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
-          done
+          python3 scripts/assert-native-exports.py --load "$NATIVE"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -75,15 +73,16 @@ jobs:
           rustc --version && cargo --version
           bash build-native.sh
 
-      - name: Assert ELF exports
+      # An exact-export LOAD probe, not `nm | grep`: grep matched substrings, so an object exporting
+      # rgbverify_validate_v2 but not rgbverify_validate satisfied the check for both. dlsym resolves
+      # each name exactly, and this job runs on the architecture it just built for, so the object can
+      # actually be opened here. rust:1-bookworm ships python3.
+      - name: Assert exact exports by loading the object
         run: |
           set -euo pipefail
           NATIVE=native/rgb-verify/runtimes/linux-arm64/native/librgbverifycffi.so
           test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
-          for sym in $EXPORTS; do
-            nm -D --defined-only "$NATIVE" | grep -q "$sym" \
-              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
-          done
+          python3 scripts/assert-native-exports.py --load "$NATIVE"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -107,17 +106,16 @@ jobs:
           rustc --version && cargo --version
           bash build-native.sh
 
-      # nm -gU is BSD-only and GNU nm cannot read Mach-O, so this check has to run on the runner
-      # that produced the object.
-      - name: Assert Mach-O exports
+      # An exact-export LOAD probe on the runner that produced the object. The previous
+      # `nm -gU | grep -q` matched substrings, so a dylib exporting rgbverify_validate_v2 but missing
+      # rgbverify_validate passed — measured on a real four-export dylib. dlsym is exact and needs no
+      # per-format spelling rule.
+      - name: Assert exact exports by loading the object
         run: |
           set -euo pipefail
           NATIVE=native/rgb-verify/runtimes/osx-arm64/native/librgbverifycffi.dylib
           test -f "$NATIVE" || { echo "::error::native not produced at $NATIVE"; exit 1; }
-          for sym in $EXPORTS; do
-            nm -gU "$NATIVE" | grep -q "$sym" \
-              || { echo "::error::$NATIVE missing export $sym"; exit 1; }
-          done
+          python3 scripts/assert-native-exports.py --load "$NATIVE"
 
       - uses: actions/upload-artifact@v4
         with:

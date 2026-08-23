@@ -95,12 +95,24 @@ jobs:
           dotnet-version: |
             10.0.x
 
+      # Judges the bytes THIS COMMIT carries, read out of the git object database, before anything can
+      # be tagged. The rebuild below overwrites the tracked native in the workspace, so every
+      # artifact-level check after it inspects a replacement that is not what ships:
+      # plugin-builder.btcpayserver.org compiles the plugin from the tag and ships the committed
+      # binary. Architecture, exact exports and a Debian 12 dlopen are all properties of the object,
+      # and the source manifest below can observe none of them.
+      - name: Require the COMMITTED gate native to pass architecture, exact exports and a Debian 12 load
+        run: |
+          set -euo pipefail
+          bash scripts/verify-committed-gate-native.sh
+          echo "RELEASE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       # Runs BEFORE the build, and that ordering is the whole point: the build rewrites the manifest,
       # so afterwards this would compare a record against one the same step had just written. ci.yml
-      # only triggers on pull_request and on push to main, while this workflow is dispatchable on any
-      # ref, so without this step a release cut from a branch could tag a commit whose tracked native
-      # was never freshness-checked. plugin-builder.btcpayserver.org builds from that tag and ships the
-      # tracked binary, so the check has to happen here too.
+      # triggers only on pull_request, push to main and manual dispatch, none of which a tag
+      # publication implies, while this workflow is dispatchable on any ref, so without this step a
+      # release could tag a commit whose tracked native was never freshness-checked. plugin-builder
+      # builds from that tag and ships the tracked binary, so the check has to happen here too.
       - name: Require the tagged commit's tracked gate native to match its recorded sources
         run: bash scripts/verify-tracked-gate-native-freshness.sh
 
@@ -112,10 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/build-gate-native-linux-x64.sh
-          for sym in rgbverify_decode_invoice rgbverify_validate rgbverify_commitment_check rgbverify_validate_v2 rgbverify_string_free; do
-            nm -D --defined-only "$GATE_NATIVE_BUILD" | grep -q "$sym" \
-              || { echo "::error::rgbverifycffi native missing expected export $sym"; exit 1; }
-          done
+          python3 scripts/assert-native-exports.py --load "$GATE_NATIVE_BUILD"
           echo "built $GATE_NATIVE_BUILD ($(wc -c < "$GATE_NATIVE_BUILD") bytes)"
 
       - name: Restore (locked mode — packages.lock.json must match)
@@ -170,7 +179,15 @@ jobs:
       - name: Create or verify tag ${{ env.TAG }}
         run: |
           set -euo pipefail
+          if [[ -z "${RELEASE_COMMIT:-}" ]]; then
+            echo "::error::RELEASE_COMMIT is unset, so the committed-gate-native check either never ran or never recorded the commit it judged. An absent value must not read as agreement. Refusing to tag."
+            exit 1
+          fi
           SHA=$(git rev-parse HEAD)
+          if [[ "$SHA" != "$RELEASE_COMMIT" ]]; then
+            echo "::error::HEAD is now $SHA but the gate native was verified on $RELEASE_COMMIT. The object that passed is not the object this tag would carry."
+            exit 1
+          fi
           if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
             EXISTING=$(git rev-list -n 1 "refs/tags/$TAG")
             if [[ "$EXISTING" != "$SHA" ]]; then
