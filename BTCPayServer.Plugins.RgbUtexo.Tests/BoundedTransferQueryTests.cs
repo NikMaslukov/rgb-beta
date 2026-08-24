@@ -143,7 +143,7 @@ public sealed class BoundedTransferQueryTests : IDisposable
         await Execute("""
             CREATE TABLE asset (
                 id TEXT PRIMARY KEY, ticker TEXT, name TEXT NOT NULL,
-                precision INTEGER NOT NULL, issued_supply TEXT NOT NULL);
+                precision INTEGER NOT NULL, initial_supply TEXT NOT NULL);
             CREATE TABLE batch_transfer (
                 idx INTEGER PRIMARY KEY, status INTEGER NOT NULL, txid TEXT);
             CREATE TABLE asset_transfer (
@@ -166,7 +166,7 @@ public sealed class BoundedTransferQueryTests : IDisposable
         await using var command = connection.CreateCommand();
         command.Transaction = (SqliteTransaction)transaction;
         command.CommandText = """
-            INSERT OR IGNORE INTO asset(id,ticker,name,precision,issued_supply)
+            INSERT OR IGNORE INTO asset(id,ticker,name,precision,initial_supply)
                 VALUES(@asset,'TOK','Token',2,'1000');
             INSERT INTO batch_transfer(idx,status,txid) VALUES(@idx,@status,@txid);
             INSERT INTO asset_transfer(idx,batch_transfer_idx,asset_id) VALUES(@idx,@idx,@asset);
@@ -188,7 +188,7 @@ public sealed class BoundedTransferQueryTests : IDisposable
     async Task InsertHistory(int count)
     {
         await Execute($$"""
-            INSERT INTO asset(id,ticker,name,precision,issued_supply)
+            INSERT INTO asset(id,ticker,name,precision,initial_supply)
                 VALUES('history','TOK','Token',2,'1000');
             WITH RECURSIVE seq(i) AS (
                 SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < {{count}}

@@ -622,7 +622,7 @@ public class RgbLibService : IRgbLibService
                        COALESCE(a.ticker, '') AS ticker,
                        a.name AS name,
                        a.precision AS precision,
-                       a.issued_supply AS issued_supply,
+                       a.initial_supply AS issued_supply,
                        ROW_NUMBER() OVER (
                            PARTITION BY t.recipient_id ORDER BY t.idx) AS recipient_rank
                 FROM transfer t
