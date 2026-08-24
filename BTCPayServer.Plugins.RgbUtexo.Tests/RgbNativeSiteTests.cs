@@ -23,6 +23,22 @@ public class RgbNativeSiteTests
         Assert.Empty(RgbLibService.InterpretListBtcTransactions(Ok("[]")));
     }
 
+    [Fact] // P-C8 — was: return [] on failure, which read as "this wallet holds no UTXOs"
+    public void ListUnspents_ThrowsOnFailure_InsteadOfReportingAnEmptyPool()
+    {
+        var failed = Assert.Throws<RgbLibException>(() => RgbLibService.InterpretListUnspents(Err("boom")));
+        Assert.Contains("boom", failed.Message);
+
+        var uninterpretable = Assert.Throws<RgbLibException>(() => RgbLibService.InterpretListUnspents(default));
+        Assert.Contains("list_unspents failed", uninterpretable.Message);
+
+        // The discriminating observation: only a genuine Ok yields the empty pool that drove the sweep to
+        // read zero colorable UTXOs, compute maximal demand, and sign a creation because of an error.
+        Assert.Empty(RgbLibService.InterpretListUnspents(Ok("[]")));
+        Assert.Single(RgbLibService.InterpretListUnspents(
+            Ok("""[{"utxo":{"outpoint":{"txid":"t","vout":0},"btc_amount":1000,"colorable":true},"rgb_allocations":[]}]""")));
+    }
+
     [Fact] // G1-T14
     public void Require_ReturnsPayloadOrThrowsWithTheCallName()
     {

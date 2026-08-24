@@ -310,7 +310,9 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                         <li>Each of the <strong>@Model.PersistedUtxoSize sat</strong> size saved in this
                             store's payment settings, created
                             <strong>@Model.PersistedUtxoCount</strong> at a time.</li>
-                        <li>At most once per cooldown period, worst case
+                        <li>At most once per cooldown period while this server keeps running &mdash; the
+                            cooldown is held in memory only, so a restart can allow one earlier attempt.
+                            Worst case
                             <strong>@Model.WorstCaseReplenishFeeBaseSats sat</strong> in fees per attempt,
                             plus <strong>@Model.WorstCaseReplenishFeePerVanillaUtxoSats sat</strong> for
                             every vanilla BTC UTXO beyond the first that this wallet holds &mdash; the

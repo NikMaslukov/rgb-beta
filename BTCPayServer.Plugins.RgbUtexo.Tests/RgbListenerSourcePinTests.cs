@@ -1032,15 +1032,16 @@ public class RgbListenerSourcePinTests
     {
         var plugin = PluginCompilation.Shared;
         var tree = plugin.Tree(RgbLibFile);
-        var list = RoslynPins.Method(tree, "RgbLibService", "ListUnspentsAsync");
+        var list = RoslynPins.Method(tree, "RgbLibService", "InterpretListUnspents");
         var body = RoslynPins.BodyOf(list);
 
         // Returning an empty list on a failed native call made an error indistinguishable from "this wallet
         // has no UTXOs". The replenishment sweep then saw zero colorable UTXOs, computed zero free slots and
         // signed a creation *because of the failure* — observed live on 2026-08-04 against a wallet holding
         // 23 UTXOs. A genuinely empty wallet returns Ok with "[]", so a null payload only ever means failure.
-        // Pin the null-payload BRANCH, not merely "a throw exists somewhere": this method already contains
-        // an offline `?? throw` expression, and accepting any throw would let a silent revert pass.
+        // Pin the null-payload BRANCH, not merely "a throw exists somewhere": accepting any throw anywhere
+        // in the method would let a silent revert of this very branch pass. The behavioural counterpart is
+        // RgbNativeSiteTests.ListUnspents_ThrowsOnFailure_InsteadOfReportingAnEmptyPool, which runs it.
         var nullChecks = body.DescendantNodes().OfType<IfStatementSyntax>()
             .Where(i => i.Condition is BinaryExpressionSyntax bin
                         && bin.IsKind(SyntaxKind.EqualsExpression)
@@ -1048,7 +1049,7 @@ public class RgbListenerSourcePinTests
                         && bin.Right.IsKind(SyntaxKind.NullLiteralExpression))
             .ToList();
         Assert.True(nullChecks.Count == 1,
-            $"ListUnspentsAsync must test its payload for null exactly once, found {nullChecks.Count}");
+            $"InterpretListUnspents must test its payload for null exactly once, found {nullChecks.Count}");
         var guarded = nullChecks[0].Statement;
         var throwsInBranch = guarded is ThrowStatementSyntax
                              || guarded.DescendantNodesAndSelf().OfType<ThrowStatementSyntax>().Any();

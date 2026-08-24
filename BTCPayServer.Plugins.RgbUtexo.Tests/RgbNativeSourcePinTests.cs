@@ -314,7 +314,7 @@ public class RgbNativeSourcePinTests
     const string RgbLibFile = "Services/RgbLibService.cs";
     const string RgbLibServiceType = "BTCPayServer.Plugins.RgbUtexo.Services.RgbLibService";
 
-    // The five plain sites: payload or throw. The two seam-B sites branch on the error instead.
+    // The five plain sites: payload or throw. The three seam-B sites branch on the error instead.
     static readonly (string Method, string Consumer)[] ReflectedSites =
     [
         ("BlindReceiveAsync", "Require"),
@@ -324,6 +324,7 @@ public class RgbNativeSourcePinTests
         ("SendEndAsync", "Require"),
         ("CreateUtxosBeginAsync", "InterpretCreateUtxosBegin"),
         ("ListBtcTransactionsAsync", "InterpretListBtcTransactions"),
+        ("ListUnspentsAsync", "InterpretListUnspents"),
     ];
 
     [Fact] // G1-T10(a)
@@ -345,9 +346,9 @@ public class RgbNativeSourcePinTests
             + $"non-freeing reader for a future edit to reach for, found {survivors.Count} reference(s)");
     }
 
-    [Theory] // G1-T10(c) and (e) — the five plain sites call Require; the two seam-B sites call their function
+    [Theory] // G1-T10(c) and (e) — the five plain sites call Require; the three seam-B sites call their function
     [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
-    [InlineData(4)] [InlineData(5)] [InlineData(6)]
+    [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)]
     public void EachReflectedSite_CallsItsExtractedConsumer(int index)
     {
         var (methodName, consumer) = ReflectedSites[index];
@@ -365,7 +366,7 @@ public class RgbNativeSourcePinTests
 
     [Theory] // G1-T10(g) — and the consumer is fed the READER's output, not a fabricated result
     [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
-    [InlineData(4)] [InlineData(5)] [InlineData(6)]
+    [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)]
     public void EachReflectedSite_FeedsItsConsumerTheReadersOutput(int index)
     {
         var (methodName, consumer) = ReflectedSites[index];
@@ -382,31 +383,26 @@ public class RgbNativeSourcePinTests
         AssertReadsTheNativeResult(plugin, tree, argument);
     }
 
-    [Fact] // G1-T10(g) for the one site whose statement shape is fixed by P-C8
-    public void ListUnspents_ReadsThroughTheReader_AndKeepsItsPinnedShape()
+    [Fact] // G1-T10(g) for the one consumer whose statement shape is fixed by P-C8
+    public void InterpretListUnspents_ReadsTheResultItIsGiven_AndKeepsItsPinnedShape()
     {
-        var plugin = PluginCompilation.Shared;
-        var tree = plugin.Tree(RgbLibFile);
-        var body = RoslynPins.BodyOf(RoslynPins.Method(tree, "RgbLibService", "ListUnspentsAsync"));
+        var tree = PluginCompilation.Shared.Tree(RgbLibFile);
+        var body = RoslynPins.BodyOf(RoslynPins.Method(tree, "RgbLibService", "InterpretListUnspents"));
 
-        // This site cannot use Require: P-C8 pins an `if (<identifier> == null) throw` statement, which
-        // the Require form does not contain. So the reader's output is pinned through its local instead.
-        var native = SingleDeclarator(body, "native");
-        var read = Assert.IsType<InvocationExpressionSyntax>(native.Initializer!.Value);
-        AssertReadsTheNativeResult(plugin, tree, read);
-
+        // This consumer cannot be Require: P-C8 pins an `if (<identifier> == null) throw` statement, which
+        // the Require form does not contain. So the result's payload is pinned through its local instead.
         var payload = SingleDeclarator(body, "unspentsJson");
         var access = Assert.IsType<MemberAccessExpressionSyntax>(payload.Initializer!.Value);
         Assert.Equal("Payload", access.Name.Identifier.ValueText);
-        Assert.True(access.Expression is IdentifierNameSyntax { Identifier.ValueText: "native" },
-            $"the payload must come from the reader's result, found '{access.Expression}'");
+        Assert.True(access.Expression is IdentifierNameSyntax { Identifier.ValueText: "r" },
+            $"the payload must come from the result parameter, found '{access.Expression}'");
 
         var errors = body.DescendantNodes().OfType<MemberAccessExpressionSyntax>()
             .Where(m => m.Name.Identifier.ValueText == "Error"
-                        && m.Expression is IdentifierNameSyntax { Identifier.ValueText: "native" })
+                        && m.Expression is IdentifierNameSyntax { Identifier.ValueText: "r" })
             .ToList();
         Assert.True(errors.Count == 1,
-            $"the throw must report the reader's error, found {errors.Count} native.Error reference(s)");
+            $"the throw must report the result's error, found {errors.Count} r.Error reference(s)");
     }
 
     [Fact] // G1-T10(f) — the production wiring
