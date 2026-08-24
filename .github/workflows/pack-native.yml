@@ -3,8 +3,8 @@ name: Pack gate native
 # Builds librgbverifycffi for every shipped RID and assembles the RgbVerifyCffi nupkg.
 #
 # Artifact-only on purpose: this must NOT live in release.yml, which is dispatchable on any ref and
-# both tags and publishes a GitHub Release — using it pre-merge would tag unmerged code. Every RID
-# therefore has CI provenance and the production trust core is not a developer's cross-build.
+# both tags and publishes a GitHub Release — using it pre-merge would tag unmerged code. Every RID is
+# therefore built on a CI runner of its own architecture, not cross-built on a developer machine.
 
 on:
   workflow_dispatch:

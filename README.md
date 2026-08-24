@@ -40,8 +40,12 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 # Electrum server for blockchain data
 RGB_ELECTRUM_URL=ssl://electrum.blockstream.info:60002
 
-# Directory for RGB wallet data (default: <btcpay-data-dir>/<network>/rgb-wallets)
-RGB_DATA_DIR=/data/rgb-wallets
+# Parent directory for RGB wallet data; each wallet lands in
+# <base>/<Network>/rgb-wallets/<wallet-id>. Without rgb.json the base is this variable, or the
+# parent of the BTCPay data directory when it is unset. Two cases ignore it: an explicit
+# rgb_base_dir in rgb.json always wins, and an rgb.json that omits the key keeps the built-in
+# default /data whenever that directory already exists on the host (a warning names both paths).
+RGB_BASE_DIR=/data
 
 # RGB proxy endpoint for consignment exchange
 RGB_PROXY_ENDPOINT=rpc://proxy.iriswallet.com:443/json-rpc
@@ -56,19 +60,109 @@ RGB_MAX_AUTO_COLORABLE_UTXOS=50
 # could never take effect.
 RGB_AUTO_UTXO_COOLDOWN_MINUTES=30
 RGB_AUTO_UTXO_MAX_BACKOFF_MINUTES=160
+
+# Deadlines for the out-of-process RGB send. Each of send_begin and send_end pays a fresh
+# rgb-lib wallet construction plus an indexer handshake and chain sync before the native call
+# starts, and send_begin also uploads a consignment to the RGB proxy — all inside this budget.
+# Raise it if sends fail on a slow or congested indexer; the default is 30 seconds and a send
+# that exceeds it is killed and retried identically forever. Accepted range 1-600 seconds; a
+# larger value is raised to 600, never ignored.
+RGB_NATIVE_SEND_TIMEOUT_SECONDS=30
+RGB_NATIVE_SEND_CPU_LIMIT_SECONDS=30
+
+# Deadlines for the out-of-process backup restore. Accepted range 1-3600 seconds; a larger value
+# is raised to 3600. Raising these does not weaken the restore watchdog's other limits: its disk,
+# memory and staging-entry caps are evaluated on every poll independently of the deadline, so a
+# hostile backup is still killed on whichever cap it breaches first.
+RGB_RESTORE_TIMEOUT_SECONDS=30
+RGB_RESTORE_CPU_LIMIT_SECONDS=30
 ```
+
+An unparseable or non-positive value for any of the four is ignored, leaving the configured value
+in place. A value above the stated range is raised to the range's maximum rather than ignored, so
+over-asking never silently leaves the 30-second default behind.
 
 ### Configuration File
 
 Alternatively, create `rgb.json` in your BTCPay Server data directory:
 ```json
 {
-  "network": "mainnet",
-  "electrum_url": "ssl://electrum.blockstream.info:60002",
-  "rgb_data_dir": "/data/rgb-wallets",
-  "proxy_endpoint": "rpc://proxy.iriswallet.com:443/json-rpc"
+  "rgb_base_dir": "/data",
+  "native_send_timeout_seconds": 30,
+  "max_auto_colorable_utxos": 50
 }
 ```
+
+`rgb_base_dir` is the parent of every wallet's RGB data directory, and the key name matters:
+an unrecognised key is ignored silently. If you write this file, **set `rgb_base_dir`
+explicitly** — the file replaces the whole configuration object, so omitting the key falls back to
+the built-in default `/data`. The plugin only substitutes the directory it would have chosen without
+the file when `/data` does not exist at all, and logs a warning naming both paths when it declines;
+that keeps an existing `/data` deployment where it is, and an existing wallet directory is never
+moved between parents.
+
+The knob variables above are applied after the file, so they win over it. `RGB_BASE_DIR` is the one
+exception: an explicit `rgb_base_dir` in the file wins over it.
+
+### Upgrading from 1.0.9
+
+Two changes in this release require merchant action. Neither is applied automatically, and until you
+act, **RGB is unavailable at checkout**. Invoice creation itself fails only when no payment method on
+the invoice ends up priced or awaiting activation — so an RGB-only store fails outright if RGB is
+eager, but still creates the invoice if RGB is configured as a lazy payment method.
+
+**1. Rate rules must be rewritten against the contract-derived pricing code.** Pricing is no longer
+keyed on the asset ticker; it is keyed on a code derived from the contract id, of the form `RGB2`
+followed by 64 hex characters. A rule written against a ticker (`USDT_USD = ...`) no longer matches
+anything, and a wildcard rule (`X_X = ...`) never priced a contract. Open **RGB Wallet → Settings**:
+the page prints this store's exact pricing code, a rate rule to paste, and a fixed-rate form for the
+case where you are deliberately asserting a 1:1 peg. If your store is still on BTCPay's default
+exchange rates, the page also explains that a rule naming the code requires rate scripting.
+
+You will also now receive a notification the first time an invoice is refused for this reason —
+**but only for invoices priced in your store's default currency**, which is also the pair the RGB
+settings page checks. That is the case where ordinary checkout stops, so it is the one worth
+interrupting you for; a per-currency notification would fire once for every quote currency a store
+ever sees.
+
+If your integration prices invoices in some other currency, neither surface will mention it: each pair
+needs its own rate rule. **Wherever you see it, the RGB refusal itself always names the exact
+`RGB2…_<CURRENCY>` pair to add** — what varies is only whether you meet it as an error or have to go
+looking for it.
+
+What decides that is not your store's configuration but a single question: **does any payment method on
+the invoice end up either priced or awaiting activation?** BTCPay rejects invoice creation only when
+*none* does.
+
+- **At least one does** — creation **succeeds**, and RGB's refusal is recorded only in that invoice's own
+  event log, on the invoice page in BTCPay. This is the usual outcome, and there are two ways to reach it
+  that are easy to miss: another enabled method priced successfully, *or* RGB itself is configured as a
+  **lazy** payment method, in which case it is not evaluated at creation at all and the refusal is
+  recorded later, when a customer activates RGB at checkout.
+- **None does** — creation **fails** and the error carries the refusal. This needs every method on the
+  invoice to be unavailable, so it is not simply "RGB is the only method": an RGB-only store whose RGB is
+  lazy still creates the invoice, and an RGB-only store whose RGB is eager does fail — as does a store
+  with other methods when those also fail their own rate or availability checks.
+- **Zero-price invoices** skip payment-method pricing altogether, so nothing is evaluated and nothing is
+  recorded either way.
+
+So if RGB silently stops appearing on invoices priced in a non-default currency, open a recent invoice
+and read its event log — that is where the answer is in every case except the hard failure, which tells
+you directly. If you create invoices in several currencies, add a rule for each pair rather than relying
+on any of these notices.
+
+**2. Two store settings were removed, not renamed.**
+
+- `maxAllocationsPerUtxo` is gone from the payment-method configuration. The value lives on the
+  wallet row, is fixed when the wallet is created, and the settings page shows it read-only.
+- `allowOneToOneRateFallback` is gone. The opt-in 1:1 rate fallback was **deleted** rather than
+  narrowed, because it applied to any quote currency. A store that had it enabled loses it the first
+  time the configuration is re-serialized and **cannot re-enable it** — that is by design. If you
+  intend a 1:1 peg, assert it explicitly with the fixed-rate rule the settings page prints, which
+  binds the peg to one contract and one quote currency instead of all of them.
+
+Both keys are simply absent from the configuration type, so sending either through the Greenfield
+API is ignored rather than rejected.
 
 ### Network Defaults
 
@@ -135,7 +229,8 @@ The new asset will appear on your Assets page and in the dashboard.
 3. Under **UTXO Settings** (optional):
    - **UTXO Count** — How many colorable UTXOs to create at once (default: 4)
    - **UTXO Size** — Size of each UTXO in satoshis (default: 1000)
-   - **Max Allocations per UTXO** — How many RGB allocations per UTXO (default: 10)
+   - **Max Allocations per UTXO** — display only. It is fixed on the wallet row when the wallet is
+     created and is no longer settable here or through the API.
 4. Under **Settlement**:
    - **Min Confirmations** — Number of blockchain confirmations required before marking a payment as settled (default: 1)
 5. Click **Save Payment Settings**
@@ -358,19 +453,22 @@ Four checks bind that binary, all runnable from a clone:
   byte-identical to the build output produced in the same job;
 - **loadability** — `scripts/verify-artifact-native-loads.sh <artifact>` extracts the archive entry and
   `dlopen`s it inside a Debian 12 container, resolving all five exports;
-- **source binding** — `native/rgb-verify/gate-native-source-manifest.txt` records the SHA-256 of the
-  shipped binary alongside per-file hashes of the sources and build scripts it was produced from;
-  `scripts/verify-tracked-gate-native-freshness.sh` checks the tracked binary against it.
+- **recorded-input consistency** — `native/rgb-verify/gate-native-source-manifest.txt` records the
+  SHA-256 of the shipped binary alongside per-file hashes of the sources and build scripts recorded
+  beside it; `scripts/verify-tracked-gate-native-freshness.sh` checks both against the working tree.
+  This is **not** a source binding: the manifest is written from whatever is on disk, so it cannot show
+  that the binary was compiled from those inputs. Nothing in this repository establishes that today.
 
 Rebuild and re-stage the tracked native with `scripts/build-gate-native-linux-x64.sh`, which builds in
 `rust:1-bookworm` (the glibc floor), refuses to leave a stale binary in place, and rewrites the manifest.
 
-**Known limitation.** The manifest binds the binary to its sources, but regenerating the manifest
-*without* rebuilding the binary would make a stale binary look fresh. Closing that needs a CI rule that
-refuses a manifest change unless the binary changes too; it is not yet in place. Note also that the Rust
-build is **not** byte-reproducible — two builds from byte-identical sources produce the same size but
-different SHA-256 and different build IDs — so a committed expected-hash pin is not implementable, and
-only same-job byte comparison establishes provenance.
+**Known limitation.** The manifest records hashes of the binary and of the inputs beside it; it does
+**not** bind one to the other, because regenerating the manifest *without* rebuilding the binary makes a
+stale binary look consistent. Closing that needs a CI rule that refuses a manifest change unless the
+binary changes too; it is not yet in place. Note also that the Rust build is **not** byte-reproducible —
+two builds from byte-identical sources produce the same size but different SHA-256 and different build
+IDs — so a committed expected-hash pin is not implementable. Same-job byte comparison gives byte
+continuity on that one hop; **nothing here establishes source-to-binary provenance.**
 
 ## Building from source
 
@@ -379,7 +477,7 @@ This repository uses NuGet lockfiles (`packages.lock.json`) for both the plugin 
 - First-time clone / clean restore: `dotnet restore --use-lock-file`
 - Standard build verification: `dotnet restore --locked-mode` — this fails the build if any resolved version drifts from the committed lockfile.
 - After a BTCPay submodule update (or any change to the plugin's direct/transitive packages): `dotnet restore --force-evaluate` regenerates the lockfile to match the new graph. Commit the regenerated `packages.lock.json`.
-- The lockfile pins *version strings* only. It does NOT verify NuGet author signatures or SLSA provenance — those are deferred release-process controls.
+- The lockfile pins each resolved version together with its `contentHash`, so a package whose bytes change under a fixed version fails restore. It does NOT verify NuGet author signatures or build provenance — those are deferred release-process controls.
 
 ### Packaging the gate native (`RgbVerifyCffi`)
 
@@ -434,12 +532,15 @@ python3 scripts/verify_plugin_artifact.py BTCPayServer.Plugins.RgbUtexo.btcpay \
 ```
 
 `pre-package` means only that **gate-package** provenance is not established: the shipped gate native is
-the one tracked in this repository rather than one declared by an `RgbVerifyCffi` `PackageReference`. It
-is not a statement about the binary's freshness — that is what `--gate-native-source` (same-job byte
-binding) and the source manifest cover. Once a published `RgbVerifyCffi` dependency is connected,
-`--provenance strict` becomes available; strict mode requires the gate to be declared by that package
-and byte-identical to its global-packages-cache copy. Strict mode is the only thing that publish gates:
-a `linux-x64` plugin artifact verifies end to end today without it. A locally built three-RID gate
+the one tracked in this repository rather than one declared by an `RgbVerifyCffi` `PackageReference`.
+What the neighbouring checks do establish is narrower than it sounds: `--gate-native-source` gives
+**byte continuity** on one hop (artifact entry against a build output supplied in the same job), and the
+manifest gives **recorded-input consistency**. Neither is source-to-binary provenance, and no
+combination of them is. Once a published `RgbVerifyCffi` dependency is connected, `--provenance strict`
+becomes available; strict mode requires the gate to be declared by that package and byte-identical to
+its global-packages-cache copy — **package-origin integrity plus one more byte-continuity hop**, still
+not a statement about how that package's binary was produced. Strict mode is the only thing that publish
+gates: a `linux-x64` plugin artifact verifies end to end today without it. A locally built three-RID gate
 package can be checked without network access:
 
 ```bash

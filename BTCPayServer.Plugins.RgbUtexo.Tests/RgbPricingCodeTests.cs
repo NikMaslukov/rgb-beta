@@ -43,6 +43,60 @@ public class RgbPricingCodeTests
             "bGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGxsbGw2dHQy"));
     }
 
+    // The 36-byte embedded-checksum form. RgbPricingCode.cs builds the expected checksum as
+    // { d[0], d[1], d[1], d[2] } — d[1] twice, d[3] never — which reads exactly like a typo and has been
+    // reported as one. It is NOT: it is a faithful port of upstream baid64 0.4.1's own check(), whose
+    // last line is literally `[sha[0], sha[1], sha[1], sha[2]]` (src/lib.rs, and =0.4.1 is pinned via
+    // rgb-consensus-0.11.1-rc.10 and resolved in native/rgb-verify/Cargo.lock). "Correcting" it to the
+    // first four digest bytes would reject every genuine embedded-checksum presentation, so this test
+    // computes BOTH forms and pins which one the production code must accept.
+    [Fact]
+    public void EmbeddedChecksum_MatchesUpstreamBaid64_NotTheFirstFourDigestBytes()
+    {
+        var payload = Enumerable.Repeat((byte)0x6C, 32).ToArray();
+        var digest = System.Security.Cryptography.SHA256.HashData(
+            System.Security.Cryptography.SHA256.HashData("rgb"u8).Concat(payload).ToArray());
+
+        var upstream = Baid64(payload, [digest[0], digest[1], digest[1], digest[2]]);
+        var firstFour = Baid64(payload, [digest[0], digest[1], digest[2], digest[3]]);
+
+        Assert.Equal(Convert.ToHexString(payload), RgbPricingCode.CanonicalizeAssetId(upstream));
+        Assert.NotEqual(upstream, firstFour);
+        var rejected = Assert.Throws<ArgumentException>(
+            () => RgbPricingCode.CanonicalizeAssetId(firstFour));
+        Assert.Contains("checksum", rejected.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ThirtySixByteContractId_WithWrongChecksum_IsRejected()
+    {
+        var payload = Enumerable.Repeat((byte)0x6C, 32).ToArray();
+        var digest = System.Security.Cryptography.SHA256.HashData(
+            System.Security.Cryptography.SHA256.HashData("rgb"u8).Concat(payload).ToArray());
+
+        var corrupted = Baid64(payload,
+            [digest[0], digest[1], digest[1], (byte)(digest[2] ^ 0x01)]);
+
+        Assert.Throws<ArgumentException>(() => RgbPricingCode.CanonicalizeAssetId(corrupted));
+    }
+
+    // rgb-core never emits the 36-byte form for a ContractId: rgb-consensus-0.11.1-rc.10
+    // src/operation/commit.rs declares `impl DisplayBaid64 for ContractId` with EMBED_CHECKSUM = false
+    // over a [u8; 32] payload. Pinned so a dependency that starts emitting 36 bytes is visible here
+    // rather than as a refused invoice.
+    [Theory]
+    [InlineData(AssetA)]
+    [InlineData(AssetB)]
+    [InlineData(AssetC)]
+    public void ContractIdPresentation_DecodesToThirtyTwoBytes(string assetId)
+    {
+        Assert.Equal(64, RgbPricingCode.CanonicalizeAssetId(assetId).Length);
+    }
+
+    static string Baid64(byte[] payload, byte[] checksum) =>
+        Convert.ToBase64String(payload.Concat(checksum).ToArray())
+            .TrimEnd('=').Replace('+', '_').Replace('/', '~');
+
     [Fact]
     public void For_PreservesCaseSensitiveBaid64Payload()
     {

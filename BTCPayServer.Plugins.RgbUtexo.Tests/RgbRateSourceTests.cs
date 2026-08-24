@@ -32,7 +32,7 @@ public class RgbRateSourceTests
         var source = TestRateSource.WithNoExchanges();
         var result = await source.FetchAsync(Code, "EUR", StoreWithScript($"{Code}_USD = 1;"), default);
         Assert.False(result.IsOk);
-        Assert.Equal(RgbRateFailure.NoRate, result.Failure);
+        Assert.Equal(RgbRateFailure.NoRule, result.Failure);
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public class RgbRateSourceTests
             Code, "USD", StoreWithScript("X_X = 1;"), default);
 
         Assert.False(result.IsOk);
-        Assert.Equal(RgbRateFailure.NoRate, result.Failure);
+        Assert.Equal(RgbRateFailure.NoRule, result.Failure);
     }
 
     [Fact]

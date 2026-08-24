@@ -53,8 +53,23 @@ public class NetworkSettings
 
 public class RGBConfiguration
 {
+    internal const string DefaultRgbBaseDir = "/data";
+
+    string _rgbBaseDir = DefaultRgbBaseDir;
+
+    internal bool RgbBaseDirExplicitlySet { get; private set; }
+
     [JsonPropertyName("rgb_base_dir")]
-    public string RgbBaseDir { get; set; } = "/data";
+    public string RgbBaseDir
+    {
+        get => _rgbBaseDir;
+        set
+        {
+            if (string.IsNullOrWhiteSpace(value)) return;
+            _rgbBaseDir = value;
+            RgbBaseDirExplicitlySet = true;
+        }
+    }
 
     [JsonPropertyName("max_allocations_per_utxo")]
     public int MaxAllocationsPerUtxo { get; set; } = 10;
@@ -118,6 +133,12 @@ public class RGBConfiguration
     internal const long NativeSendRamMinBytes = 64L * 1024 * 1024;
     internal const long NativeSendRamMaxBytes = 2L * 1024 * 1024 * 1024;
 
+    internal const int NativeSendSecondsMin = 1;
+    internal const int NativeSendSecondsMax = 600;
+
+    internal const int RestoreSecondsMin = 1;
+    internal const int RestoreSecondsMax = 3_600;
+
     // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
     // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
@@ -132,8 +153,16 @@ public class RGBConfiguration
     int _autoUtxoCooldownMinutes = DefaultAutoUtxoCooldownMinutes;
     int _autoUtxoMaxBackoffMinutes = DefaultAutoUtxoMaxBackoffMinutes;
 
+    const int DefaultMaxAutoColorableUtxos = 50;
+
+    int _maxAutoColorableUtxos = DefaultMaxAutoColorableUtxos;
+
     [JsonPropertyName("max_auto_colorable_utxos")]
-    public int MaxAutoColorableUtxos { get; set; } = 50;
+    public int MaxAutoColorableUtxos
+    {
+        get => _maxAutoColorableUtxos;
+        set => _maxAutoColorableUtxos = Math.Max(0, value);
+    }
 
     const int DefaultMaxManualColorableUtxos = 250;
 
@@ -188,10 +217,12 @@ public class RGBConfiguration
         MaxStagingEntries: RestoreMaxStagingEntries);
 
     public NativeSendLimits ToNativeSendLimits() => new(
-        Timeout: TimeSpan.FromSeconds(Math.Clamp(NativeSendTimeoutSeconds, 1, 600)),
+        Timeout: TimeSpan.FromSeconds(
+            Math.Clamp(NativeSendTimeoutSeconds, NativeSendSecondsMin, NativeSendSecondsMax)),
         RamCapBytes: Math.Clamp(NativeSendRamCapBytes,
             NativeSendRamMinBytes, NativeSendRamMaxBytes),
-        CpuLimit: TimeSpan.FromSeconds(Math.Clamp(NativeSendCpuLimitSeconds, 1, 600)),
+        CpuLimit: TimeSpan.FromSeconds(
+            Math.Clamp(NativeSendCpuLimitSeconds, NativeSendSecondsMin, NativeSendSecondsMax)),
         Poll: TimeSpan.FromMilliseconds(Math.Clamp(NativeSendPollMs, 10, 1_000)),
         ReapGrace: TimeSpan.FromSeconds(Math.Clamp(NativeSendReapGraceSeconds, 1, 30)));
 

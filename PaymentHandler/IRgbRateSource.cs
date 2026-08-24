@@ -4,7 +4,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 
 // None is the zero value on purpose: RgbRateResult.Ok leaves Failure at default, and without it a
 // SUCCESS would literally carry Failure == NoRate, making any future `Failure == NoRate` test wrong.
-public enum RgbRateFailure { None, NoRate, Timeout, Error }
+public enum RgbRateFailure { None, NoRate, Timeout, Error, NoRule }
 
 public record RgbRateResult(bool IsOk, decimal Rate, string Source, RgbRateFailure Failure, bool PreferredSource)
 {

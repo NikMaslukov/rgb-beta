@@ -38,11 +38,11 @@ public class ReplenishConfigurationTests
     static Func<string, string?> Env(params (string Key, string Value)[] pairs) =>
         key => pairs.FirstOrDefault(p => p.Key == key).Value;
 
-    // WHY the three knobs are settable from the environment: rgb.json is the only other delivery mechanism,
+    // WHY these knobs are settable from the environment: rgb.json is the only other delivery mechanism,
     // and writing that file is hazardous — it replaces the whole configuration object, so omitting
-    // rgb_base_dir silently resets it to the literal default "/data" and moves every wallet path with no
-    // migration. Forcing an operator to take that risk in order to BOUND unattended signing would be a
-    // perverse trade, so these tests pin that the safe path exists.
+    // rgb_base_dir falls back to the literal default "/data", which moves every wallet path with no
+    // migration on any host that already has that directory. Forcing an operator to take that risk in
+    // order to BOUND unattended signing, or to RAISE a deadline, would be a perverse trade.
     [Fact]
     public void EnvironmentOverrides_SetAllThreeKnobs()
     {
@@ -78,6 +78,111 @@ public class ReplenishConfigurationTests
         var cfg = new RGBConfiguration { MaxAutoColorableUtxos = 33 };
         RGBPlugin.ApplyEnvironmentOverrides(cfg, Env(("RGB_MAX_AUTO_COLORABLE_UTXOS", raw)));
         Assert.Equal(33, cfg.MaxAutoColorableUtxos);
+    }
+
+    [Fact]
+    public void EnvironmentOverrides_SetTheNativeSendAndRestoreTimingKnobs()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, Env(
+            ("RGB_NATIVE_SEND_TIMEOUT_SECONDS", "120"),
+            ("RGB_NATIVE_SEND_CPU_LIMIT_SECONDS", "90"),
+            ("RGB_RESTORE_TIMEOUT_SECONDS", "300"),
+            ("RGB_RESTORE_CPU_LIMIT_SECONDS", "240")));
+
+        Assert.Equal(120, cfg.NativeSendTimeoutSeconds);
+        Assert.Equal(90, cfg.NativeSendCpuLimitSeconds);
+        Assert.Equal(300, cfg.RestoreTimeoutSeconds);
+        Assert.Equal(240, cfg.RestoreCpuLimitSeconds);
+    }
+
+    [Fact]
+    public void NativeSendTimingFromEnvironment_ReachesTheLimitsTheRunnerConsumes()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, Env(
+            ("RGB_NATIVE_SEND_TIMEOUT_SECONDS", "120"),
+            ("RGB_NATIVE_SEND_CPU_LIMIT_SECONDS", "90")));
+
+        var limits = cfg.ToNativeSendLimits();
+        Assert.Equal(TimeSpan.FromSeconds(120), limits.Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(90), limits.CpuLimit);
+    }
+
+    [Fact]
+    public void RestoreTimingFromEnvironment_ReachesTheLimitsTheRunnerConsumes()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, Env(
+            ("RGB_RESTORE_TIMEOUT_SECONDS", "300"),
+            ("RGB_RESTORE_CPU_LIMIT_SECONDS", "240")));
+
+        var limits = cfg.ToRestoreLimits();
+        Assert.Equal(TimeSpan.FromSeconds(300), limits.Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(240), limits.CpuLimit);
+    }
+
+    [Fact]
+    public void TimingValueAboveTheCeiling_IsRaisedToTheCeiling_NotIgnored()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, Env(
+            ("RGB_NATIVE_SEND_TIMEOUT_SECONDS", "100000"),
+            ("RGB_NATIVE_SEND_CPU_LIMIT_SECONDS", "100000"),
+            ("RGB_RESTORE_TIMEOUT_SECONDS", "100000"),
+            ("RGB_RESTORE_CPU_LIMIT_SECONDS", "100000")));
+
+        Assert.Equal(TimeSpan.FromSeconds(600), cfg.ToNativeSendLimits().Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(600), cfg.ToNativeSendLimits().CpuLimit);
+        Assert.Equal(TimeSpan.FromSeconds(3600), cfg.ToRestoreLimits().Timeout);
+        Assert.Equal(TimeSpan.FromSeconds(3600), cfg.ToRestoreLimits().CpuLimit);
+        Assert.True(cfg.RestoreTimeoutSeconds == 3600,
+            $"an over-large RGB_RESTORE_TIMEOUT_SECONDS left {cfg.RestoreTimeoutSeconds}s. It must be "
+            + "raised to the ceiling, never ignored: ignoring it leaves the 30-second default, which is "
+            + "the exact failure these knobs exist to remove.");
+    }
+
+    [Theory]
+    [InlineData("RGB_NATIVE_SEND_TIMEOUT_SECONDS")]
+    [InlineData("RGB_NATIVE_SEND_CPU_LIMIT_SECONDS")]
+    [InlineData("RGB_RESTORE_TIMEOUT_SECONDS")]
+    [InlineData("RGB_RESTORE_CPU_LIMIT_SECONDS")]
+    public void NonPositiveOrUnparseableTimingEnvValue_LeavesTheConfiguredValue(string key)
+    {
+        foreach (var raw in new[] { "0", "-1", "", "x", "12.5" })
+        {
+            var cfg = new RGBConfiguration
+            {
+                NativeSendTimeoutSeconds = 77,
+                NativeSendCpuLimitSeconds = 78,
+                RestoreTimeoutSeconds = 79,
+                RestoreCpuLimitSeconds = 80
+            };
+            RGBPlugin.ApplyEnvironmentOverrides(cfg, Env((key, raw)));
+
+            Assert.True(cfg.NativeSendTimeoutSeconds == 77, $"{key}={raw} moved the send timeout");
+            Assert.True(cfg.NativeSendCpuLimitSeconds == 78, $"{key}={raw} moved the send CPU limit");
+            Assert.True(cfg.RestoreTimeoutSeconds == 79, $"{key}={raw} moved the restore timeout");
+            Assert.True(cfg.RestoreCpuLimitSeconds == 80, $"{key}={raw} moved the restore CPU limit");
+        }
+    }
+
+    [Fact]
+    public void TimingJsonKeys_DeserializeOntoTheKnobs()
+    {
+        var cfg = JsonSerializer.Deserialize<RGBConfiguration>("""
+            {
+              "native_send_timeout_seconds": 111,
+              "native_send_cpu_limit_seconds": 112,
+              "restore_timeout_seconds": 113,
+              "restore_cpu_limit_seconds": 114
+            }
+            """);
+        Assert.NotNull(cfg);
+        Assert.Equal(111, cfg!.NativeSendTimeoutSeconds);
+        Assert.Equal(112, cfg.NativeSendCpuLimitSeconds);
+        Assert.Equal(113, cfg.RestoreTimeoutSeconds);
+        Assert.Equal(114, cfg.RestoreCpuLimitSeconds);
     }
 
     [Fact]
@@ -160,14 +265,16 @@ public class ReplenishConfigurationTests
     }
 
     // WHY a zero cap is honoured rather than clamped: an operator writing 0 means "no automatic creation",
-    // and EvaluateReplenishDemand turns it into SkipCapReached. Clamping it up would be a permission.
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void NonPositiveCap_IsHonouredNotClamped(int configured)
+    // and EvaluateReplenishDemand turns it into SkipCapReached. Clamping it UP would be a permission, so
+    // 0 must survive exactly. A NEGATIVE cap is floored to 0 instead of being kept verbatim: both mean
+    // disabled to EvaluateReplenishDemand, so flooring grants nothing, and it stops the consent card
+    // multiplying a negative cap into "up to -1 UTXOs" and a negative parked-principal figure. Covered
+    // by ANegativeDeploymentCap_ReadsAsDisabledNotAsANegativeFigure.
+    [Fact]
+    public void AZeroCapIsHonouredNotClamped()
     {
-        var cfg = new RGBConfiguration { MaxAutoColorableUtxos = configured };
-        Assert.Equal(configured, cfg.MaxAutoColorableUtxos);
+        var cfg = new RGBConfiguration { MaxAutoColorableUtxos = 0 };
+        Assert.Equal(0, cfg.MaxAutoColorableUtxos);
     }
 
     [Fact]

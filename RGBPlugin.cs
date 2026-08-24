@@ -66,6 +66,7 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
         services.AddSingleton<RgbAutoReplenishmentAuthorizationStore>();
         services.AddSingleton<RgbReplenishmentNoticeService>();
+        services.AddSingleton<IRgbNoticeRaiser>(sp => sp.GetRequiredService<RgbReplenishmentNoticeService>());
         services.AddSingleton<INotificationHandler, RgbReplenishmentBlockedNotification.Handler>();
         services.AddSingleton<RGBInvoiceListener>();
         services.AddHostedService(sp => sp.GetRequiredService<RGBInvoiceListener>());
@@ -94,6 +95,8 @@ public class RGBPlugin : BaseBTCPayServerPlugin
                 var fromFile = JsonSerializer.Deserialize<RGBConfiguration>(json);
                 if (fromFile != null)
                 {
+                    ApplyResolvedRgbBaseDir(fromFile, dataDir, log:
+                        ctx.BootstrapServices.GetService<ILoggerFactory>()?.CreateLogger<RGBPlugin>());
                     ApplyEnvironmentOverrides(fromFile);
                     return fromFile;
                 }
@@ -115,13 +118,13 @@ public class RGBPlugin : BaseBTCPayServerPlugin
     }
 
     /// <summary>
-    /// Applies environment-variable overrides for the colorable-UTXO and backup-restore knobs.
+    /// Applies environment-variable overrides for the colorable-UTXO, native-send and restore knobs.
     ///
     /// WHY these exist at all: rgb.json is the only other delivery mechanism, and writing that file is
-    /// hazardous — it replaces the whole configuration object, so a file that omits rgb_base_dir silently
-    /// resets it to the literal default "/data" and every wallet path moves, with no migration. An operator
-    /// who wants to bound or disable unattended signing must not be forced to take that risk to do it, so the
-    /// controls this change adds are settable without touching the file at all.
+    /// hazardous — it replaces the whole configuration object, so a file that omits rgb_base_dir can
+    /// leave every wallet path under the literal default "/data". An operator who wants to bound or
+    /// disable unattended signing, or to raise a deadline, must not be forced to take that risk to do
+    /// it, so every control here is settable without touching the file at all.
     ///
     /// An unparseable value is ignored rather than treated as zero: zero is a meaningful setting for
     /// MaxAutoColorableUtxos (it disables automatic creation) and must never be reached by accident.
@@ -153,6 +156,45 @@ public class RGBPlugin : BaseBTCPayServerPlugin
 
         if (int.TryParse(read("RGB_RESTORE_KILL_COOLDOWN_SECONDS"), out var killCooldown) && killCooldown >= 0)
             cfg.RestoreKillCooldownSeconds = killCooldown;
+
+        if (int.TryParse(read("RGB_NATIVE_SEND_TIMEOUT_SECONDS"), out var sendTimeout) && sendTimeout > 0)
+            cfg.NativeSendTimeoutSeconds = Math.Clamp(sendTimeout,
+                RGBConfiguration.NativeSendSecondsMin, RGBConfiguration.NativeSendSecondsMax);
+
+        if (int.TryParse(read("RGB_NATIVE_SEND_CPU_LIMIT_SECONDS"), out var sendCpu) && sendCpu > 0)
+            cfg.NativeSendCpuLimitSeconds = Math.Clamp(sendCpu,
+                RGBConfiguration.NativeSendSecondsMin, RGBConfiguration.NativeSendSecondsMax);
+
+        if (int.TryParse(read("RGB_RESTORE_TIMEOUT_SECONDS"), out var restoreTimeout) && restoreTimeout > 0)
+            cfg.RestoreTimeoutSeconds = Math.Clamp(restoreTimeout,
+                RGBConfiguration.RestoreSecondsMin, RGBConfiguration.RestoreSecondsMax);
+
+        if (int.TryParse(read("RGB_RESTORE_CPU_LIMIT_SECONDS"), out var restoreCpu) && restoreCpu > 0)
+            cfg.RestoreCpuLimitSeconds = Math.Clamp(restoreCpu,
+                RGBConfiguration.RestoreSecondsMin, RGBConfiguration.RestoreSecondsMax);
+    }
+
+    internal static void ApplyResolvedRgbBaseDir(
+        RGBConfiguration cfg,
+        string btcPayDataDir,
+        Func<string, bool>? directoryExists = null,
+        ILogger? log = null)
+    {
+        if (cfg.RgbBaseDirExplicitlySet) return;
+
+        var candidate = ResolveRgbBaseDir(btcPayDataDir);
+        if (string.Equals(candidate, cfg.RgbBaseDir, StringComparison.Ordinal)) return;
+
+        var exists = directoryExists ?? Directory.Exists;
+        if (exists(RGBConfiguration.DefaultRgbBaseDir))
+        {
+            log?.LogWarning(
+                "rgb.json does not set rgb_base_dir, so RGB wallet data will be read from the built-in default {DefaultBaseDir}, which exists on this host. The directory this deployment would otherwise have used, {Candidate}, was neither substituted nor migrated to: wallet directories are never moved between parents, and an RGB stock opened from the wrong parent is not recoverable from the chain. Confirm which of the two actually holds this deployment's wallets, then set rgb_base_dir explicitly in rgb.json (or set RGB_BASE_DIR and remove rgb.json) to pin it",
+                RGBConfiguration.DefaultRgbBaseDir, candidate);
+            return;
+        }
+
+        cfg.RgbBaseDir = candidate;
     }
 
     private static string ResolveRgbBaseDir(string btcPayDataDir)

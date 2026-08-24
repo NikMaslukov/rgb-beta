@@ -20,6 +20,56 @@ public class RgbCurrencyDataProviderTests
     static CurrencyData? Find(CurrencyData[] currencies, string code) =>
         currencies.FirstOrDefault(c => c.Code == code);
 
+    // One malformed RGB_Assets row must cost only its own entry. Before the per-row guard,
+    // CanonicalizeAssetId's ArgumentException escaped BuildCurrencies into LoadCurrencyData's catch,
+    // which returns just [{Code="RGB"}] — so a single bad row in any wallet on the server dropped EVERY
+    // contract pricing code, and pricing is keyed on those codes, so RGB stopped being offered on every
+    // store on the instance.
+    [Fact]
+    public void OneUnparseableAssetRow_CostsOnlyItsOwnCurrencyEntry()
+    {
+        var currencies = RgbCurrencyDataProvider.BuildCurrencies(
+            [
+                Asset(AssetA, ticker: "AAA"),
+                Asset("not-a-contract-id", ticker: "BAD", walletId: "w2"),
+                Asset(AssetB, ticker: "BBB")
+            ],
+            RgbPricingCode.For);
+
+        Assert.NotNull(Find(currencies, RgbPricingCode.For(AssetA)));
+        Assert.NotNull(Find(currencies, RgbPricingCode.For(AssetB)));
+        Assert.NotNull(Find(currencies, "RGB"));
+    }
+
+    [Fact]
+    public void UnparseableAssetRow_IsReportedOnceWithItsWalletAndAssetId()
+    {
+        var reported = new List<(string WalletId, string AssetId)>();
+
+        RgbCurrencyDataProvider.BuildCurrencies(
+            [Asset(AssetA, ticker: "AAA"), Asset("::not-a-contract::", walletId: "w2")],
+            RgbPricingCode.For,
+            onUnparseableAssetId: (walletId, assetId) => reported.Add((walletId, assetId)));
+
+        Assert.Equal([("w2", "::not-a-contract::")], reported);
+    }
+
+    [Theory]
+    [InlineData("not-a-contract-id")]
+    [InlineData("::")]
+    [InlineData("rgb:")]
+    [InlineData("rgb:!!!!")]
+    [InlineData("rgb:AAAA")]
+    [InlineData("rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw2dHQy")]
+    public void UnparseableAssetRow_DoesNotThrowOutOfBuildCurrencies(string assetId)
+    {
+        var currencies = RgbCurrencyDataProvider.BuildCurrencies(
+            [Asset(assetId, walletId: "w2"), Asset(AssetA, ticker: "AAA")],
+            RgbPricingCode.For);
+
+        Assert.NotNull(Find(currencies, RgbPricingCode.For(AssetA)));
+    }
+
     // 30
     [Fact]
     public void DerivedCode_IsRegisteredWithTheAssetsDivisibility()

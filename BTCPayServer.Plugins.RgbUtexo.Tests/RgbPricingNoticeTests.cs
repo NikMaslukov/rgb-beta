@@ -10,8 +10,8 @@ public class RgbPricingNoticeTests
 {
     const string AssetA = "rgb:bGxsbGxs-bGxsbGx-sbGxsbG-xsbGxsb-GxsbGxs-bGxsbGw";
 
-    static RgbRateResult NoRate(bool preferredSource) =>
-        RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);
+    static RgbRateResult NoRule(bool preferredSource) =>
+        RgbRateResult.Failed(RgbRateFailure.NoRule, preferredSource);
 
     [Theory]
     [InlineData(null)]
@@ -58,34 +58,64 @@ public class RgbPricingNoticeTests
     }
 
     [Fact]
-    public void NoRateOnDefaultRules_ReportsBothTheMissingRuleAndTheScriptingCause()
+    public void NoRuleOnDefaultRules_ReportsBothTheMissingRuleAndTheScriptingCause()
     {
-        var notice = RgbPricingNotice.For(AssetA, "USD", NoRate(preferredSource: true));
+        var notice = RgbPricingNotice.For(AssetA, "USD", NoRule(preferredSource: true));
 
         Assert.True(notice.RateRuleMissing);
         Assert.True(notice.UsesDefaultRules);
     }
 
     [Fact]
-    public void NoRateOnAScriptedStore_ReportsTheMissingRuleOnly()
+    public void NoRuleOnAScriptedStore_ReportsTheMissingRuleOnly()
     {
-        var notice = RgbPricingNotice.For(AssetA, "USD", NoRate(preferredSource: false));
+        var notice = RgbPricingNotice.For(AssetA, "USD", NoRule(preferredSource: false));
 
         Assert.True(notice.RateRuleMissing);
         Assert.False(notice.UsesDefaultRules);
     }
 
-    // Timeout and Error say nothing about the store's CONFIGURATION. A transient exchange outage must
-    // never tell a correctly-configured merchant that their rules are wrong.
+    // Timeout and Error are one-shot failures of THIS page's probe, not evidence about the store, so
+    // they must accuse nothing and report nothing.
     [Theory]
     [InlineData(RgbRateFailure.Timeout)]
     [InlineData(RgbRateFailure.Error)]
-    public void ATransientRateFailure_AccusesNothing(RgbRateFailure failure)
+    public void ATransientProbeFailure_AccusesNothingAndReportsNothing(RgbRateFailure failure)
     {
         var notice = RgbPricingNotice.For(AssetA, "USD", RgbRateResult.Failed(failure, preferredSource: true));
 
         Assert.False(notice.RateRuleMissing);
         Assert.False(notice.UsesDefaultRules);
+        Assert.False(notice.RateUnresolved);
+    }
+
+    // NoRate means a rule DOES name the pair and the source returned nothing for it. It must never
+    // accuse the merchant's rules — but it MUST still be reported, because checkout is refused either
+    // way and this page is the only pull surface. Before the NoRule split this state rendered the
+    // rule-missing alert; dropping it entirely would leave RGB unofferable with the page showing
+    // nothing wrong, which is the exact silent outage the notice work exists to remove.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NoRate_ReportsAnUnresolvedRateWithoutAccusingTheRules(bool preferredSource)
+    {
+        var notice = RgbPricingNotice.For(
+            AssetA, "USD", RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource));
+
+        Assert.True(notice.RateUnresolved,
+            "a rule that names the pair but resolves no rate is reported nowhere else in the plugin: "
+            + "no notice cause is raised for it and checkout only says the source returned nothing.");
+        Assert.False(notice.RateRuleMissing);
+        Assert.False(notice.UsesDefaultRules);
+    }
+
+    [Fact]
+    public void NoRule_DoesNotAlsoReportAnUnresolvedRate()
+    {
+        var notice = RgbPricingNotice.For(AssetA, "USD", NoRule(preferredSource: false));
+
+        Assert.True(notice.RateRuleMissing);
+        Assert.False(notice.RateUnresolved);
     }
 
     [Fact]
@@ -95,6 +125,21 @@ public class RgbPricingNoticeTests
 
         Assert.False(notice.RateRuleMissing);
         Assert.False(notice.UsesDefaultRules);
+        Assert.False(notice.RateUnresolved);
+    }
+
+    // Every refusal a merchant can reach from ConfigurePrompt must light up at least one alert on this
+    // page, or the page's whole purpose — explaining a refused checkout — fails for that state.
+    [Theory]
+    [InlineData(RgbRateFailure.NoRule)]
+    [InlineData(RgbRateFailure.NoRate)]
+    public void EveryConfigurationRelevantRefusal_LightsUpAnAlert(RgbRateFailure failure)
+    {
+        var notice = RgbPricingNotice.For(AssetA, "USD", RgbRateResult.Failed(failure, false));
+
+        Assert.True(notice.RateRuleMissing || notice.RateUnresolved,
+            $"{failure} refuses the invoice but renders no alert on the settings page, so the merchant "
+            + "sees a store that cannot take RGB payments and a settings page reporting nothing.");
     }
 
     // The probe is cached for 60s; rates are edited on a different controller with no invalidation

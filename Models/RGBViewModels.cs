@@ -249,6 +249,7 @@ public class RGBSettingsViewModel : StoreViewModel
     public string? QuoteCurrency { get; set; }
     public bool RateRuleMissing { get; set; }
     public bool UsesDefaultRules { get; set; }
+    public bool RateUnresolved { get; set; }
 
     public bool AutomaticReplenishmentGranted { get; set; }
     public RgbAutoReplenishmentDecision AutomaticReplenishmentDecision { get; set; }
@@ -262,6 +263,12 @@ public class RGBSettingsViewModel : StoreViewModel
     public int? PersistedUtxoSize { get; set; }
     public long WorstCaseReplenishFeeBaseSats { get; set; }
     public long WorstCaseReplenishFeePerVanillaUtxoSats { get; set; }
+
+    public long? MaxAutoColorablePrincipalSats =>
+        PersistedUtxoSize.HasValue ? (long)MaxAutoColorableUtxos * PersistedUtxoSize.Value : null;
+
+    public long MaxAutoColorablePrincipalCeilingSats =>
+        (long)MaxAutoColorableUtxos * RgbConfigBounds.UtxoSizeMax;
 
     public RgbVanillaReservationState VanillaReservationState { get; set; } = RgbVanillaReservationState.Clean;
     public int VanillaReservationCount { get; set; }

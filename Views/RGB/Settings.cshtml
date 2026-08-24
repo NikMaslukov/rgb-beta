@@ -231,7 +231,11 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                                 prices this contract at that asset's rate.
                                 This line covers invoices priced in @Model.QuoteCurrency, your store's default.
                                 An invoice created in any other currency needs its own rule for that pair, or
-                                RGB will not be offered on it.
+                                RGB will not be offered on it &mdash; and the alerts on this page only ever
+                                describe @Model.QuoteCurrency. Such an invoice is normally still created
+                                successfully, because BTCPay refuses creation only when no payment method on
+                                it ends up priced or awaiting activation; the RGB refusal naming the missing
+                                pair then appears only in that invoice's own event log.
                             </div>
                         </div>
 
@@ -248,10 +252,9 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                         {
                             <div class="alert alert-warning small">
                                 <i class="fa fa-exclamation-triangle"></i>
-                                No rate could be resolved for
+                                No rate rule names
                                 <code>@Model.PricingCode@("_")@Model.QuoteCurrency</code>, so RGB payment is
-                                not currently being offered. Either no rate rule matches that pair, or the rate
-                                source is unavailable.
+                                not currently being offered. Add a rule naming that exact pair.
                                 @if (Model.UsesDefaultRules)
                                 {
                                     <div class="mt-2">
@@ -262,6 +265,17 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                                         <strong>no longer tracks BTCPay's future changes to the defaults</strong>.
                                     </div>
                                 }
+                            </div>
+                        }
+                        else if (Model.RateUnresolved)
+                        {
+                            <div class="alert alert-warning small">
+                                <i class="fa fa-exclamation-triangle"></i>
+                                A rate rule names
+                                <code>@Model.PricingCode@("_")@Model.QuoteCurrency</code>, but the rate
+                                source returned no rate for it, so RGB payment is not currently being
+                                offered. Your rules name the right pair &mdash; check the exchange and
+                                market the rule points at, or use the fixed-rate form above.
                             </div>
                         }
                     }
@@ -301,6 +315,15 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                             plus <strong>@Model.WorstCaseReplenishFeePerVanillaUtxoSats sat</strong> for
                             every vanilla BTC UTXO beyond the first that this wallet holds &mdash; the
                             transaction spends all of them at once.</li>
+                        <li><strong>This plugin's Send BTC cannot spend a colorable UTXO</strong>, so every
+                            one created parks its BTC beyond that button's reach until an RGB send releases
+                            it. This authorization stops at the standing count above, so at the size saved
+                            now it can park at most
+                            <strong>@Model.MaxAutoColorablePrincipalSats sat</strong>, rising to
+                            <strong>@Model.MaxAutoColorablePrincipalCeilingSats sat</strong> if that size is
+                            later raised to the largest these settings allow. Colorable UTXOs this wallet
+                            already holds are additional and were created at whatever size was saved
+                            then.</li>
                     }
                     else
                     {

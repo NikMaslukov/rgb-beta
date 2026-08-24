@@ -171,12 +171,18 @@ public class RgbPricingHandlerTests
     static RGBAsset AssetRow(string assetId, string ticker, int precision) =>
         new() { AssetId = assetId, WalletId = WalletId, Ticker = ticker, Name = "Token", Precision = precision };
 
-    static StoreData Store(string assetId, string? rateScript = null)
+    static StoreData Store(string assetId, string? rateScript = null, string? defaultCurrency = null)
     {
         var store = rateScript is null
             ? new StoreData { Id = StoreId }
             : TestStores.StoreWithScript(rateScript);
         store.Id = StoreId;
+        if (defaultCurrency is not null)
+        {
+            var blob = store.GetStoreBlob();
+            blob.DefaultCurrency = defaultCurrency;
+            store.SetStoreBlob(blob);
+        }
         store.SetPaymentMethodConfig(RGBPlugin.RGBPaymentMethodId, JObject.FromObject(
             new RGBPaymentMethodConfig { WalletId = WalletId, DefaultAssetId = assetId }));
         return store;
@@ -214,10 +220,34 @@ public class RgbPricingHandlerTests
     static (RGBPaymentMethodHandler Handler, PricingWalletStub Wallets) Build(
         IRgbRateSource rates, RGBAsset asset, bool unambiguous = true)
     {
-        var wallets = new PricingWalletStub { Asset = asset, Unambiguous = unambiguous };
-        var handler = new RGBPaymentMethodHandler(
-            wallets, rates, wallets, NullLogger<RGBPaymentMethodHandler>.Instance);
+        var (handler, wallets, _) = BuildWithNoticeRaiser(rates, asset, unambiguous);
         return (handler, wallets);
+    }
+
+    static (RGBPaymentMethodHandler Handler, PricingWalletStub Wallets, RecordingNoticeRaiser Notices)
+        BuildWithNoticeRaiser(
+            IRgbRateSource rates, RGBAsset asset, bool unambiguous = true,
+            Exception? noticeFault = null)
+    {
+        var wallets = new PricingWalletStub { Asset = asset, Unambiguous = unambiguous };
+        var notices = new RecordingNoticeRaiser { Fault = noticeFault };
+        var handler = new RGBPaymentMethodHandler(
+            wallets, rates, wallets, notices, NullLogger<RGBPaymentMethodHandler>.Instance);
+        return (handler, wallets, notices);
+    }
+
+    sealed class RecordingNoticeRaiser : IRgbNoticeRaiser
+    {
+        internal Exception? Fault { get; init; }
+
+        internal List<(string StoreId, RgbReplenishmentNoticeCause Cause)> Raised { get; } = [];
+
+        public Task RaiseOncePerCauseAsync(
+            string storeId, RgbReplenishmentNoticeCause cause, CancellationToken ct = default)
+        {
+            Raised.Add((storeId, cause));
+            return Fault == null ? Task.CompletedTask : Task.FromException(Fault);
+        }
     }
 
     // 15 — a resolved rate is the rate that prices the invoice.
@@ -237,6 +267,7 @@ public class RgbPricingHandlerTests
     // 16/17/18 — no Failure kind may become a rate. [T3]
     [Theory]
     [InlineData(RgbRateFailure.NoRate)]
+    [InlineData(RgbRateFailure.NoRule)]
     [InlineData(RgbRateFailure.Timeout)]
     [InlineData(RgbRateFailure.Error)]
     public async Task EveryFailureKind_RefusesTheInvoice(RgbRateFailure failure)
@@ -271,12 +302,183 @@ public class RgbPricingHandlerTests
     public async Task DefaultRulesStore_IsToldToAddARateRule()
     {
         var asset = AssetRow(AssetA, "USDT", 0);
-        var (handler, _) = Build(new RecordingRateSource(RgbRateResult.Failed(RgbRateFailure.NoRate, true)), asset);
+        var (handler, _) = Build(new RecordingRateSource(RgbRateResult.Failed(RgbRateFailure.NoRule, true)), asset);
         var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
 
         var ex = await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
 
         Assert.Contains("rate scripting", ex.Message);
+        Assert.Contains(RgbPricingCode.For(AssetA), ex.Message);
+    }
+
+    // The upgrade break reaching the notification bell. Only NoRule is a configuration cause: the notice
+    // stamps a PERMANENT per-store marker, so raising it on NoRate/Timeout/Error would tell a
+    // correctly-configured merchant whose exchange is momentarily down to rewrite their rate rules, AND
+    // would permanently consume the one pricing notification that store will ever get.
+    [Fact]
+    public async Task NoRuleRefusal_RaisesThePricingNoticeExactlyOnce()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _, notices) = BuildWithNoticeRaiser(
+            new RecordingRateSource(RgbRateResult.Failed(RgbRateFailure.NoRule, false)), asset);
+        var store = Store(AssetA);
+        var ctx = Context(store, handler, price: 100m, currency: "USD");
+
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.Equal(
+            [(store.Id, RgbReplenishmentNoticeCause.PricingCodeHasNoRule)],
+            notices.Raised);
+    }
+
+    [Theory]
+    [InlineData(RgbRateFailure.NoRate)]
+    [InlineData(RgbRateFailure.Timeout)]
+    [InlineData(RgbRateFailure.Error)]
+    public async Task ASourceUnavailableRefusal_RaisesNoPricingNotice(RgbRateFailure failure)
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _, notices) = BuildWithNoticeRaiser(
+            new RecordingRateSource(RgbRateResult.Failed(failure, false)), asset);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.True(notices.Raised.Count == 0,
+            $"{failure} raised {notices.Raised.Count} pricing notice(s). Only NoRule says anything about "
+            + "the store's configuration; the notice marker is permanent, so a single exchange outage "
+            + "would burn it and a genuinely stale rate rule would then never be reported.");
+    }
+
+    // N1: RgbRateSource resolves a rule for the exact (pricingCode, invoiceCurrency) PAIR, but the notice
+    // and its durable marker are per STORE and fire once ever. A store whose default currency prices fine
+    // must not have that one notice consumed — nor be told every RGB invoice is refused — because one
+    // invoice arrived in a currency it has no rule for. Driven through the REAL rate source so the pair
+    // scoping is exercised rather than asserted.
+    [Fact]
+    public async Task AnUnsupportedQuoteCurrency_DoesNotBurnTheStoreWideNotice()
+    {
+        var codeA = RgbPricingCode.For(AssetA);
+        var (handler, _, notices) = BuildWithNoticeRaiser(
+            TestRateSource.WithNoExchanges(), AssetRow(AssetA, "USDT", 0));
+        var store = Store(AssetA, $"{codeA}_USD = 2;", defaultCurrency: "USD");
+
+        var ctx = Context(store, handler, price: 100m, currency: "EUR");
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.True(notices.Raised.Count == 0,
+            "a EUR invoice against a store whose USD pricing works raised the store-wide pricing notice. "
+            + "That notice is one-shot and permanent, so it would be consumed by an unsupported quote "
+            + "currency and unavailable when a genuinely store-wide failure happens.");
+
+        // The same store still prices its default currency, which is what makes the claim false.
+        var working = Context(store, handler, price: 100m, currency: "USD");
+        await handler.ConfigurePrompt(working);
+        Assert.Equal(50L, handler.ParsePaymentPromptDetails(working.Prompt.Details).AmountInAssetUnits);
+        Assert.Empty(notices.Raised);
+    }
+
+    [Fact]
+    public async Task NoRuleForTheStoresDefaultCurrency_DoesRaiseTheStoreWideNotice()
+    {
+        var (handler, _, notices) = BuildWithNoticeRaiser(
+            TestRateSource.WithNoExchanges(), AssetRow(AssetA, "USDT", 0));
+        var store = Store(AssetA, "X_X = 1;", defaultCurrency: "USD");
+
+        var ctx = Context(store, handler, price: 100m, currency: "USD");
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.Equal(
+            [(StoreId, RgbReplenishmentNoticeCause.PricingCodeHasNoRule)],
+            notices.Raised);
+    }
+
+    // The merchant round 3 left with no surface at all: on BTCPay's DEFAULT rates (PreferredSource true)
+    // with a NON-default invoice currency, the notification is correctly suppressed and the settings page
+    // probes the default currency, so the refusal is the ONLY place the needed pair can appear. It named
+    // the pricing code alone until this test existed.
+    [Theory]
+    [InlineData("EUR")]
+    [InlineData("GBP")]
+    public async Task ADefaultRatesStoreOnANonDefaultCurrency_IsToldTheExactPairItNeeds(string currency)
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _, notices) = BuildWithNoticeRaiser(
+            new RecordingRateSource(RgbRateResult.Failed(RgbRateFailure.NoRule, preferredSource: true)),
+            asset);
+        var store = Store(AssetA, defaultCurrency: "USD");
+        var ctx = Context(store, handler, price: 100m, currency: currency);
+
+        var ex = await Assert.ThrowsAsync<PaymentMethodUnavailableException>(
+            () => handler.ConfigurePrompt(ctx));
+
+        var pair = $"{RgbPricingCode.For(AssetA)}_{currency}";
+        Assert.True(ex.Message.Contains(pair, StringComparison.Ordinal),
+            $"the refusal does not name '{pair}'. This is a default-rates store on a non-default quote "
+            + "currency: the store-wide notification is deliberately suppressed and the settings page "
+            + "probes the default currency, so this message is the only place the merchant can learn "
+            + $"which pair to add. It said: {ex.Message}");
+
+        // The actionable half for THIS merchant is still there.
+        Assert.Contains("rate scripting", ex.Message);
+        Assert.Empty(notices.Raised);
+    }
+
+    // Both NoRule arms must name the pair; the PreferredSource one was missed once already.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void EveryNoRuleRefusal_NamesTheCompletePair(bool preferredSource)
+    {
+        var message = RGBPaymentMethodHandler.RefusalMessageForTest(
+            RgbRateResult.Failed(RgbRateFailure.NoRule, preferredSource), "RGB2ABC", "EUR");
+
+        Assert.Contains("RGB2ABC_EUR", message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("USD", "USD", true)]
+    [InlineData("usd", "USD", true)]
+    [InlineData(" USD ", "USD", true)]
+    [InlineData("EUR", "USD", false)]
+    [InlineData("USD", null, false)]
+    [InlineData("USD", "", false)]
+    [InlineData("", "USD", false)]
+    public void TheStoreWideTest_HoldsOnlyForTheStoresOwnDefaultCurrency(
+        string invoiceCurrency, string? storeDefault, bool expected)
+        => Assert.Equal(expected,
+            RGBPaymentMethodHandler.IsStoreWidePricingFailure(invoiceCurrency, storeDefault));
+
+    // The message is the money surface: it must not assert a blast radius wider than the condition that
+    // triggered it.
+    [Fact]
+    public void ThePricingNoticeMessage_DoesNotClaimEveryInvoiceIsRefused()
+    {
+        var message = RgbReplenishmentNotice.MessageFor(
+            RgbReplenishmentNoticeCause.PricingCodeHasNoRule);
+
+        foreach (var overclaim in new[] { "every RGB invoice is refused", "all RGB invoices" })
+            Assert.True(!message.Contains(overclaim, StringComparison.OrdinalIgnoreCase),
+                $"the pricing notice claims '{overclaim}'. It is raised for the store's DEFAULT currency "
+                + "only, and invoices in another currency with their own rule still price, so that "
+                + "overstates the outage on a surface the merchant acts on.");
+
+        Assert.Contains("default currency", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // A notification failure must never change what the merchant sees at checkout.
+    [Fact]
+    public async Task NoticeRaiserThatThrows_DoesNotChangeTheRefusal()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _, _) = BuildWithNoticeRaiser(
+            new RecordingRateSource(RgbRateResult.Failed(RgbRateFailure.NoRule, false)), asset,
+            noticeFault: new InvalidOperationException("notification subsystem is down"));
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+
+        var ex = await Assert.ThrowsAsync<PaymentMethodUnavailableException>(
+            () => handler.ConfigurePrompt(ctx));
+
         Assert.Contains(RgbPricingCode.For(AssetA), ex.Message);
     }
 

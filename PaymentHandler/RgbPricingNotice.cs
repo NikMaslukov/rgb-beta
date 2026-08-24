@@ -12,7 +12,8 @@ public record RgbPricingNotice(
     string? SuggestedPegRule,
     string? QuoteCurrency,
     bool RateRuleMissing,
-    bool UsesDefaultRules)
+    bool UsesDefaultRules,
+    bool RateUnresolved = false)
 {
     public static readonly RgbPricingNotice None = new(null, null, null, null, false, false);
 
@@ -25,10 +26,11 @@ public record RgbPricingNotice(
 
         var code = RgbPricingCode.For(selectedAssetId);
 
-        // Only NoRate says anything about the store's CONFIGURATION. Timeout and Error mean the rate
-        // source was unreachable, which must never tell a correctly-configured merchant their rules
-        // are wrong.
-        var missing = probe is { IsOk: false, Failure: RgbRateFailure.NoRate };
+        // Only NoRule accuses the store's CONFIGURATION. NoRate is a rule that names the pair with no
+        // rate behind it: still reported, never blamed on the merchant. Timeout and Error are one-shot
+        // failures of this page's own probe, so they report nothing at all.
+        var missing = probe is { IsOk: false, Failure: RgbRateFailure.NoRule };
+        var unresolved = probe is { IsOk: false, Failure: RgbRateFailure.NoRate };
 
         return new RgbPricingNotice(
             code,
@@ -39,7 +41,8 @@ public record RgbPricingNotice(
             $"{code}_{quoteCurrency} = 1;",
             quoteCurrency,
             missing,
-            missing && probe!.PreferredSource);
+            missing && probe!.PreferredSource,
+            unresolved);
     }
 
     // The rate rules are part of the probe's cache key, not just the pair: this notice is what a

@@ -60,9 +60,9 @@ jobs:
 
       # Bound to the TRACKED native here, which is not the self-comparison it would be elsewhere: this
       # job performs no build, so the comparison checks that MSBuild copied the tracked bytes into the
-      # publish output faithfully. It cannot detect a stale tracked native -- the freshness step below
-      # is what covers that -- but it does close the tracked-to-published hop that nothing else checks
-      # on the path plugin-builder.btcpayserver.org actually takes.
+      # publish output faithfully. It cannot detect a stale tracked native, and nor can the manifest step
+      # below -- that establishes recorded-input consistency only -- but it does close the
+      # tracked-to-published hop that nothing else checks on the Plugin Builder's actual path.
       - name: Require the clean checkout to satisfy the artifact contract
         run: |
           python3 scripts/verify_plugin_artifact.py clean-publish-out \

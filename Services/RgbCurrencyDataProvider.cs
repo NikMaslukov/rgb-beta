@@ -33,7 +33,8 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
     internal static CurrencyData[] BuildCurrencies(
         IReadOnlyList<RGBAsset> assets,
         Func<string, string> pricingCode,
-        Action<string, string, string>? onCollision = null)
+        Action<string, string, string>? onCollision = null,
+        Action<string, string>? onUnparseableAssetId = null)
     {
         var currencies = new List<CurrencyData>
         {
@@ -45,13 +46,21 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
 
         foreach (var asset in assets)
         {
-            // IsNullOrWhiteSpace, not IsNullOrEmpty: RgbPricingCode.For throws on whitespace, and a
-            // single such row would make LoadCurrencyData's catch drop EVERY currency instance-wide.
+            // IsNullOrWhiteSpace, not IsNullOrEmpty: RgbPricingCode.For throws on whitespace. Any
+            // other undecodable id is caught per row below, for the same reason: not instance-wide.
             if (string.IsNullOrWhiteSpace(asset.AssetId)) continue;
 
             // RGB_Assets is keyed (WalletId, AssetId): one contract in two wallets is one asset.
             // Prefix and separator variants are the same ContractId according to RGB Core.
-            assetsByCanonicalId.TryAdd(RgbPricingCode.CanonicalizeAssetId(asset.AssetId), asset);
+            try
+            {
+                assetsByCanonicalId.TryAdd(RgbPricingCode.CanonicalizeAssetId(asset.AssetId), asset);
+            }
+            catch (ArgumentException)
+            {
+                onUnparseableAssetId?.Invoke(asset.WalletId, asset.AssetId);
+                continue;
+            }
 
             if (string.IsNullOrEmpty(asset.Ticker)) continue;
             var ticker = asset.Ticker.ToUpperInvariant();
@@ -110,7 +119,10 @@ public class RgbCurrencyDataProvider : CurrencyDataProvider
             return BuildCurrencies(assets, RgbPricingCode.For,
                 (code, owner, other) => _log.LogCritical(
                     "RGB pricing code {Code} collides between assets {Owner} and {Other}; neither contract will be priced",
-                    code, owner, other));
+                    code, owner, other),
+                (walletId, assetId) => _log.LogWarning(
+                    "RGB asset {AssetId} in wallet {WalletId} is not a decodable RGB contract id; only that asset loses its pricing code, every other contract is still priced",
+                    assetId, walletId));
         }
         catch (Exception ex)
         {

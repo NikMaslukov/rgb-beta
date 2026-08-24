@@ -12,17 +12,20 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
     readonly IRGBWalletService _wallets;
     readonly IRgbRateSource _rates;
     readonly IRgbPricingCodeCollisionGuard _pricingCodeGuard;
+    readonly IRgbNoticeRaiser _notices;
     readonly ILogger<RGBPaymentMethodHandler> _log;
 
     public RGBPaymentMethodHandler(
         IRGBWalletService wallets,
         IRgbRateSource rates,
         IRgbPricingCodeCollisionGuard pricingCodeGuard,
+        IRgbNoticeRaiser notices,
         ILogger<RGBPaymentMethodHandler> log)
     {
         _wallets = wallets;
         _rates = rates;
         _pricingCodeGuard = pricingCodeGuard;
+        _notices = notices;
         _log = log;
     }
 
@@ -141,7 +144,24 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         var invoiceCurrency = ctx.InvoiceEntity.Currency;
         var rate = await _rates.FetchAsync(pricingCode, invoiceCurrency, ctx.Store, default);
         if (!rate.IsOk)
+        {
+            if (rate.Failure == RgbRateFailure.NoRule
+                && IsStoreWidePricingFailure(invoiceCurrency, ctx.Store.GetStoreBlob().DefaultCurrency))
+            {
+                try
+                {
+                    await _notices.RaiseOncePerCauseAsync(
+                        ctx.Store.Id, RgbReplenishmentNoticeCause.PricingCodeHasNoRule);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogWarning(ex,
+                        "Failed to raise the RGB pricing notice for store {StoreId}; the invoice is still refused",
+                        ctx.Store.Id);
+                }
+            }
             throw new PaymentMethodUnavailableException(RefusalMessage(rate, pricingCode, invoiceCurrency));
+        }
 
         var plan = RgbPricingPlan.Build(pricingCode, asset.Precision, ctx.InvoiceEntity.Price, rate.Rate);
 
@@ -195,6 +215,12 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         d.ToObject<RGBPaymentData>(Serializer) ?? throw new FormatException("bad payment");
     object IPaymentMethodHandler.ParsePaymentDetails(JToken d) => ParsePaymentDetails(d);
 
+    internal static bool IsStoreWidePricingFailure(string invoiceCurrency, string? storeDefaultCurrency) =>
+        !string.IsNullOrWhiteSpace(invoiceCurrency)
+        && !string.IsNullOrWhiteSpace(storeDefaultCurrency)
+        && string.Equals(invoiceCurrency.Trim(), storeDefaultCurrency.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+
     public static bool WalletBelongsToStore(string? walletStoreId, string? expectedStoreId) =>
         !string.IsNullOrEmpty(walletStoreId)
         && !string.IsNullOrEmpty(expectedStoreId)
@@ -210,15 +236,21 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         }
     }
 
+    internal static string RefusalMessageForTest(
+        RgbRateResult result, string pricingCode, string invoiceCurrency) =>
+        RefusalMessage(result, pricingCode, invoiceCurrency);
+
     static string RefusalMessage(RgbRateResult result, string pricingCode, string invoiceCurrency) => result.Failure switch
     {
         RgbRateFailure.Timeout => $"Exchange rate lookup for {pricingCode}/{invoiceCurrency} timed out",
         RgbRateFailure.Error => $"Exchange rate lookup for {pricingCode}/{invoiceCurrency} failed",
-        _ when result.PreferredSource =>
-            $"This store uses default exchange rates, which cannot price an RGB contract. Add a rate rule naming {pricingCode}. This requires rate scripting; enabling it copies your current default rules into the script, so other payment methods keep pricing, but the script then stops tracking BTCPay's future defaults.",
-        // NOT "no rate rule matches": WrapperRateProvider swallows provider exceptions, so NoRate also
-        // covers a correctly configured store whose exchange is simply down. Naming only the
-        // configuration cause would tell that merchant their rules are wrong.
-        _ => $"No rate could be resolved for {pricingCode}_{invoiceCurrency} — either no rate rule matches it, or the rate source is unavailable"
+        RgbRateFailure.NoRule when result.PreferredSource =>
+            $"This store uses default exchange rates, which cannot price an RGB contract. Add a rate rule naming {pricingCode}_{invoiceCurrency}, the exact pair this invoice needs. This requires rate scripting; enabling it copies your current default rules into the script, so other payment methods keep pricing, but the script then stops tracking BTCPay's future defaults.",
+        RgbRateFailure.NoRule =>
+            $"No rate rule names {pricingCode}_{invoiceCurrency}, so RGB cannot be priced for this invoice. Add a rule naming that pair in this store's rate settings.",
+        // Distinct from NoRule: WrapperRateProvider swallows provider exceptions, so this arm covers a
+        // correctly configured store whose exchange is simply down. Naming the configuration cause
+        // here would tell that merchant their rules are wrong.
+        _ => $"The rate source returned no rate for {pricingCode}_{invoiceCurrency}; a rule names the pair, so this is the source being unavailable rather than a configuration problem"
     };
 }

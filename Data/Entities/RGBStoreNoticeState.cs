@@ -6,4 +6,5 @@ public class RGBStoreNoticeState
     public DateTimeOffset? NotAuthorizedNoticeSentAt { get; set; }
     public DateTimeOffset? CapDisabledNoticeSentAt { get; set; }
     public DateTimeOffset? ConfigOutOfBoundsNoticeSentAt { get; set; }
+    public DateTimeOffset? PricingCodeHasNoRuleNoticeSentAt { get; set; }
 }

@@ -939,6 +939,7 @@ public class RGBController : Controller
                 vm.QuoteCurrency = notice.QuoteCurrency;
                 vm.RateRuleMissing = notice.RateRuleMissing;
                 vm.UsesDefaultRules = notice.UsesDefaultRules;
+                vm.RateUnresolved = notice.RateUnresolved;
             }
         }
         catch (Exception ex)

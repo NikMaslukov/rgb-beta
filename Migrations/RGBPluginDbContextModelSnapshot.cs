@@ -234,6 +234,9 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
                     b.Property<DateTimeOffset?>("NotAuthorizedNoticeSentAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<DateTimeOffset?>("PricingCodeHasNoRuleNoticeSentAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.HasKey("StoreId");
 
                     b.ToTable("RGB_StoreNoticeState", (string)null);

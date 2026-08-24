@@ -30,7 +30,7 @@ public class RgbReplenishmentBlockedNotification : BaseNotification
         public override string NotificationType => TYPE;
 
         public override (string identifier, string name)[] Meta =>
-            [(TYPE, "RGB automatic colorable-UTXO creation is blocked")];
+            [(TYPE, "RGB payments are blocked")];
 
         protected override void FillViewModel(
             RgbReplenishmentBlockedNotification notification, NotificationViewModel vm)

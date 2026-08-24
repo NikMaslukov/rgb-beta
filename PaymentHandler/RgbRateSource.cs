@@ -49,14 +49,14 @@ public class RgbRateSource : IRgbRateSource
 
             var pair = new CurrencyPair(pricingCode, invoiceCurrency);
             if (!RgbPricingCode.IsCurrentPricingCode(pricingCode))
-                return RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);
+                return RgbRateResult.Failed(RgbRateFailure.NoRule, preferredSource);
 
             var hasPrimary = TryGetExplicitRules(storeBlob.PrimaryRateSettings, storeBlob.Spread, pair,
                 out var primaryRules);
             var hasFallback = TryGetExplicitRules(storeBlob.FallbackRateSettings, storeBlob.Spread, pair,
                 out var fallbackRules);
             if (!hasPrimary && !hasFallback)
-                return RgbRateResult.Failed(RgbRateFailure.NoRate, preferredSource);
+                return RgbRateResult.Failed(RgbRateFailure.NoRule, preferredSource);
 
             var rateRules = hasPrimary
                 ? new RateRulesCollection(primaryRules!, hasFallback ? fallbackRules : null)
