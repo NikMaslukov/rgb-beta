@@ -42,6 +42,7 @@ public interface IChildHandle : IDisposable
     Task<string> ReadStdOutAsync();
     Task<string> ReadStdErrAsync();
     Task WriteStdinLineAndCloseAsync(string line);
+    bool StdOutTruncated => false;
 }
 
 public static class RestoreWatchdog

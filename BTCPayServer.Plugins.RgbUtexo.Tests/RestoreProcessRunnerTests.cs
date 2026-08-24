@@ -217,6 +217,40 @@ public class RestoreProcessRunnerTests
             processPath: "/srv/btcpay/BTCPayServer", runtimeDir: "/nope/shared/x/1.0/",
             dotnetRoot: null, fileExists: _ => false, isWindows: false));
 
+    // The parent-side half of the restore child's self-containment: the child refuses to run without
+    // these three, so if the launch stops carrying them every restore stops working — and if the child
+    // ever stops enforcing them, an orphan is unbounded again. Bound to the configured RestoreLimits,
+    // not to literals, so a launch that hardcoded a budget would fail here.
+    [Fact]
+    public async Task TheChildIsLaunchedWithTheConfiguredRestoreTimeoutRamAndCpuBudgets()
+    {
+        ProcessStartInfo? launched = null;
+        var child = new FakeChild { Exited = true, Code = 0 };
+        var limits = new RestoreLimits(
+            Timeout: TimeSpan.FromSeconds(120),
+            DiskCapBytes: 52_428_800,
+            RamCapBytes: 700_000_000,
+            CpuLimit: TimeSpan.FromSeconds(90),
+            Poll: TimeSpan.FromMilliseconds(10),
+            ReapGrace: TimeSpan.FromMilliseconds(50),
+            MaxStagingEntries: 20_000);
+        var runner = new RestoreProcessRunner(
+            NullLogger<RestoreProcessRunner>.Instance,
+            psi => { launched = psi; return child; },
+            ExistingHelper,
+            () => "dotnet");
+
+        await runner.RunAsync("bk", CreateTempDir(), "pw", limits, CancellationToken.None);
+
+        Assert.NotNull(launched);
+        var args = launched!.ArgumentList.ToList();
+        Assert.True(args.Count >= 5,
+            $"the restore launch must carry the child's own containment budgets, got: {string.Join(" ", args)}");
+        Assert.Equal("120000", args[^3]);
+        Assert.Equal("700000000", args[^2]);
+        Assert.Equal("90", args[^1]);
+    }
+
     static string CreateTempDir()
     {
         var d = Path.Combine(Path.GetTempPath(), $"rgb-runner-test-{Guid.NewGuid():N}");

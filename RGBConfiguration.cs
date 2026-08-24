@@ -139,6 +139,29 @@ public class RGBConfiguration
     internal const int RestoreSecondsMin = 1;
     internal const int RestoreSecondsMax = 3_600;
 
+    // Floors on the restore side are the false-REJECT direction, and restore is the recovery path:
+    // a bound below what an honest backup demonstrably needs refuses every restore, which is fund
+    // loss, while a bound above the shipped default only widens a DoS window the other caps still
+    // close. RgbBackupValidator admits up to MaxTotalUncompressedBytes (50 MiB) of uncompressed
+    // content, so a staging byte cap under that can refuse what validation passed; the scrypt ceiling
+    // the pre-flight guard admits is DefaultMaxScryptMemoryBytes, so a RAM cap under that kills a
+    // backup the guard just passed (tightening the real bound is what RestoreScryptMemoryCapBytes
+    // is for); and an rgb-lib wallet directory is a few dozen files, so 1 000 entries is far above
+    // legitimate while still letting an operator tighten the 20 000 default.
+    internal const long RestoreDiskCapMinBytes = RgbBackupValidator.MaxTotalUncompressedBytes;
+    internal const long RestoreDiskCapMaxBytes = 4L * 1024 * 1024 * 1024;
+
+    internal const long RestoreRamMinBytes = RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes;
+    internal const long RestoreRamMaxBytes = 4L * 1024 * 1024 * 1024;
+
+    internal const int RestoreMinStagingEntries = 1_000;
+
+    internal const int RestorePollMsMin = 10;
+    internal const int RestorePollMsMax = 1_000;
+
+    internal const int RestoreReapGraceSecondsMin = 1;
+    internal const int RestoreReapGraceSecondsMax = 30;
+
     // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
     // that settled at T <= end_N became eligible at T + 10 min — always already past. SkipCooldown could
@@ -207,14 +230,22 @@ public class RGBConfiguration
         set => _autoUtxoMaxBackoffMinutes = value > 0 ? value : DefaultAutoUtxoMaxBackoffMinutes;
     }
 
+    // Clamped HERE, not only in ApplyEnvironmentOverrides: rgb.json reaches these properties without
+    // passing through that method, so "restore_cpu_limit_seconds": 0 used to arrive at prlimit --cpu=0
+    // and refuse every restore. ToNativeSendLimits has always clamped at this read site; the restore
+    // twin clamped nothing, which made the file path bypass exactly the bound the env path enforces.
     public RestoreLimits ToRestoreLimits() => new(
-        Timeout: TimeSpan.FromSeconds(RestoreTimeoutSeconds),
-        DiskCapBytes: RestoreDiskCapBytes,
-        RamCapBytes: RestoreRamCapBytes,
-        CpuLimit: TimeSpan.FromSeconds(RestoreCpuLimitSeconds),
-        Poll: TimeSpan.FromMilliseconds(RestorePollMs),
-        ReapGrace: TimeSpan.FromSeconds(RestoreReapGraceSeconds),
-        MaxStagingEntries: RestoreMaxStagingEntries);
+        Timeout: TimeSpan.FromSeconds(
+            Math.Clamp(RestoreTimeoutSeconds, RestoreSecondsMin, RestoreSecondsMax)),
+        DiskCapBytes: Math.Clamp(RestoreDiskCapBytes, RestoreDiskCapMinBytes, RestoreDiskCapMaxBytes),
+        RamCapBytes: Math.Clamp(RestoreRamCapBytes, RestoreRamMinBytes, RestoreRamMaxBytes),
+        CpuLimit: TimeSpan.FromSeconds(
+            Math.Clamp(RestoreCpuLimitSeconds, RestoreSecondsMin, RestoreSecondsMax)),
+        Poll: TimeSpan.FromMilliseconds(
+            Math.Clamp(RestorePollMs, RestorePollMsMin, RestorePollMsMax)),
+        ReapGrace: TimeSpan.FromSeconds(
+            Math.Clamp(RestoreReapGraceSeconds, RestoreReapGraceSecondsMin, RestoreReapGraceSecondsMax)),
+        MaxStagingEntries: Math.Max(RestoreMaxStagingEntries, RestoreMinStagingEntries));
 
     public NativeSendLimits ToNativeSendLimits() => new(
         Timeout: TimeSpan.FromSeconds(

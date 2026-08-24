@@ -16,3 +16,13 @@ internal sealed class NativeSendReapedFailureException : InvalidOperationExcepti
 {
     internal NativeSendReapedFailureException(string message) : base(message) { }
 }
+
+// Deliberately NOT a NativeSendReapedFailureException: that type means "the helper definitely did not
+// do the work", and a result the parent could not read in full carries no such claim. Recovery must
+// treat it as indeterminate, so it must not be caught by the reaped-failure handler.
+internal sealed class NativeSendOutputTruncatedException : InvalidOperationException
+{
+    internal NativeSendOutputTruncatedException(string operation, int outputCapChars)
+        : base($"RGB {operation} produced more than the {outputCapChars}-character result cap, "
+            + "so its result could not be read in full and must not be treated as a value") { }
+}

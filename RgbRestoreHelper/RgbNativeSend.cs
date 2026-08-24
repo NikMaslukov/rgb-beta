@@ -98,6 +98,8 @@ public static class RgbNativeSend
     [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
     static extern void rgblib_string_free(IntPtr ptr);
 
+    public static void FreeNativeString(IntPtr ptr) => rgblib_string_free(ptr);
+
     public static string ReadResult(object? result, string methodName)
     {
         if (result == null)

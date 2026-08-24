@@ -172,6 +172,13 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         if (int.TryParse(read("RGB_RESTORE_CPU_LIMIT_SECONDS"), out var restoreCpu) && restoreCpu > 0)
             cfg.RestoreCpuLimitSeconds = Math.Clamp(restoreCpu,
                 RGBConfiguration.RestoreSecondsMin, RGBConfiguration.RestoreSecondsMax);
+
+        // The restore child now enforces this budget on itself as a hard address-space rlimit, so it is
+        // the one restore bound that can newly refuse a genuine backup mid-flight. Reaching it without
+        // editing rgb.json is the same argument the scrypt ceiling above already won.
+        if (long.TryParse(read("RGB_RESTORE_RAM_CAP_BYTES"), out var restoreRam) && restoreRam > 0)
+            cfg.RestoreRamCapBytes = Math.Clamp(restoreRam,
+                RGBConfiguration.RestoreRamMinBytes, RGBConfiguration.RestoreRamMaxBytes);
     }
 
     internal static void ApplyResolvedRgbBaseDir(

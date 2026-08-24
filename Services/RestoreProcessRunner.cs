@@ -185,6 +185,14 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         psi.ArgumentList.Add(helperDll);
         psi.ArgumentList.Add(backupPath);
         psi.ArgumentList.Add(stagingDir);
+        // Handed to the child so it can bound ITSELF: a wall-clock FailFast and a hard address-space
+        // plus CPU rlimit that survive the parent dying or failing to kill. Clamped to the ranges the
+        // child accepts, so a configuration the child would reject can never be produced here.
+        psi.ArgumentList.Add(
+            Math.Clamp((int)Math.Ceiling(limits.Timeout.TotalMilliseconds), 100, 3_600_000).ToString());
+        psi.ArgumentList.Add(Math.Max(limits.RamCapBytes, 1).ToString());
+        psi.ArgumentList.Add(
+            Math.Clamp((int)Math.Ceiling(limits.CpuLimit.TotalSeconds), 1, 3_600).ToString());
         return psi;
     }
 
@@ -240,6 +248,13 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         readonly Process _p;
         readonly Task<string> _stdout;
         readonly Task<string> _stderr;
+        volatile bool _stdOutTruncated;
+
+        // Only the native-send supervisor consults this: its stdout carries a PSBT or a txid, so a
+        // silently truncated prefix would be parsed as a value. Restore's stdout is never read and
+        // its stderr is only a diagnostic string, so dropped overflow there stays harmless.
+        public bool StdOutTruncated => _stdOutTruncated;
+
         public RealChildHandle(ProcessStartInfo psi, int stdOutCapChars = StdErrCapChars)
         {
             Process? started = null;
@@ -247,12 +262,13 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             {
                 started = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned null");
                 _p = started;
-                _stdout = DrainCappedAsync(_p.StandardOutput, stdOutCapChars);
+                _stdout = DrainCappedAsync(_p.StandardOutput, stdOutCapChars,
+                    () => _stdOutTruncated = true);
                 // Drain stderr concurrently from the start so a child that writes more than the OS pipe
                 // buffer cannot block mid-restore (which would convert every restore into a timeout kill).
                 // Retain only a capped prefix so a noisy child cannot shift the DoS into parent memory by
                 // spewing unbounded stderr — the pipe is still fully drained, the overflow is discarded.
-                _stderr = DrainCappedAsync(_p.StandardError, StdErrCapChars);
+                _stderr = DrainCappedAsync(_p.StandardError, StdErrCapChars, onOverflow: null);
             }
             catch
             {
@@ -268,15 +284,16 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             }
         }
 
-        static async Task<string> DrainCappedAsync(StreamReader reader, int cap)
+        static async Task<string> DrainCappedAsync(StreamReader reader, int cap, Action? onOverflow)
         {
             var sb = new StringBuilder();
             var buf = new char[4096];
             int n;
             while ((n = await reader.ReadAsync(buf, 0, buf.Length)) > 0)
             {
-                if (sb.Length < cap)
-                    sb.Append(buf, 0, Math.Min(n, cap - sb.Length));
+                var room = cap - sb.Length;
+                if (n > room) onOverflow?.Invoke();
+                if (room > 0) sb.Append(buf, 0, Math.Min(n, room));
             }
             return sb.ToString();
         }

@@ -31,18 +31,21 @@ public interface INativeSendProcessRunner
 
 public sealed class NativeSendProcessRunner : INativeSendProcessRunner
 {
+    internal const int MinOutputCapChars = 1_024;
+    internal const int MaxOutputCapChars = 8 * 1_048_576;
+
     readonly ILogger<NativeSendProcessRunner> _log;
-    readonly Func<ProcessStartInfo, IChildHandle> _handleFactory;
+    readonly Func<ProcessStartInfo, int, IChildHandle> _handleFactory;
     readonly Func<string> _resolveHelperDll;
     readonly Func<string> _resolveDotnetHost;
 
     public NativeSendProcessRunner(ILogger<NativeSendProcessRunner> log,
-        Func<ProcessStartInfo, IChildHandle>? handleFactory = null,
+        Func<ProcessStartInfo, int, IChildHandle>? handleFactory = null,
         Func<string>? resolveHelperDll = null,
         Func<string>? resolveDotnetHost = null)
     {
         _log = log;
-        _handleFactory = handleFactory ?? (psi => new RestoreProcessRunner.RealChildHandle(psi, 1_048_576));
+        _handleFactory = handleFactory ?? CreateRealChild;
         _resolveHelperDll = resolveHelperDll ?? (() => Path.Combine(
             Path.GetDirectoryName(typeof(NativeSendProcessRunner).Assembly.Location)!,
             "RgbRestoreHelper.dll"));
@@ -76,7 +79,8 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
                 "cached native wallet could not be quiesced before helper launch");
 
         IChildHandle child;
-        try { child = _handleFactory(psi); }
+        var outputCapChars = Math.Clamp(limits.OutputCapChars, MinOutputCapChars, MaxOutputCapChars);
+        try { child = _handleFactory(psi, outputCapChars); }
         catch (NativeSendChildUnreapedException) { throw; }
         catch (Exception ex) { throw new InvalidOperationException("Failed to launch native send helper", ex); }
 
@@ -119,11 +123,17 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
                 if (!killed)
                 {
                     var reaped = await child.WaitForExitAsync(limits.ReapGrace, CancellationToken.None);
+                    var stdOut = await child.ReadStdOutAsync();
+                    var stdErr = await child.ReadStdErrAsync();
+                    // A truncated prefix of a PSBT or a txid is not a smaller value, it is a wrong
+                    // one, and returning it would let a completed send_end read as a failed send.
+                    if (child.StdOutTruncated)
+                        throw new NativeSendOutputTruncatedException(operation, outputCapChars);
                     return new NativeSendRunResult(
                         NativeSendOutcome.Exited,
                         child.ExitCode,
-                        await child.ReadStdOutAsync(),
-                        await child.ReadStdErrAsync(),
+                        stdOut,
+                        stdErr,
                         reaped,
                         sw.Elapsed);
                 }
@@ -147,6 +157,12 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
             }
         }
     }
+
+    // Named rather than inlined so the production default is reachable by a test. Every other
+    // observation of the cap goes through an injected factory, so an edit that put a literal back
+    // here would leave the whole suite green with the knob dead again.
+    internal static IChildHandle CreateRealChild(ProcessStartInfo psi, int outputCapChars)
+        => new RestoreProcessRunner.RealChildHandle(psi, outputCapChars);
 
     ProcessStartInfo BuildStartInfo(string helperDll, string operation, NativeSendLimits limits)
     {

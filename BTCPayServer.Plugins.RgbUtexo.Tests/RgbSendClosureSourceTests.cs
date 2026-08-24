@@ -848,7 +848,7 @@ public class RgbSendClosureSourceTests
 
         var program = File.ReadAllText(Path.Combine(
             RepoRoot(), "RgbRestoreHelper", "Program.cs"));
-        var apply = program.IndexOf("NativeSendResourceLimiter.Apply(memoryLimitBytes, cpuLimitSeconds)",
+        var apply = program.IndexOf("ApplyResourceLimits(memoryLimitBytes, cpuLimitSeconds)",
             StringComparison.Ordinal);
         var read = program.IndexOf("stdin.ReadToEnd()", StringComparison.Ordinal);
         Assert.True(apply >= 0 && apply < read);
