@@ -16,14 +16,91 @@ public class RgbPaymentRegistrationTests
     [Theory] // G2-T1a, and the WaitingConfirmations row is G2-T7
     [InlineData(RGBInvoiceStatus.Settled, true, false)]
     [InlineData(RGBInvoiceStatus.Settled, false, true)]
-    [InlineData(RGBInvoiceStatus.Underpaid, true, true)]
-    [InlineData(RGBInvoiceStatus.WaitingConfirmations, true, true)]
-    public void ShouldCommitAdvance_BlocksOnlyTheSettledAdvanceAndOnlyAfterAFailure(
+    [InlineData(RGBInvoiceStatus.Underpaid, true, false)]
+    [InlineData(RGBInvoiceStatus.Underpaid, false, true)]
+    [InlineData(RGBInvoiceStatus.WaitingConfirmations, true, false)]
+    [InlineData(RGBInvoiceStatus.WaitingConfirmations, false, true)]
+    public void ShouldCommitAdvance_BlocksEveryAdvanceAfterAFailedRegistration(
         RGBInvoiceStatus status, bool registrationFailed, bool expected)
     {
-        // Underpaid and WaitingConfirmations self-heal on the next sweep, so blocking them would add
-        // retry pressure and leave the row describing reality worse than before.
+        // The earlier form of this test asserted that WaitingConfirmations may commit after a failure
+        // because it "self-heals". It does not: once the row leaves Pending, the waiting branch of
+        // EvaluateInvoiceState stops matching it, so the failed registration is never re-attempted
+        // while the transfer stays at status 2. Only the advance being held returns the row to that
+        // branch. See WaitingConfirmations_HeldAfterAFailure_IsRetriedOnTheNextSweep below.
         Assert.Equal(expected, RGBInvoiceListener.ShouldCommitAdvance(status, registrationFailed));
+    }
+
+    [Fact]
+    public void ShouldCommitAdvance_WithNoAdvanceToMake_IsNeverBlocked()
+    {
+        // A null status carries no payment work, so registrationFailed cannot be set for it; blocking
+        // here would be a hold with nothing to retry.
+        Assert.True(RGBInvoiceListener.ShouldCommitAdvance(null, true));
+        Assert.True(RGBInvoiceListener.ShouldCommitAdvance(null, false));
+    }
+
+    [Fact]
+    public void WaitingConfirmations_HeldAfterAFailure_IsRetriedOnTheNextSweep()
+    {
+        var invoice = new RGBInvoice
+        {
+            Id = "inv-1", WalletId = "w", RecipientId = "r", AssetId = "a",
+            Amount = 100, Status = RGBInvoiceStatus.Pending
+        };
+        var inFlight = new[] { new RgbTransfer { Idx = 1, Status = 2, Amount = 100, Txid = "tx" } };
+
+        var first = RGBInvoiceListener.EvaluateInvoiceState(invoice, inFlight);
+        Assert.Equal(RGBInvoiceStatus.WaitingConfirmations, first.NewStatus);
+        Assert.Equal(PaymentStatus.Processing, first.PaymentStatus);
+        Assert.Single(first.PaymentsToRecord);
+
+        // The gate refuses the advance, so the row keeps the status it had.
+        Assert.False(RGBInvoiceListener.ShouldCommitAdvance(first.NewStatus, registrationFailed: true));
+
+        var retry = RGBInvoiceListener.EvaluateInvoiceState(invoice, inFlight);
+        Assert.Equal(RGBInvoiceStatus.WaitingConfirmations, retry.NewStatus);
+        Assert.Equal(PaymentStatus.Processing, retry.PaymentStatus);
+        Assert.Single(retry.PaymentsToRecord);
+        Assert.Equal(1, retry.PaymentsToRecord[0].Idx);
+    }
+
+    [Fact]
+    public void WaitingConfirmations_CommittedAfterAFailure_ProducesNoFurtherPaymentWork()
+    {
+        // The defect this fix closes, pinned as the counterfactual: had the advance been committed,
+        // the same transfer yields no status and no payments, so nothing retries and nothing alarms.
+        var advanced = new RGBInvoice
+        {
+            Id = "inv-1", WalletId = "w", RecipientId = "r", AssetId = "a",
+            Amount = 100, Status = RGBInvoiceStatus.WaitingConfirmations
+        };
+
+        var result = RGBInvoiceListener.EvaluateInvoiceState(
+            advanced, new[] { new RgbTransfer { Idx = 1, Status = 2, Amount = 100, Txid = "tx" } });
+
+        Assert.Null(result.NewStatus);
+        Assert.Null(result.PaymentStatus);
+        Assert.Empty(result.PaymentsToRecord);
+    }
+
+    [Fact]
+    public void AHeldWaitingConfirmationsInvoice_StillSettlesWhenTheTransferConfirms()
+    {
+        // Holding the row must not cost the settlement: the settled branch keys off "not Settled",
+        // not off WaitingConfirmations, so a held invoice settles with the full cumulative amount.
+        var held = new RGBInvoice
+        {
+            Id = "inv-1", WalletId = "w", RecipientId = "r", AssetId = "a",
+            Amount = 100, Status = RGBInvoiceStatus.Pending
+        };
+
+        var result = RGBInvoiceListener.EvaluateInvoiceState(
+            held, new[] { new RgbTransfer { Idx = 1, Status = 3, Amount = 100, Txid = "tx" } });
+
+        Assert.Equal(RGBInvoiceStatus.Settled, result.NewStatus);
+        Assert.Equal(PaymentStatus.Settled, result.PaymentStatus);
+        Assert.Equal(100, result.ReceivedAmount);
     }
 
     [Fact] // G2-T9 and G2-T11

@@ -740,8 +740,13 @@ public class RGBInvoiceListener : IHostedService
     // WHY a separate function: ProcessTransfers cannot be driven in a unit test (it opens a DB
     // context), so the decision that governs whether a payment can be lost must live somewhere a
     // test can reach.
+    // WHY every advance and not just Settled: a failed WaitingConfirmations registration used to commit
+    // anyway, and the next sweep then found invoice.Status != Pending, so EvaluateInvoiceState returned
+    // no payment work and no status — the attempt was never retried and, because that branch is skipped
+    // entirely, never alarmed either. Holding the row at its previous status is what puts it back in
+    // front of the same branch on the next sweep, which is the retry.
     internal static bool ShouldCommitAdvance(RGBInvoiceStatus? newStatus, bool registrationFailed)
-        => !(registrationFailed && newStatus == RGBInvoiceStatus.Settled);
+        => !(registrationFailed && newStatus.HasValue);
 
     // WHY bounded to Settled: an underpaid invoice never leaves the sweep filter, so an unbounded
     // republish would emit one event per poll for the life of the invoice.

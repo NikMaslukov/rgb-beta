@@ -30,4 +30,28 @@ public class RgbPricingCodeCollisionGuardTests
         Assert.False(RgbPricingCodeCollisionGuard.IsUnambiguous(
             AssetA, [AssetA, AssetB], _ => "RGB2" + new string('A', 64)));
     }
+
+    [Fact]
+    public void AnUndecodableStoredRow_LeavesEveryOtherContractPriced()
+    {
+        // Before the per-row guard this threw ArgumentException out of ConfigurePrompt, and BTCPay
+        // turned that into a failed payment prompt for EVERY store on the instance.
+        Assert.True(RgbPricingCodeCollisionGuard.IsUnambiguous(
+            AssetA, [AssetA, "not-a-contract-id", AssetB], RgbPricingCode.For));
+    }
+
+    [Fact]
+    public void AnUndecodableStoredRow_DoesNotMaskARealCollisionBehindIt()
+    {
+        // The malformed row must be skipped, not end the scan: AssetB still collides.
+        Assert.False(RgbPricingCodeCollisionGuard.IsUnambiguous(
+            AssetA, ["not-a-contract-id", AssetB], _ => "RGB2" + new string('A', 64)));
+    }
+
+    [Fact]
+    public void AWhitespaceOnlyStoredRow_IsStillSkipped()
+    {
+        Assert.True(RgbPricingCodeCollisionGuard.IsUnambiguous(
+            AssetA, [AssetA, "   ", AssetB], RgbPricingCode.For));
+    }
 }

@@ -969,12 +969,17 @@ public class RGBWalletService : IRGBWalletService
                 throw new RgbWalletQuarantinedException(
                     "outbound staged transfers remain after reconciliation");
 
-            // ClearNeedsRecovery fsyncs the Stock before committing the database flag. The operation
-            // lease remains owned through marker and journal cleanup, so every crash ordering either
-            // retries an idempotent reconciliation or retains a quarantine marker.
-            await ClearNeedsRecoveryAsync(wallet.Id, ct);
+            // Drop the artifacts that make a wallet UNDISCOVERABLE first; commit the flag that makes it
+            // DISCOVERABLE last. Clearing NeedsRecovery first left a window in which a crash kept the
+            // marker and journal — which refuse sends, AcquireParent and deletion — while the listener's
+            // (IsActive || NeedsRecovery) page no longer enumerated an inactive wallet, so nothing
+            // re-armed the artifact-driven reconciliation that removes them. This order has no
+            // undiscoverable intermediate state: a crash after the deletes leaves NeedsRecovery set with
+            // no artifacts, which the next sweep reconciles against an empty orphan set and clears.
+            // ClearNeedsRecovery still fsyncs the Stock before committing the database flag.
             nativeSendLease.ClearActiveMarker(walletDir);
             RgbSendRecoveryJournal.Delete(journalPath);
+            await ClearNeedsRecoveryAsync(wallet.Id, ct);
             completed = true;
         }
         finally
@@ -1712,6 +1717,9 @@ public class RGBWalletService : IRGBWalletService
         RgbVerificationSnapshot? verificationSnapshot = null;
         var sendBeginMayHaveRun = false;
         var sendEndStarted = false;
+        string? sentTxid = null;
+        string? broadcastWarning = null;
+        var quarantineDischargeEarned = false;
         try
         {
             // The early check avoids expensive validation for an already-quarantined wallet. This
@@ -1813,15 +1821,21 @@ public class RGBWalletService : IRGBWalletService
             _log.LogInformation("SendAsset completed: {Ticker} amount={Amount}, txid={Txid}",
                 asset.Ticker, amount, txid);
 
-            string? broadcastWarning = null;
             // beta.30's non-donation flow deliberately waits for the recipient ACK. Refresh owns the
             // native broadcast transition; broadcasting the extracted Bitcoin transaction here would
             // bypass NACK protection and can strand the RGB allocation state.
             try
             {
                 await _rgbLib.RefreshAsync(walletId, ct);
-                await ClearNeedsRecoveryAsync(walletId, ct);
+                // Journal before flag, for the reason given in ReconcileWalletRecoveryAsync. The flag is
+                // not committed here at all: earning the discharge is recorded, and the commit itself
+                // runs past the finally below, so both artifacts that make this wallet findable — the
+                // journal and the worker marker — are already gone when NeedsRecovery goes false. That
+                // keeps the marker's single conditional release in the finally, which is what guarantees
+                // release on the paths that must keep the quarantine, and still leaves no window in which
+                // a discharged wallet holds an artifact no scan will come back for.
                 RgbSendRecoveryJournal.Delete(recoveryJournal);
+                quarantineDischargeEarned = true;
             }
             catch (Exception ex)
             {
@@ -1830,7 +1844,7 @@ public class RGBWalletService : IRGBWalletService
                 try { _rgbLib.UnloadWallet(walletId); } catch { }
             }
 
-            return (txid, amount, resolvedAssetId, asset.Ticker, broadcastWarning);
+            sentTxid = txid;
         }
         catch (Exception sendException)
         {
@@ -1879,6 +1893,21 @@ public class RGBWalletService : IRGBWalletService
             // while the parent mutex is still held; otherwise restart recovery owns its cleanup.
             if (!File.Exists(recoveryJournal)) operationLease.ClearActiveMarker(leaseWalletDir);
         }
+
+        if (quarantineDischargeEarned)
+        {
+            try
+            {
+                await ClearNeedsRecoveryAsync(walletId, ct);
+            }
+            catch (Exception ex)
+            {
+                broadcastWarning = "RGB transfer state is pending automatic recovery.";
+                _log.LogWarning(ex, "SendAsset: quarantine discharge failed after cleanup — wallet {WalletId} left quarantined", walletId);
+            }
+        }
+
+        return (sentTxid!, amount, resolvedAssetId, asset.Ticker, broadcastWarning);
     }
 
     static bool IsTaproot(Script script)

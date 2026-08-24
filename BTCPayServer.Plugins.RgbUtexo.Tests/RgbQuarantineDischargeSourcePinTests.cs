@@ -195,6 +195,81 @@ public class RgbQuarantineDischargeSourcePinTests
         Assert.True(refreshes.All(r => r.SpanStart < clears[0].SpanStart),
             "the discharge must follow RefreshAsync: that call is what reconciles the Stock, so discharging "
             + "before it certifies a wallet nothing has reconciled.");
+
+        // The database flag is what makes the wallet DISCOVERABLE to the listener's
+        // (IsActive || NeedsRecovery) page; the marker and journal are what make it UNSENDABLE and
+        // undeletable. Clearing the flag first leaves a crash window in which an inactive wallet keeps
+        // both artifacts and is enumerated by nothing that would remove them. Artifacts first, flag last.
+        // Scoped to the block that completes the reconciliation: this method also clears the marker in
+        // its `finally`, which is a different block and a different purpose.
+        var completion = reconcileBody.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Single(a => a.Left.ToString() == "completed"
+                         && a.Right.IsKind(SyntaxKind.TrueLiteralExpression));
+        var successBlock = completion.Ancestors().OfType<BlockSyntax>().First();
+
+        var markerClear = successBlock.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => plugin.Model(tree).GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "ClearActiveMarker",
+                ContainingType.Name: "RgbNativeSendLease"
+            });
+        var journalDelete = successBlock.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => plugin.Model(tree).GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "Delete",
+                ContainingType.Name: "RgbSendRecoveryJournal"
+            });
+        Assert.Contains(clears[0], successBlock.DescendantNodes().OfType<InvocationExpressionSyntax>());
+        Assert.True(markerClear.SpanStart < clears[0].SpanStart,
+            "the worker marker must be cleared BEFORE NeedsRecovery is committed false — otherwise a crash "
+            + "between them leaves a marker that refuses AcquireParent on a wallet nothing re-arms.");
+        Assert.True(journalDelete.SpanStart < clears[0].SpanStart,
+            "the recovery journal must be deleted BEFORE NeedsRecovery is committed false — otherwise a crash "
+            + "between them leaves a journal that refuses every send on a wallet nothing re-arms.");
+    }
+
+    [Fact]
+    public void TheSuccessfulSendPathAlsoDropsTheJournalBeforeClearingTheFlag()
+    {
+        // Same ordering, on the path that runs after EVERY successful send rather than only after a
+        // reconciliation, which makes it the high-frequency instance of the same crash window.
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(WalletFile);
+        var model = plugin.Model(tree);
+        var body = RoslynPins.BodyOf(RoslynPins.Method(tree, WalletType, "SendAssetInternalAsync"));
+
+        var clear = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "ClearNeedsRecoveryAsync",
+                ContainingType.Name: WalletType
+            });
+        var journalDelete = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
+            {
+                Name: "Delete",
+                ContainingType.Name: "RgbSendRecoveryJournal"
+            });
+
+        Assert.True(journalDelete.SpanStart < clear.SpanStart,
+            "the journal delete must precede the NeedsRecovery clear on the send path too; a crash between "
+            + "them in the other order leaves a journal that refuses every subsequent send.");
+
+        // The marker is not moved ahead of the flag — OneOperationLeaseEnclosesBothNativeHelperPhases
+        // requires this method to release it exactly once from a finally, which is what guarantees release
+        // on the failure paths. So the flag is moved BEHIND the marker instead: the discharge sits past the
+        // whole try/finally, which orders it after the single release without touching it. Pinned against
+        // the try statement that owns the release rather than against a line number, because moving the
+        // discharge back inside that try is the regression, wherever in it it lands.
+        var markerClear = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol { Name: "ClearActiveMarker" });
+        var releasingTry = markerClear.Ancestors().OfType<TryStatementSyntax>()
+            .Single(t => t.Finally != null && t.Finally.Span.Contains(markerClear.Span));
+
+        Assert.True(clear.SpanStart > releasingTry.Span.End,
+            "the NeedsRecovery discharge must run after the try/finally that releases the worker marker, so "
+            + "no window exists in which the flag reads false while an artifact no scan revisits is still "
+            + "on disk.");
     }
 
     // P7. rgb-lib's GetBtcBalance takes skipSync, the INVERSE of this plugin's `sync`. Passing `sync` straight
@@ -212,22 +287,26 @@ public class RgbQuarantineDischargeSourcePinTests
         var method = RoslynPins.Method(tree, "RgbLibService", "GetBtcBalanceAsync");
         var body = RoslynPins.BodyOf(method);
 
-        var calls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => i.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetBtcBalance" })
+        // The balance no longer goes through RgbLib's typed GetBtcBalance wrapper — that wrapper marshals
+        // a CResultString the package never frees — so the negation this pin exists for now sits in the
+        // reflected call's argument array. Same property, new location.
+        var arrays = body.DescendantNodes().OfType<ArrayCreationExpressionSyntax>()
+            .Where(a => a.Initializer != null)
             .ToList();
-        Assert.True(calls.Count == 1, $"expected one GetBtcBalance call in {file}, found {calls.Count}");
+        Assert.True(arrays.Count == 1,
+            $"expected exactly one native argument array in GetBtcBalanceAsync in {file}, found {arrays.Count}");
 
-        var args = calls[0].ArgumentList.Arguments;
-        Assert.True(args.Count == 1, $"GetBtcBalance must be passed exactly one argument, found {args.Count}");
-        Assert.Equal("skipSync", args[0].NameColon?.Name.Identifier.ValueText);
+        var args = arrays[0].Initializer!.Expressions;
+        Assert.True(args.Count == 3,
+            $"rgblib_get_btc_balance takes wallet, online and skip_sync — found {args.Count} arguments");
 
-        Assert.True(args[0].Expression is PrefixUnaryExpressionSyntax
+        Assert.True(args[2] is PrefixUnaryExpressionSyntax
                     {
                         RawKind: (int)SyntaxKind.LogicalNotExpression,
                         Operand: IdentifierNameSyntax { Identifier.ValueText: "sync" }
                     },
-            $"the skipSync argument must be `!sync` — rgb-lib's flag is the inverse of this method's, so passing "
-            + $"`sync` unchanged reverses every caller silently; found '{args[0].Expression}'.");
+            $"the skip_sync argument must be `!sync` — rgb-lib's flag is the inverse of this method's, so passing "
+            + $"`sync` unchanged reverses every caller silently; found '{args[2]}'.");
     }
 
     // P6 clause 1. SetNeedsRecoveryAsync's return polarity. WriteAheadAsync's `if (marked)` requires "true means

@@ -314,7 +314,7 @@ public class RgbNativeSourcePinTests
     const string RgbLibFile = "Services/RgbLibService.cs";
     const string RgbLibServiceType = "BTCPayServer.Plugins.RgbUtexo.Services.RgbLibService";
 
-    // The five plain sites: payload or throw. The three seam-B sites branch on the error instead.
+    // The nine plain sites: payload or throw. The three seam-B sites branch on the error instead.
     static readonly (string Method, string Consumer)[] ReflectedSites =
     [
         ("BlindReceiveAsync", "Require"),
@@ -322,10 +322,83 @@ public class RgbNativeSourcePinTests
         ("RefreshAsync", "Require"),
         ("SendBeginAsync", "Require"),
         ("SendEndAsync", "Require"),
+        ("GetAddressAsync", "Require"),
+        ("GetBtcBalanceAsync", "Require"),
+        ("ListAssetsAsync", "Require"),
+        ("IssueAssetNiaAsync", "Require"),
         ("CreateUtxosBeginAsync", "InterpretCreateUtxosBegin"),
         ("ListBtcTransactionsAsync", "InterpretListBtcTransactions"),
         ("ListUnspentsAsync", "InterpretListUnspents"),
     ];
+
+    // Indices rather than the tuples themselves: xUnit needs the member data to be serializable, and a
+    // count-derived range is what stops a site added to the array above from carrying no coverage — which
+    // is exactly what four hand-written InlineData(0..7) attributes let happen to the four sites that
+    // replaced the leaking wrappers.
+    public static TheoryData<int> ReflectedSiteIndices()
+    {
+        var data = new TheoryData<int>();
+        for (var i = 0; i < ReflectedSites.Length; i++) data.Add(i);
+        return data;
+    }
+
+    // Every field this service resolves out of RgbLib.NativeMethods, against the entry point it must
+    // resolve. Pinning the field at the CALL SITE leaves a transposition among these twelve near-identical
+    // constructor lines completely invisible: the site still reads _getBtcBalanceMethod, the argument array
+    // and the freeing reader are still right, every source pin stays green, and production calls the wrong
+    // native function. Measured: binding _getBtcBalanceMethod to rgblib_get_address passed 38/38.
+    static readonly (string Field, string EntryPoint)[] NativeBindings =
+    [
+        ("_getAddressMethod", "rgblib_get_address"),
+        ("_issueAssetNiaMethod", "rgblib_issue_asset_nia"),
+        ("_getBtcBalanceMethod", "rgblib_get_btc_balance"),
+        ("_listAssetsMethod", "rgblib_list_assets"),
+        ("_blindReceiveMethod", "rgblib_blind_receive"),
+        ("_listUnspentsMethod", "rgblib_list_unspents"),
+        ("_createUtxosBeginMethod", "rgblib_create_utxos_begin"),
+        ("_createUtxosEndMethod", "rgblib_create_utxos_end"),
+        ("_refreshMethod", "rgblib_refresh"),
+        ("_listTransactionsMethod", "rgblib_list_transactions"),
+        ("_sendBeginMethod", "rgblib_send_begin"),
+        ("_sendEndMethod", "rgblib_send_end"),
+    ];
+
+    public static TheoryData<string, string> NativeBindingRows()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var (field, entryPoint) in NativeBindings) data.Add(field, entryPoint);
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(NativeBindingRows))]
+    public void EachReflectedFieldResolvesTheEntryPointItsNameClaims(string field, string entryPoint)
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var model = plugin.Model(tree);
+
+        // Searched across the whole type rather than inside one chosen constructor: this service has two
+        // (the public one delegates to the internal one), and a pin that names the wrong one would assert
+        // nothing at all.
+        var assignments = tree.GetRoot().DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol f
+                        && f.Name == field
+                        && f.ContainingType.ToDisplayString() == RgbLibServiceType)
+            .ToList();
+
+        Assert.True(assignments.Count == 1,
+            $"{field} must be assigned exactly once in {RgbLibFile}, found {assignments.Count}");
+        Assert.True(assignments[0].Ancestors().OfType<ConstructorDeclarationSyntax>().Any(),
+            $"{field} must be resolved in a constructor, so a failed lookup fails at service construction "
+            + "rather than on the first send");
+
+        var lookup = assignments[0].Right.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()
+            .Single(i => i.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetMethod" });
+
+        var literal = Assert.IsType<LiteralExpressionSyntax>(lookup.ArgumentList.Arguments[0].Expression);
+        Assert.Equal(entryPoint, literal.Token.ValueText);
+    }
 
     [Fact] // G1-T10(a)
     public void TheNonFreeingReaders_AreGoneFromTheFile()
@@ -346,9 +419,8 @@ public class RgbNativeSourcePinTests
             + $"non-freeing reader for a future edit to reach for, found {survivors.Count} reference(s)");
     }
 
-    [Theory] // G1-T10(c) and (e) — the five plain sites call Require; the three seam-B sites call their function
-    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
-    [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)]
+    [Theory] // G1-T10(c) and (e) — the nine plain sites call Require; the three seam-B sites call their function
+    [MemberData(nameof(ReflectedSiteIndices))]
     public void EachReflectedSite_CallsItsExtractedConsumer(int index)
     {
         var (methodName, consumer) = ReflectedSites[index];
@@ -365,8 +437,7 @@ public class RgbNativeSourcePinTests
     }
 
     [Theory] // G1-T10(g) — and the consumer is fed the READER's output, not a fabricated result
-    [InlineData(0)] [InlineData(1)] [InlineData(2)] [InlineData(3)]
-    [InlineData(4)] [InlineData(5)] [InlineData(6)] [InlineData(7)]
+    [MemberData(nameof(ReflectedSiteIndices))]
     public void EachReflectedSite_FeedsItsConsumerTheReadersOutput(int index)
     {
         var (methodName, consumer) = ReflectedSites[index];
@@ -474,6 +545,126 @@ public class RgbNativeSourcePinTests
         Assert.True(reflected.All(i => i.Ancestors().OfType<ConstructorDeclarationSyntax>().Any()),
             "_innerField is used outside the two readers and outside the constructor — that is a "
             + "second reader of the native pointer, which is how the double-free comes back");
+    }
+
+    [Theory]
+    [InlineData("rgblib_get_address", 1)]
+    [InlineData("rgblib_get_btc_balance", 3)]
+    [InlineData("rgblib_list_assets", 2)]
+    [InlineData("rgblib_issue_asset_nia", 5)]
+    public void TheReflectedEntryPointsReplacingTheLeakingWrappersExistWithTheAritiesPassed(
+        string entryPoint, int arity)
+    {
+        // The three constructor lookups are `GetMethod(name)!`, so a renamed or re-signatured entry
+        // point in a future RgbLib is a NullReferenceException at service construction, and a changed
+        // arity is a TargetParameterCountException on first use — neither of which any source pin sees.
+        var nativeMethods = typeof(RgbLib.RgbLibWallet).Assembly.GetType("RgbLib.NativeMethods");
+        Assert.NotNull(nativeMethods);
+
+        var method = nativeMethods!.GetMethod(entryPoint);
+        Assert.NotNull(method);
+
+        var parameters = method!.GetParameters();
+        Assert.Equal(arity, parameters.Length);
+        Assert.True(parameters[0].ParameterType.IsByRef,
+            $"{entryPoint} must take the wallet struct by reference, so the write-back after Invoke "
+            + "preserves what the typed wrapper's `ref _wallet` preserved");
+        Assert.Equal("RgbLib.CResultString", method.ReturnType.ToString());
+    }
+
+    [Fact]
+    public void EveryRgbLibWrapperCallIsInventoried()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var model = plugin.Model(tree);
+
+        // RgbLib 0.3.0-beta.30 binds NO string-free at all, so every typed wrapper that marshals a
+        // CResultString leaks its payload for the life of the process, and that leak happens inside the
+        // package where this file's CResultString.inner pin cannot see it. An allowlist of names known
+        // to leak would silently pass any wrapper nobody thought of, so this asserts the complete set of
+        // RgbLibWallet members INVOKED IN RgbLibService.cs: a new call of any kind fails here until it is
+        // reviewed and recorded below. Two limits stated rather than implied — it is scoped to this one
+        // compile unit, and it matches invocation expressions, so binding a wrapper to a delegate and
+        // calling that instead evades it. Neither is a shape a maintainer reaches for by accident, and
+        // this file is where every native call in the plugin is funnelled.
+        var reviewed = new Dictionary<string, string>
+        {
+            // Reflected onto NativeMethods + ReadNativeResult, which reads once and frees in a finally.
+            // Kept as keys rather than deleted so re-introducing a typed call is a visible change here.
+            ["GoOnline"] =
+                "LEAKS ONE STRING PER WALLET LOAD, deliberately not reflected. The document is NOT "
+                + "unknowable: beta.30 serialises exactly indexer_url, the supplied skip_consistency_check "
+                + "and a constant vanilla_sync_lookback=100. It is not reflected because this is the one "
+                + "wrapper whose failure means no wallet ever comes online, and it leaks only per wallet "
+                + "LOAD — on the pathological path that re-loads it (a failed write-ahead evicts the "
+                + "handle, so the next poll rebuilds), rgb-lib reconstructs an entire wallet each time and "
+                + "this string is a rounding error beside that. Recorded as debt, not as impossible.",
+            ["GenerateKeys"] =
+                "LEAKS ONE STRING PER WALLET CREATION, deliberately not reflected. The earlier reason "
+                + "recorded here — that witness_version is a value the call site does not have — was "
+                + "FALSE: the one-argument overload forwards the visible literal \"Taproot\". It stays "
+                + "unreflected on value, not on ignorance: the argument selects KEY DERIVATION, so an "
+                + "error here is fund loss, and the whole prize is one string per wallet ever created.",
+            ["Backup"] =
+                "NOT IN THIS CLASS: rgblib_backup returns a CResult whose inner is a COpaqueStruct, not a "
+                + "string, so there is no marshalled payload for ReadNativeResult to own or free.",
+            ["RestoreKeys"] =
+                "LEAKS ONE STRING PER WALLET RESTORE, deliberately not reflected: same witness_version "
+                + "literal, same derivation risk, same one-string prize as GenerateKeys."
+        };
+
+        var called = tree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Select(i => model.GetSymbolInfo(i).Symbol)
+            .OfType<IMethodSymbol>()
+            .Where(m => m.ContainingType.ToDisplayString() == "RgbLib.RgbLibWallet")
+            .Select(m => m.Name)
+            .Distinct()
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+        var unreviewed = called.Where(n => !reviewed.ContainsKey(n)).ToList();
+        Assert.True(unreviewed.Count == 0,
+            "these RgbLibWallet wrappers are called but not inventoried; each one marshals a native "
+            + "payload the package may never free, so route it through NativeMethods + ReadNativeResult "
+            + "or record why it cannot be: " + string.Join(", ", unreviewed));
+
+        var recordedButGone = reviewed.Keys.Where(k => !called.Contains(k))
+            .OrderBy(k => k, StringComparer.Ordinal).ToList();
+        Assert.True(recordedButGone.Count == 0,
+            "these wrappers are recorded as still in use but are no longer called — delete the entry so "
+            + "the inventory keeps describing the code: " + string.Join(", ", recordedButGone));
+    }
+
+    [Theory]
+    [InlineData("GetAddressAsync", "_getAddressMethod")]
+    [InlineData("GetBtcBalanceAsync", "_getBtcBalanceMethod")]
+    [InlineData("ListAssetsAsync", "_listAssetsMethod")]
+    [InlineData("IssueAssetNiaAsync", "_issueAssetNiaMethod")]
+    public void EachReflectedSiteInvokesItsOwnEntryPoint(string method, string expectedField)
+    {
+        // Substituting one resolved MethodInfo for another leaves every source pin and every signature
+        // check green — the shape, the argument array and the reader are all still correct — while
+        // production calls the wrong native function and fails on arity. So the binding of site to entry
+        // point is pinned per site.
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var body = RoslynPins.BodyOf(RoslynPins.Method(tree, "RgbLibService", method));
+
+        var invocations = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "Invoke" })
+            .ToList();
+
+        // Counted BEFORE any de-duplication: collapsing to distinct receivers first would report one
+        // receiver for a site that invokes the same entry point twice, which is a second unread native
+        // result and so a second leak, through a field name this assertion would still call correct.
+        Assert.True(invocations.Count == 1,
+            $"{method} must make exactly one reflected native call, found {invocations.Count}");
+
+        var receiver = ((MemberAccessExpressionSyntax)invocations[0].Expression).Expression;
+        var symbol = Assert.IsAssignableFrom<IFieldSymbol>(RoslynPins.BoundSymbol(plugin, tree, receiver));
+        Assert.Equal(expectedField, symbol.Name);
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
     }
 
     [Fact] // G1-T10(d)

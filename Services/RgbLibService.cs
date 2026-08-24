@@ -30,6 +30,10 @@ public class RgbLibService : IRgbLibService
     readonly Action<IntPtr> _stringFree;
     readonly Func<IntPtr, string?> _marshal;
 
+    readonly MethodInfo _getAddressMethod;
+    readonly MethodInfo _issueAssetNiaMethod;
+    readonly MethodInfo _getBtcBalanceMethod;
+    readonly MethodInfo _listAssetsMethod;
     readonly MethodInfo _blindReceiveMethod;
     readonly MethodInfo _listUnspentsMethod;
     readonly MethodInfo _createUtxosBeginMethod;
@@ -75,6 +79,13 @@ public class RgbLibService : IRgbLibService
         _resultField = _cResultStringType.GetField("result")!;
         _innerField = _cResultStringType.GetField("inner")!;
         
+        // RgbLib's own typed wrappers marshal a CResultString and never free it — the package binds no
+        // string-free at all — so every typed call leaked its payload. These three are the reachable
+        // ones, and get_btc_balance runs once per wallet per listener sweep.
+        _getAddressMethod = _nativeMethodsType.GetMethod("rgblib_get_address")!;
+        _issueAssetNiaMethod = _nativeMethodsType.GetMethod("rgblib_issue_asset_nia")!;
+        _getBtcBalanceMethod = _nativeMethodsType.GetMethod("rgblib_get_btc_balance")!;
+        _listAssetsMethod = _nativeMethodsType.GetMethod("rgblib_list_assets")!;
         _blindReceiveMethod = _nativeMethodsType.GetMethod("rgblib_blind_receive")!;
         _listUnspentsMethod = _nativeMethodsType.GetMethod("rgblib_list_unspents")!;
         _createUtxosBeginMethod = _nativeMethodsType.GetMethod("rgblib_create_utxos_begin")!;
@@ -266,7 +277,14 @@ public class RgbLibService : IRgbLibService
         return await handle.ExecuteAsync(wallet =>
         {
             ct.ThrowIfCancellationRequested();
-            return wallet.GetAddress();
+            var walletStruct = _walletField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct };
+            var result = _getAddressMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+
+            return Require(ReadNativeResult(result), "get_address");
         }, ct);
     }
 
@@ -280,8 +298,17 @@ public class RgbLibService : IRgbLibService
             // rgb-lib's parameter is skipSync, so it is the INVERSE of this method's `sync`. Passing `sync`
             // straight through — as this line did — silently reversed every caller: the three that ask for a
             // sync got none, and the page loads that take the `sync: false` default were the only ones
-            // syncing, on the request path. Named argument and negation, so the next reader sees the flip.
-            var balanceJson = wallet.GetBtcBalance(skipSync: !sync);
+            // syncing, on the request path. The reflected argument array cannot name its parameters, so
+            // the negation at the skipSync position is the whole of what keeps the flip right.
+            var walletStruct = _walletField.GetValue(wallet)!;
+            var onlineJson = (string)(_onlineJsonField.GetValue(wallet) ?? throw new RgbLibException("Wallet is offline"));
+
+            var args = new object?[] { walletStruct, onlineJson, !sync };
+            var result = _getBtcBalanceMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+
+            var balanceJson = Require(ReadNativeResult(result), "get_btc_balance");
             var balance = JsonSerializer.Deserialize<BtcBalanceResponse>(balanceJson);
 
             return new BtcBalance(
@@ -298,7 +325,14 @@ public class RgbLibService : IRgbLibService
         return await handle.ExecuteAsync(wallet =>
         {
             ct.ThrowIfCancellationRequested();
-            var assetsJson = wallet.ListAssets("[]");
+            var walletStruct = _walletField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct, "[]" };
+            var result = _listAssetsMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+
+            var assetsJson = Require(ReadNativeResult(result), "list_assets");
             var assets = JsonSerializer.Deserialize<ListAssetsResponse>(assetsJson);
 
             return assets?.Nia?.Select(a => new RgbAsset
@@ -708,7 +742,14 @@ public class RgbLibService : IRgbLibService
         {
             ct.ThrowIfCancellationRequested();
             var amountsJson = JsonSerializer.Serialize(amounts.Select(a => a.ToString()).ToArray());
-            var assetJson = wallet.IssueAssetNia(ticker, name, precision.ToString(), amountsJson);
+            var walletStruct = _walletField.GetValue(wallet)!;
+
+            var args = new object?[] { walletStruct, ticker, name, precision.ToString(), amountsJson };
+            var result = _issueAssetNiaMethod.Invoke(null, args);
+
+            _walletField.SetValue(wallet, args[0]);
+
+            var assetJson = Require(ReadNativeResult(result), "issue_asset_nia");
             var asset = JsonSerializer.Deserialize<IssueAssetResponse>(assetJson);
             
             return new RgbAsset

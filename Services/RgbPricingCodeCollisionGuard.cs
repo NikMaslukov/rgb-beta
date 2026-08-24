@@ -34,10 +34,26 @@ public sealed class RgbPricingCodeCollisionGuard(RGBPluginDbContextFactory dbFac
         foreach (var other in knownAssetIds)
         {
             if (string.IsNullOrWhiteSpace(other)) continue;
-            if (string.Equals(canonicalAssetId, RgbPricingCode.CanonicalizeAssetId(other),
-                    StringComparison.Ordinal))
+
+            string canonicalOther;
+            string otherCode;
+            try
+            {
+                canonicalOther = RgbPricingCode.CanonicalizeAssetId(other);
+                otherCode = pricingCode(other);
+            }
+            catch (ArgumentException)
+            {
+                // An undecodable row has no pricing code, so it can collide with nothing. Skipping it
+                // per row keeps one malformed row from throwing past ConfigurePrompt's only catch and
+                // dropping pricing for every contract on the instance, exactly as the sibling scan in
+                // RgbCurrencyDataProvider.BuildCurrencies already does.
                 continue;
-            if (string.Equals(code, pricingCode(other), StringComparison.OrdinalIgnoreCase))
+            }
+
+            if (string.Equals(canonicalAssetId, canonicalOther, StringComparison.Ordinal))
+                continue;
+            if (string.Equals(code, otherCode, StringComparison.OrdinalIgnoreCase))
                 return false;
         }
 
