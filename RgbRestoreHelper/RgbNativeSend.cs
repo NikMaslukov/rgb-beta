@@ -92,10 +92,13 @@ public static class RgbNativeSend
             : [walletStruct, online, payload.Trim('"')];
         var result = method.Invoke(null, args);
         walletField.SetValue(wallet, args[0]);
-        return ReadResult(native, result, methodName);
+        return ReadResult(result, methodName);
     }
 
-    static string ReadResult(Type native, object? result, string methodName)
+    [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
+    static extern void rgblib_string_free(IntPtr ptr);
+
+    public static string ReadResult(object? result, string methodName)
     {
         if (result == null)
             throw new InvalidOperationException($"{methodName} returned null");
@@ -117,9 +120,7 @@ public static class RgbNativeSend
         }
         finally
         {
-            var free = native.GetMethod("rgblib_string_free", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
-                ?? throw new MissingMethodException("rgblib_string_free");
-            free.Invoke(null, [pointer]);
+            rgblib_string_free(pointer);
         }
     }
 }
