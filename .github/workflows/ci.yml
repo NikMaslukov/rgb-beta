@@ -47,6 +47,12 @@ jobs:
             -p:ContinuousIntegrationBuild=true \
             -p:StaticWebAssetsEnabled=false
 
+      # The package's natives are the bytes a merchant ends up running, and no blob in this repository
+      # records them any more. This binds the restored copies to hashes recorded in the tree, so a
+      # version bump cannot land without rewriting them in the same diff, where a reviewer sees it.
+      - name: Require the restored gate natives to match their recorded hashes
+        run: bash scripts/verify-gate-native-package-hashes.sh
+
       - name: Publish clean checkout (the package's native is what lands)
         run: |
           set -euo pipefail

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #
-# Loads the staged linux-x64 gate native inside Debian 12 and resolves every required export.
+# Loads the linux-x64 gate native named on the command line inside Debian 12 and resolves every
+# required export. The path is required: the native is no longer a blob in this repository, so there
+# is no in-repo default that could be silently stale -- callers name the copy they mean, whether that
+# is a freshly staged build output or the RgbVerifyCffi package-cache copy.
 #
 # This is what catches a glibc-floor mistake at pack time instead of at a merchant's startup: a
 # native linked against a newer glibc than the deployment target fails to dlopen there. Every
@@ -9,7 +12,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NATIVE="${1:-$REPO_ROOT/native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so}"
+NATIVE="${1:?usage: verify-native-loads-debian.sh <native-library-path>}"
 
 [ -f "$NATIVE" ] || { echo "verify-native-loads-debian: $NATIVE not found" >&2; exit 1; }
 

@@ -162,6 +162,10 @@ for relative in Cargo.toml Cargo.lock build.rs cbindgen.toml build-native.sh; do
   cp "$REPO_ROOT/native/rgb-verify/$relative" "$SCRATCH_ROOT/native/rgb-verify/$relative"
 done
 cp "$REPO_ROOT/scripts/pack-rgbverify.sh" "$SCRATCH_ROOT/scripts/"
+cp "$REPO_ROOT/BTCPayServer.Plugins.RgbUtexo.csproj" "$SCRATCH_ROOT/"
+cp "$REPO_ROOT/native/rgb-verify/gate-native-package-manifest.txt" "$SCRATCH_ROOT/native/rgb-verify/"
+PACKAGE_HASHES="$REPO_ROOT/scripts/verify-gate-native-package-hashes.sh"
+PACKAGE_MANIFEST="$SCRATCH_ROOT/native/rgb-verify/gate-native-package-manifest.txt"
 
 echo "=== row: source manifest matches the scratch tree it was written from ==="
 if bash "$FRESHNESS" "$SCRATCH_ROOT" --write >/dev/null 2>&1 \
@@ -185,6 +189,34 @@ elif ! grep -Fq "native/rgb-verify/src/lib.rs" <<<"$FRESHNESS_OUTPUT"; then
   failures=$((failures + 1))
 else
   echo "  freshness: FAIL as required, naming native/rgb-verify/src/lib.rs"
+fi
+
+echo "=== row: package manifest matches the natives the restore delivered ==="
+PACKAGE_OUTPUT="$(bash "$PACKAGE_HASHES" "$REPO_ROOT" "$PACKAGE_CACHE" 2>&1)"
+PACKAGE_STATUS=$?
+if [ "$PACKAGE_STATUS" -eq 0 ]; then
+  echo "  package hashes: PASS"
+else
+  echo "  FAIL: the recorded package-native hashes do not match the package cache" >&2
+  echo "$PACKAGE_OUTPUT" | sed 's/^/    /' >&2
+  failures=$((failures + 1))
+fi
+
+echo "=== row: package manifest rejects an altered recorded hash, naming the path ==="
+sed 's#^[0-9a-f]\{64\}\(  .*linux-x64.*\)$#0000000000000000000000000000000000000000000000000000000000000000\1#' \
+  "$PACKAGE_MANIFEST" > "$PACKAGE_MANIFEST.mutated"
+mv "$PACKAGE_MANIFEST.mutated" "$PACKAGE_MANIFEST"
+PACKAGE_OUTPUT="$(bash "$PACKAGE_HASHES" "$SCRATCH_ROOT" "$PACKAGE_CACHE" 2>&1)"
+PACKAGE_STATUS=$?
+if [ "$PACKAGE_STATUS" -eq 0 ]; then
+  echo "  FAIL: the package-hash check ACCEPTED a native it had not recorded" >&2
+  failures=$((failures + 1))
+elif ! grep -Fq "does not match the recorded hash" <<<"$PACKAGE_OUTPUT"; then
+  echo "  FAIL: the package-hash check rejected for the wrong reason" >&2
+  echo "$PACKAGE_OUTPUT" | sed 's/^/    /' >&2
+  failures=$((failures + 1))
+else
+  echo "  package hashes: FAIL as required -- does not match the recorded hash"
 fi
 
 echo "=== row: strict provenance accepts the honest package-delivered artifact ==="

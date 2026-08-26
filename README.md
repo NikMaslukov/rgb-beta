@@ -461,6 +461,13 @@ sources and the build recipe, and `scripts/verify-tracked-gate-native-freshness.
 the working tree. That is **recorded-input consistency** only: the manifest no longer records any binary,
 and it cannot show that the published package was compiled from the inputs it records.
 
+`native/rgb-verify/gate-native-package-manifest.txt` records the other end: the pinned package version and
+the sha256 of every native `RgbVerifyCffi` delivers, one line per RID, and
+`scripts/verify-gate-native-package-hashes.sh` checks them against the copies a restore placed in the
+NuGet package cache. It also refuses a `PackageReference` that is not an exact single-version pin. That is
+what keeps a version bump from shipping unreviewed native bytes: the hashes have to be rewritten in the
+same diff, where a reviewer sees them.
+
 Rebuild and re-stage the natives locally with `scripts/pack-rgbverify.sh --stage`, which builds each RID
 in `rust:1-bookworm` (the glibc floor) or on the host and asserts the exact export set. Staged natives are
 gitignored build artifacts used to pack a package; they are not what a clean publish ships.

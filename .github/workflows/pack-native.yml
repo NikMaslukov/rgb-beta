@@ -191,8 +191,12 @@ jobs:
             --gate-package \
             --provenance strict
 
+      # The path is named explicitly: this job's subject is the linux-x64 object restaged above, and the
+      # script no longer guesses at an in-repo default now that a clean checkout carries no native.
       - name: Assert the production native loads on Debian
-        run: bash scripts/verify-native-loads-debian.sh
+        run: |
+          bash scripts/verify-native-loads-debian.sh \
+            native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
 
       - uses: actions/upload-artifact@v4
         with:
