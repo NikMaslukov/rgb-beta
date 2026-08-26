@@ -20,6 +20,8 @@ public class RGBPlugin : BaseBTCPayServerPlugin
     internal const string PluginNavKey = nameof(RGBPlugin) + "Nav";
     internal static readonly PaymentMethodId RGBPaymentMethodId = new("RGB");
 
+    public override string Identifier => "rgb-beta";
+
     public override IBTCPayServerPlugin.PluginDependency[] Dependencies =>
     [
         new() { Identifier = nameof(BTCPayServer), Condition = ">=2.3.7" }
