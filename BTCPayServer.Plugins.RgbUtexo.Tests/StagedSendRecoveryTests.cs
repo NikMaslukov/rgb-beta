@@ -68,6 +68,30 @@ public class StagedSendRecoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task ExactOutgoingBatchRow_ReturnsStatusAndTxidForOutgoingRows()
+    {
+        await CreateSchema();
+        await InsertBatch(batch: 20, status: 1, incoming: false, txid: "outgoing-two");
+        await InsertTransferForExistingBatch(batch: 20, incoming: false);
+        await InsertBatch(batch: 21, status: 3, incoming: false, txid: "outgoing-three");
+        await InsertTransferForExistingBatch(batch: 21, incoming: false);
+        await InsertTransferForExistingBatch(batch: 21, incoming: false);
+        await InsertBatch(batch: 22, status: 2, incoming: true, txid: "outgoing-two");
+        await InsertBatch(batch: 23, status: 1, incoming: false, txid: null);
+
+        Assert.Equal((1, "outgoing-two"),
+            await RGBWalletService.FindOutgoingBatchRowAsync(DbPath, 20));
+        Assert.Equal((3, "outgoing-three"),
+            await RGBWalletService.FindOutgoingBatchRowAsync(DbPath, 21));
+        Assert.Null(await RGBWalletService.FindOutgoingBatchRowAsync(DbPath, 22));
+        var nullTxid = await RGBWalletService.FindOutgoingBatchRowAsync(DbPath, 23);
+        Assert.NotNull(nullTxid);
+        Assert.Equal(1, nullTxid.Value.Status);
+        Assert.Null(nullTxid.Value.Txid);
+        Assert.Null(await RGBWalletService.FindOutgoingBatchRowAsync(DbPath, 24));
+    }
+
+    [Fact]
     public async Task OutgoingStatusProbeIsExactAndIgnoresIncomingRows()
     {
         await CreateSchema();
@@ -412,15 +436,16 @@ public class StagedSendRecoveryTests : IDisposable
     {
         Directory.CreateDirectory(_dir);
         await Execute("""
-            CREATE TABLE batch_transfer (idx INTEGER PRIMARY KEY, status INTEGER NOT NULL);
+            CREATE TABLE batch_transfer (idx INTEGER PRIMARY KEY, status INTEGER NOT NULL, txid TEXT NULL);
             CREATE TABLE asset_transfer (idx INTEGER PRIMARY KEY, batch_transfer_idx INTEGER NOT NULL);
             CREATE TABLE transfer (idx INTEGER PRIMARY KEY, asset_transfer_idx INTEGER NOT NULL, incoming INTEGER NOT NULL);
             """);
     }
 
-    async Task InsertBatch(int batch, int status, bool incoming)
+    async Task InsertBatch(int batch, int status, bool incoming, string? txid = null)
     {
-        await Execute($"INSERT INTO batch_transfer(idx,status) VALUES({batch},{status})");
+        var sqlTxid = txid == null ? "NULL" : $"'{txid.Replace("'", "''")}'";
+        await Execute($"INSERT INTO batch_transfer(idx,status,txid) VALUES({batch},{status},{sqlTxid})");
         await InsertTransferForExistingBatch(batch, incoming);
     }
 

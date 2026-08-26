@@ -618,10 +618,9 @@ public class RGBController : Controller
                 wallet.Id, model.RgbInvoice.Trim(), model.AssetId, model.Amount, model.FeeRate);
             var msg = $"Initiated {result.AmountSent:N0} {result.AssetTicker} transfer — Txid: {result.Txid}. "
                       + "The transaction broadcasts after the recipient acknowledges the consignment";
-            if (result.BroadcastWarning != null)
-                TempData[WellKnownTempData.ErrorMessage] = $"{msg}. Warning: {result.BroadcastWarning}";
-            else
-                TempData[WellKnownTempData.SuccessMessage] = msg;
+            if (result.RecoveryAdvisory != null)
+                msg = $"rgb-lib recorded transfer initiation for Txid: {result.Txid} despite a helper or refresh failure. {result.RecoveryAdvisory}";
+            TempData[WellKnownTempData.SuccessMessage] = msg;
             return RedirectToAction(nameof(Transfers), new { storeId });
         }
         catch (Exception ex)
@@ -771,10 +770,16 @@ public class RGBController : Controller
     }
 
     [HttpPost("delete")]
-    public async Task<IActionResult> DeleteWallet(string storeId)
+    public async Task<IActionResult> DeleteWallet(string storeId, bool acknowledgedRecoveryPhrase)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
+
+        if (!acknowledgedRecoveryPhrase)
+        {
+            TempData["ErrorMessage"] = "Record the wallet seed phrase before acknowledging wallet deletion.";
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
 
         try
         {
@@ -1001,6 +1006,26 @@ public class RGBController : Controller
         {
             _log.LogWarning(ex,
                 "RGB pending vanilla reservation report unavailable for wallet {WalletId}", wallet.Id);
+        }
+
+        vm.DeleteBalance = null;
+        if (vm.ConnectionError is null)
+        {
+            try
+            {
+                using var balanceReadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                var balance = await _wallets.GetBtcBalanceAsync(
+                    wallet.Id, balanceReadTimeout.Token, sync: false);
+                if (wallet.LastSyncAt is not null
+                    && (balance.Vanilla.Future != 0 || balance.Vanilla.Settled != 0
+                        || balance.Colored.Future != 0 || balance.Colored.Settled != 0))
+                    vm.DeleteBalance = balance;
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "RGB deletion balance unavailable for wallet {WalletId}", wallet.Id);
+            }
         }
     }
 

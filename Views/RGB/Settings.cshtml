@@ -135,11 +135,19 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                             }
                         </select>
                         <div class="form-text">
-                            @if (Model.AvailableAssets.Count == 0)
+                            @if (Model.ConnectionError is not null)
                             {
                                 <span class="text-warning">
                                     <i class="fa fa-exclamation-triangle"></i>
-                                    No assets found. <a asp-action="IssueAsset" asp-route-storeId="@Model.StoreId">Issue an asset</a> first.
+                                    The NIA asset list could not be read. This wallet may hold assets not shown.
+                                </span>
+                            }
+                            else if (Model.AvailableAssets.Count == 0)
+                            {
+                                <span class="text-warning">
+                                    <i class="fa fa-exclamation-triangle"></i>
+                                    No NIA assets were found. Other asset types may still exist in this wallet.
+                                    <a asp-action="IssueAsset" asp-route-storeId="@Model.StoreId">Issue an NIA asset</a> first.
                                 </span>
                             }
                             else
@@ -507,11 +515,52 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                 <h5 class="mb-0">Danger Zone</h5>
             </div>
             <div class="card-body">
-                <p class="text-muted">
-                    These actions are irreversible. Make sure you have backed up your wallet before proceeding.
+                <p><strong>Deleting this wallet is irreversible.</strong></p>
+                @if (Model.DeleteBalance is { } deleteBalance && Model.ConnectionError is null)
+                {
+                    <div class="alert alert-warning">
+                        <strong>BTC balances as of the last successful sync</strong>
+                        <ul class="mb-2">
+                            <li>Vanilla BTC — Future: @deleteBalance.Vanilla.Future sats; Settled: @deleteBalance.Vanilla.Settled sats</li>
+                            <li>Colored BTC — Future: @deleteBalance.Colored.Future sats; Settled: @deleteBalance.Colored.Settled sats</li>
+                        </ul>
+                        These figures may be stale and non-exhaustive. Assume this wallet holds additional value not shown.
+                        Value already spent into status-1 or status-2 outbound transfers may not appear in any balance figure.
+                    </div>
+                }
+                else
+                {
+                    <div class="alert alert-danger">
+                        Balances could not be read — assume this wallet holds value.
+                    </div>
+                }
+                @if (Model.ConnectionError is not null)
+                {
+                    <p>The NIA asset list could not be read. This wallet may hold assets not shown.</p>
+                }
+                else if (Model.AvailableAssets.Count == 0)
+                {
+                    <p>No NIA assets were found. Other asset types may still exist in this wallet.</p>
+                }
+                else
+                {
+                    <p>Only NIA assets are listed on this page. This wallet may hold other asset types not shown.</p>
+                }
+                <p>
+                    The wallet data directory retained on disk is watch-only and cannot spend. Restoring from a backup file
+                    still requires the seed phrase. If the seed phrase is not recorded elsewhere, the wallet's assets are gone.
                 </p>
-                <form asp-action="DeleteWallet" asp-route-storeId="@Model.StoreId" method="post"
-                      onsubmit="return confirm('Are you sure you want to delete this wallet? This will remove the wallet from BTCPay (DB records, assets, invoices) but leave the wallet data directory on disk for backup. This action cannot be undone.');">
+                <p>
+                    Deletion destroys the wallet row holding the encrypted mnemonic, the only stored copy of the wallet's
+                    spend authority, plus the payment-method configuration and the store's RGB exclusion flag.
+                </p>
+                <form asp-action="DeleteWallet" asp-route-storeId="@Model.StoreId" method="post">
+                    <div class="form-check mb-3">
+                        <input type="checkbox" class="form-check-input" id="acknowledgedRecoveryPhrase" name="acknowledgedRecoveryPhrase" value="true" required />
+                        <label class="form-check-label" for="acknowledgedRecoveryPhrase">
+                            I have recorded the seed phrase elsewhere and understand that deletion destroys this server's only stored spend authority.
+                        </label>
+                    </div>
                     <button type="submit" class="btn btn-outline-danger">
                         <span class="fa fa-trash"></span> Delete Wallet
                     </button>

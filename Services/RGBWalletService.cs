@@ -620,7 +620,11 @@ public class RGBWalletService : IRGBWalletService
 
     const int RgbLibTransferStatusInitiated = 5;
     const int RgbLibTransferStatusWaitingCounterparty = 1;
+    const int RgbLibTransferStatusWaitingConfirmations = 2;
+    const int RgbLibTransferStatusSettled = 3;
     const int RgbLibTransferStatusFailed = 4;
+    internal const string SendRecoveryAdvisory =
+        "The wallet is pending automatic recovery; do not retry this payment.";
     internal const int StagedRecoveryBatchSize = 64;
     internal const int StagedRecoveryMaxRowsPerAttempt = 4_096;
 
@@ -682,6 +686,54 @@ public class RGBWalletService : IRGBWalletService
         cmd.Parameters.AddWithValue("@idx", batchTransferIdx);
         var value = await cmd.ExecuteScalarAsync(ct);
         return value == null || value == DBNull.Value ? null : Convert.ToInt32(value);
+    }
+
+    internal static async Task<(int Status, string? Txid)?> FindOutgoingBatchRowAsync(
+        string dbPath, int batchTransferIdx, CancellationToken ct = default)
+    {
+        if (!File.Exists(dbPath)) return null;
+        var builder = new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+            DefaultTimeout = 2
+        };
+        await using var conn = new Microsoft.Data.Sqlite.SqliteConnection(builder.ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT bt.status, bt.txid
+            FROM batch_transfer AS bt
+            WHERE bt.idx = @idx
+              AND EXISTS (
+                  SELECT 1
+                  FROM asset_transfer AS atx
+                  INNER JOIN transfer AS t ON t.asset_transfer_idx = atx.idx
+                  WHERE atx.batch_transfer_idx = bt.idx AND t.incoming = 0)
+            LIMIT 1
+            """;
+        cmd.Parameters.AddWithValue("@idx", batchTransferIdx);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return (reader.GetInt32(0), reader.IsDBNull(1) ? null : reader.GetString(1));
+    }
+
+    internal static async Task<bool> VerifyRecordedSendEndAsync(
+        Func<string, int, CancellationToken, Task<(int Status, string? Txid)?>> batchRowReader,
+        string dbPath, int batchTransferIdx, string? expectedTxid, Exception sendException,
+        ILogger logger, CancellationToken ct = default)
+    {
+        var row = await batchRowReader(dbPath, batchTransferIdx, ct);
+        var accepted = row is
+            { Status: RgbLibTransferStatusWaitingCounterparty
+                or RgbLibTransferStatusWaitingConfirmations
+                or RgbLibTransferStatusSettled, Txid: not null }
+            && expectedTxid != null
+            && string.Equals(row.Value.Txid, expectedTxid, StringComparison.OrdinalIgnoreCase);
+        if (accepted)
+            logger.LogError(sendException,
+                "SendAsset: send_end helper failed after rgb-lib recorded transfer initiation");
+        return accepted;
     }
 
     internal static async Task<bool> HasOutgoingBatchStatusAsync(
@@ -1610,7 +1662,7 @@ public class RGBWalletService : IRGBWalletService
         return (txid, amountSats, fee);
     }
 
-    public async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? BroadcastWarning)> SendAssetAsync(
+    public async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? RecoveryAdvisory)> SendAssetAsync(
         string walletId, string rgbInvoice, string assetId, long amount, float feeRate, CancellationToken ct = default)
     {
         var sendLock = _sendLocks.GetOrAdd(walletId, _ => new SemaphoreSlim(1, 1));
@@ -1674,7 +1726,7 @@ public class RGBWalletService : IRGBWalletService
         return result.StdOut;
     }
 
-    async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? BroadcastWarning)> SendAssetInternalAsync(
+    async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? RecoveryAdvisory)> SendAssetInternalAsync(
         string walletId, string rgbInvoice, string assetId, long amount, float feeRate, CancellationToken ct)
     {
         var wallet = await GetWalletOrThrow(walletId, ct);
@@ -1718,7 +1770,9 @@ public class RGBWalletService : IRGBWalletService
         var sendBeginMayHaveRun = false;
         var sendEndStarted = false;
         string? sentTxid = null;
-        string? broadcastWarning = null;
+        string? recoveryAdvisory = null;
+        int? batchTransferIdx = null;
+        string? sendEndTxid = null;
         var quarantineDischargeEarned = false;
         try
         {
@@ -1740,7 +1794,7 @@ public class RGBWalletService : IRGBWalletService
 
             var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
                 ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
-            var batchTransferIdx = parsedSendBegin.BatchTransferIdx
+            batchTransferIdx = parsedSendBegin.BatchTransferIdx
                 ?? throw new RgbIntentVerificationException("send_begin did not return a batch_transfer_idx");
 
             try
@@ -1751,7 +1805,7 @@ public class RGBWalletService : IRGBWalletService
             catch (Exception gateEx)
             {
                 _log.LogError(gateEx, "SendAsset: intent gate rejected transfer {Idx} for wallet {WalletId}", batchTransferIdx, walletId);
-                try { await _rgbLib.FailTransfersAsync(walletId, batchTransferIdx, false, true, CancellationToken.None); }
+                try { await _rgbLib.FailTransfersAsync(walletId, batchTransferIdx.Value, false, true, CancellationToken.None); }
                 catch (Exception failEx) { _log.LogError(failEx, "SendAsset: FailTransfers failed after gate rejection for wallet {WalletId}", walletId); }
                 if (gateEx is RgbIntentVerificationException) throw;
                 throw new RgbIntentVerificationException($"RGB send intent verification failed: {gateEx.Message}", gateEx);
@@ -1784,13 +1838,14 @@ public class RGBWalletService : IRGBWalletService
             var rawTransaction = finalizedPsbt.ExtractTransaction();
             var rawTransactionHex = rawTransaction.ToHex();
             var txid = rawTransaction.GetHash().ToString();
+            sendEndTxid = txid;
             try
             {
                 // From this durable transition onward, failure is not assumed to mean that
                 // consume_fascia did nothing. Persist the exact transaction and signed PSBT before
                 // send_end so a crash can replay that exact native state transition without re-signing.
                 RgbSendRecoveryJournal.WriteSendEnd(
-                    recoveryJournal, batchTransferIdx, rawTransactionHex, txid, signedPsbt);
+                    recoveryJournal, batchTransferIdx.Value, rawTransactionHex, txid, signedPsbt);
                 sendEndStarted = true;
                 RgbSendRecoveryJournal.FsyncPreSendEndArtifacts(leaseWalletDir, txid);
                 var sendEndResult = await RunNativeSendIsolatedAsync(
@@ -1839,7 +1894,7 @@ public class RGBWalletService : IRGBWalletService
             }
             catch (Exception ex)
             {
-                broadcastWarning = "RGB transfer state is pending automatic recovery.";
+                recoveryAdvisory = SendRecoveryAdvisory;
                 _log.LogWarning(ex, "SendAsset: post-send refresh failed — wallet {WalletId} left quarantined (sync-pending)", walletId);
                 try { _rgbLib.UnloadWallet(walletId); } catch { }
             }
@@ -1848,6 +1903,7 @@ public class RGBWalletService : IRGBWalletService
         }
         catch (Exception sendException)
         {
+            var acceptRecordedSendEnd = false;
             if (sendException is NativeSendChildUnreapedException)
             {
                 // A native handle (parent or child) is still unconfirmed. Do not open the wallet
@@ -1882,8 +1938,26 @@ public class RGBWalletService : IRGBWalletService
             else if (sendEndStarted)
             {
                 try { _rgbLib.UnloadWallet(walletId); } catch { }
+                try
+                {
+                    acceptRecordedSendEnd = await VerifyRecordedSendEndAsync(
+                        FindOutgoingBatchRowAsync, Path.Combine(leaseWalletDir, "rgb_lib_db"),
+                        batchTransferIdx!.Value, sendEndTxid, sendException, _log,
+                        CancellationToken.None);
+                }
+                catch (Exception verificationException)
+                {
+                    _log.LogError(verificationException,
+                        "SendAsset: recorded send_end verification failed for wallet {WalletId}", walletId);
+                    acceptRecordedSendEnd = false;
+                }
+                if (acceptRecordedSendEnd)
+                {
+                    sentTxid = sendEndTxid;
+                    recoveryAdvisory = SendRecoveryAdvisory;
+                }
             }
-            throw;
+            if (!acceptRecordedSendEnd) throw;
         }
         finally
         {
@@ -1902,12 +1976,12 @@ public class RGBWalletService : IRGBWalletService
             }
             catch (Exception ex)
             {
-                broadcastWarning = "RGB transfer state is pending automatic recovery.";
+                recoveryAdvisory = SendRecoveryAdvisory;
                 _log.LogWarning(ex, "SendAsset: quarantine discharge failed after cleanup — wallet {WalletId} left quarantined", walletId);
             }
         }
 
-        return (sentTxid!, amount, resolvedAssetId, asset.Ticker, broadcastWarning);
+        return (sentTxid!, amount, resolvedAssetId, asset.Ticker, recoveryAdvisory);
     }
 
     static bool IsTaproot(Script script)

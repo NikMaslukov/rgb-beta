@@ -2,6 +2,8 @@ using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.Mvc.ModelBinding.Validation;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Models;
 
@@ -227,6 +229,9 @@ public class RGBSettingsViewModel : StoreViewModel
     public string ElectrumUrl { get; set; } = "";
     public bool IsConnected { get; set; }
     public string? ConnectionError { get; set; }
+    [BindNever]
+    [ValidateNever]
+    public BtcBalance? DeleteBalance { get; set; }
 
     [Display(Name = "UTXO Count")]
     [Range(RgbConfigBounds.UtxoCountMin, RgbConfigBounds.UtxoCountMax)]
