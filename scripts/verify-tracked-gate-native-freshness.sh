@@ -10,13 +10,14 @@ for argument in "$@"; do
       cat >&2 <<'USAGE'
 usage: verify-tracked-gate-native-freshness.sh [repo-root] [--write]
 
-Compares the tracked gate-native source manifest against the working tree, and with --write records it.
+Compares the gate-native source manifest against the working tree, and with --write records it.
 
---write ONLY records what is on disk. It does not build anything and cannot tell whether the tracked
-native was compiled from the sources it records. Regenerating the manifest without rebuilding the
-native defeats this check and ships stale trust-core bytes to merchants through
-plugin-builder.btcpayserver.org, which builds the plugin from the tagged source and therefore ships the
-tracked binary. Rebuild with scripts/build-gate-native-linux-x64.sh, which writes the manifest for you.
+The manifest records the crate sources and build recipe the gate native is built from. It no longer
+records the binary itself: the shipped native arrives from the published RgbVerifyCffi package, not from
+a blob in this repository. --write ONLY records what is on disk. It does not build anything and cannot
+tell whether any binary was compiled from the sources it records, so it establishes recorded-input
+consistency and nothing more. Rebuild the native with scripts/pack-rgbverify.sh --stage, then rerun this
+script with --write.
 USAGE
       exit 2
       ;;
@@ -39,25 +40,24 @@ import sys
 root = pathlib.Path(sys.argv[1])
 mode = sys.argv[2]
 manifest_path = root / "native/rgb-verify/gate-native-source-manifest.txt"
-repair = "bash scripts/build-gate-native-linux-x64.sh"
+repair = "bash scripts/pack-rgbverify.sh --stage, then bash scripts/verify-tracked-gate-native-freshness.sh --write"
 plugin_builder_warning = (
-    "Regenerating this manifest without rebuilding the native defeats this check and ships stale"
-    " trust-core bytes to merchants through plugin-builder.btcpayserver.org, which builds the plugin"
-    " from the tagged source and therefore ships the tracked binary."
+    "This manifest records the inputs the gate native is built from, not the binary that ships:"
+    " plugin-builder.btcpayserver.org builds the plugin from the tagged source and the native arrives"
+    " from the published RgbVerifyCffi package. Regenerating this manifest cannot show that any binary"
+    " was compiled from the inputs it records."
 )
 LINE = re.compile(r"^([0-9a-f]{64})  (\S.*)$")
 
-tracked_native = "native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
 fixed_inputs = [
     "native/rgb-verify/Cargo.toml",
     "native/rgb-verify/Cargo.lock",
     "native/rgb-verify/build.rs",
     "native/rgb-verify/cbindgen.toml",
     "native/rgb-verify/build-native.sh",
-    "scripts/build-gate-native-linux-x64.sh",
-    tracked_native,
+    "scripts/pack-rgbverify.sh",
 ]
-binary_inputs = {tracked_native}
+binary_inputs = set()
 recognised_source_suffixes = {".rs"}
 
 source_dir = root / "native/rgb-verify/src"
@@ -142,12 +142,9 @@ lines = []
 for relative in relatives:
     path = root / relative
     if not path.is_file():
-        hint = repair
-        if relative == tracked_native:
-            hint = f"git restore -- {relative}   (then, if the sources really changed: {repair})"
         sys.exit(
             f"gate-native manifest: declared build input is absent: {relative}. Every input must exist"
-            f" before the manifest can be computed. Repair with: {hint}"
+            f" before the manifest can be computed. Repair with: {repair}"
         )
     payload = path.read_bytes()
     if relative not in binary_inputs:
@@ -204,8 +201,8 @@ if differing or appeared or disappeared:
     for relative in disappeared:
         report.append(f"  a recorded build input has disappeared: {relative}")
     report.append(
-        "The tracked gate native was recorded against different inputs than the ones on disk, so it"
-        " may not have been built from them."
+        "The gate native was recorded against different inputs than the ones on disk, so the published"
+        " package may not have been built from them."
     )
     report.append(f"Repair with: {repair}")
     report.append(plugin_builder_warning)

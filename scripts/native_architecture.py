@@ -52,7 +52,7 @@ STAGING_ENTRY = re.compile(r"^([^/]+)/native/.+$")
 NATIVE_LIBRARY_SUFFIXES = (".so", ".dylib", ".dll")
 
 REPAIR_BY_RID = {
-    "linux-x64": "bash scripts/build-gate-native-linux-x64.sh",
+    "linux-x64": "bash scripts/pack-rgbverify.sh --stage",
 }
 REPAIR_OTHERWISE = (
     "rebuild it on a host of that architecture with native/rgb-verify/build-native.sh, or let"

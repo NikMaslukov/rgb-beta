@@ -5,7 +5,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_TREE="${1:?usage: verify-gate-native-controls.sh <publish-dir> [package-cache]}"
 PACKAGE_CACHE="${2:-$HOME/.nuget/packages}"
 ENTRY="runtimes/linux-x64/native/librgbverifycffi.so"
-ENTRY_RELATIVE="native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -44,6 +43,16 @@ run_gate() {
   PROVENANCE_STATUS=$?
   LOAD_OUTPUT="$(bash "$REPO_ROOT/scripts/verify-artifact-native-loads.sh" "$ARCHIVE" 2>&1)"
   LOAD_STATUS=$?
+}
+
+# The row that matters most once the native comes from a package: strict mode roots the comparison in
+# the RgbVerifyCffi package-cache copy rather than in a reference copied out of the publish tree, so a
+# native substituted anywhere between the cache and the artifact is rejected.
+run_gate_strict() {
+  PROVENANCE_OUTPUT="$(python3 "$REPO_ROOT/scripts/verify_plugin_artifact.py" "$ARCHIVE" \
+    --provenance strict \
+    --package-cache "$PACKAGE_CACHE" 2>&1)"
+  PROVENANCE_STATUS=$?
 }
 
 restore_entry() {
@@ -152,9 +161,7 @@ cp -R "$REPO_ROOT/native/rgb-verify/src" "$SCRATCH_ROOT/native/rgb-verify/src"
 for relative in Cargo.toml Cargo.lock build.rs cbindgen.toml build-native.sh; do
   cp "$REPO_ROOT/native/rgb-verify/$relative" "$SCRATCH_ROOT/native/rgb-verify/$relative"
 done
-cp "$REPO_ROOT/scripts/build-gate-native-linux-x64.sh" "$SCRATCH_ROOT/scripts/"
-mkdir -p "$SCRATCH_ROOT/native/rgb-verify/runtimes/linux-x64/native"
-cp "$EXPECTED" "$SCRATCH_ROOT/native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
+cp "$REPO_ROOT/scripts/pack-rgbverify.sh" "$SCRATCH_ROOT/scripts/"
 
 echo "=== row: source manifest matches the scratch tree it was written from ==="
 if bash "$FRESHNESS" "$SCRATCH_ROOT" --write >/dev/null 2>&1 \
@@ -180,37 +187,18 @@ else
   echo "  freshness: FAIL as required, naming native/rgb-verify/src/lib.rs"
 fi
 
-COMMITTED="$REPO_ROOT/scripts/verify-committed-gate-native.sh"
+echo "=== row: strict provenance accepts the honest package-delivered artifact ==="
+restore_entry
+pack_row
+run_gate_strict
+expect_provenance_pass
 
-echo "=== row: the committed-bytes gate accepts this repo's own HEAD ==="
-if bash "$COMMITTED" "$REPO_ROOT" >/dev/null 2>&1; then
-  echo "  committed gate: PASS"
-else
-  echo "  FAIL: the committed-bytes gate rejected this repo's own HEAD" >&2
-  bash "$COMMITTED" "$REPO_ROOT" 2>&1 | sed 's/^/    /' >&2
-  failures=$((failures + 1))
-fi
-
-echo "=== row: the committed-bytes gate rejects a commit carrying a mislabelled native ==="
-COMMIT_ROOT="$WORK/committed-row"
-mkdir -p "$COMMIT_ROOT/native/rgb-verify/runtimes/linux-x64/native"
-cp "$EXPECTED" "$COMMIT_ROOT/$ENTRY_RELATIVE"
-printf '\xb7\x00' | dd of="$COMMIT_ROOT/$ENTRY_RELATIVE" bs=1 seek=18 conv=notrunc status=none
-git -C "$COMMIT_ROOT" init -q . >/dev/null 2>&1
-git -C "$COMMIT_ROOT" add -f "$ENTRY_RELATIVE" >/dev/null 2>&1
-git -C "$COMMIT_ROOT" -c user.email=controls@local -c user.name=controls commit -qm "mislabelled native" >/dev/null 2>&1
-COMMITTED_OUTPUT="$(bash "$COMMITTED" "$COMMIT_ROOT" 2>&1)"
-COMMITTED_STATUS=$?
-if [ "$COMMITTED_STATUS" -eq 0 ]; then
-  echo "  FAIL: the committed-bytes gate ACCEPTED a commit whose native is not the architecture it claims" >&2
-  failures=$((failures + 1))
-elif ! grep -Fq "declares ELF-64 AArch64" <<<"$COMMITTED_OUTPUT"; then
-  echo "  FAIL: the committed-bytes gate rejected for the wrong reason; expected the architecture check to name ELF-64 AArch64" >&2
-  echo "$COMMITTED_OUTPUT" | sed 's/^/    /' >&2
-  failures=$((failures + 1))
-else
-  echo "  committed gate: FAIL as required -- architecture check named ELF-64 AArch64"
-fi
+echo "=== row: strict provenance rejects a substituted native that still loads ==="
+printf 'X' | dd of="$TREE/$ENTRY" bs=1 seek=22000000 conv=notrunc status=none
+pack_row
+run_gate_strict
+expect_provenance_fail "is not byte-identical to the RgbVerifyCffi package-cache copy"
+restore_entry
 
 if [ "$failures" -ne 0 ]; then
   echo "verify-gate-native-controls: $failures control row(s) did not behave as required" >&2

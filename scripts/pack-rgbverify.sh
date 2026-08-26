@@ -8,8 +8,9 @@
 #   --require-all-rids   fail the pack unless every declared RID is present
 #   --version <v>        package version, e.g. 0.11.1-rc.10-native.1 (required to pack)
 #   --verify             run the pack-pipeline checks (layout, all three pack-time guards, and a
-#                        Debian load of the native extracted from a package this run packed; requires
-#                        the tracked linux-x64 native to be present and fails if it is not)
+#                        Debian load of the native extracted from a package this run packed; requires a
+#                        STAGED linux-x64 native to be present and fails if it is not, so run --stage
+#                        first -- a bare checkout carries no native)
 #
 # --stage and --pack-only are independent switches, not modes: passing both stages then packs, and
 # passing neither does both.
@@ -273,10 +274,9 @@ verify() {
   real_native="$CRATE_DIR/runtimes/linux-x64/native/librgbverifycffi.so"
   if [ ! -f "$real_native" ]; then
     echo "P6 FAIL: $real_native is absent, so nothing was verified."
-    echo "  That file is tracked in git, so a checkout has it. Restore it with:"
-    echo "    git restore -- native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so"
-    echo "  or rebuild it with:"
-    echo "    bash scripts/build-gate-native-linux-x64.sh"
+    echo "  That file is NOT tracked in git -- the shipped native comes from the published"
+    echo "  RgbVerifyCffi package, so a bare checkout has nothing to pack. Stage it with:"
+    echo "    bash scripts/pack-rgbverify.sh --stage"
     failures=$((failures + 1))
   else
     scratch="$(mktemp -d)"

@@ -23,11 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
-      TRACKED_GATE_NATIVE: native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so
     steps:
       # A plain checkout, with no native build step anywhere in this job. That is the point: this is
       # what plugin-builder.btcpayserver.org compiles from, so the gate native this job publishes is
-      # the tracked one, byte for byte.
+      # the one the restore fetched from the published RgbVerifyCffi package, byte for byte.
       - name: Checkout
         uses: actions/checkout@v5
         with:
@@ -48,7 +47,7 @@ jobs:
             -p:ContinuousIntegrationBuild=true \
             -p:StaticWebAssetsEnabled=false
 
-      - name: Publish clean checkout (the tracked native is what lands)
+      - name: Publish clean checkout (the package's native is what lands)
         run: |
           set -euo pipefail
           dotnet publish "$PROJECT_FILE" \
@@ -58,32 +57,19 @@ jobs:
             -p:StaticWebAssetsEnabled=false \
             -o clean-publish-out
 
-      # Bound to the TRACKED native here, which is not the self-comparison it would be elsewhere: this
-      # job performs no build, so the comparison checks that MSBuild copied the tracked bytes into the
-      # publish output faithfully. It cannot detect a stale tracked native, and nor can the manifest step
-      # below -- that establishes recorded-input consistency only -- but it does close the
-      # tracked-to-published hop that nothing else checks on the Plugin Builder's actual path.
-      - name: Require the clean checkout to satisfy the artifact contract
+      # Strict provenance is the inverted control: this job builds no native, so the only way the entry
+      # can be present is that the restore fetched it from the published RgbVerifyCffi package, and
+      # strict requires it to be declared assetType native of that package in the plugin's own
+      # .deps.json AND byte-identical to the package-cache copy. A native substituted in this
+      # repository fails here instead of passing.
+      - name: Require the clean checkout to satisfy the artifact contract under strict provenance
         run: |
           python3 scripts/verify_plugin_artifact.py clean-publish-out \
-            --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages" \
-            --gate-native-source "linux-x64=$TRACKED_GATE_NATIVE"
+            --provenance strict \
+            --package-cache "$HOME/.nuget/packages"
 
       - name: Require the published gate native to load on Debian 12 with all five exports
         run: bash scripts/verify-artifact-native-loads.sh clean-publish-out
-
-      # The tracked native's freshness relative to the crate sources cannot be established by content
-      # (a stale build passes file, nm, readelf, strings and dlopen) or by rebuilding (the binary is not
-      # bit-reproducible). This compares the recorded source manifest against the tree instead.
-      - name: Require the tracked gate native's source manifest to match the tree
-        run: bash scripts/verify-tracked-gate-native-freshness.sh
-
-      # The same committed-bytes gate release.yml runs, so a branch that commits an unloadable native
-      # goes red here rather than at release time. A manifest binds hashes; it cannot see a glibc
-      # floor, an architecture, an export set or loadability.
-      - name: Require the COMMITTED gate native to pass architecture, exact exports and a Debian 12 load
-        run: bash scripts/verify-committed-gate-native.sh
 
       # Asserting success is not a control. This mutates the published artifact into each deficient
       # variant in turn and requires the gate to reject it, naming which check fired, so the job goes
@@ -95,10 +81,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TESTS_PROJECT: BTCPayServer.Plugins.RgbUtexo.Tests/BTCPayServer.Plugins.RgbUtexo.Tests.csproj
-      # Cargo's own output, not the tracked runtimes/ copy: native/rgb-verify/.gitignore ignores
-      # /target, so this path cannot exist in a clean checkout and the gate has nothing to bind to if
-      # the build step is removed or silently does nothing.
-      GATE_NATIVE_BUILD: native/rgb-verify/target/release/librgbverifycffi.so
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -111,17 +93,9 @@ jobs:
           dotnet-version: |
             10.0.x
 
-      # runtimes/linux-x64 is tracked, so a checkout already supplies a gate native. This job rebuilds
-      # it anyway, in rust:1-bookworm, so the object the managed suite loads and the object this job
-      # publishes are a build of THIS checkout rather than whatever was last committed. The build must
-      # still precede the dotnet build, because the csproj's
-      # <None Include="native/rgb-verify/runtimes/**"> glob only copies files that exist when MSBuild
-      # evaluates items. Mirrors release.yml.
-      - name: Build rgbverifycffi native in rust:1-bookworm (linux-x64)
-        run: |
-          set -euo pipefail
-          bash scripts/build-gate-native-linux-x64.sh
-          echo "built $GATE_NATIVE_BUILD ($(wc -c < "$GATE_NATIVE_BUILD") bytes)"
+      # No native build step: the gate native the managed suite loads and this job publishes arrives
+      # from the published RgbVerifyCffi package through the locked restore below, which is the same
+      # route the Plugin Builder takes. The Rust sources are exercised by the rust-test job.
 
       # StaticWebAssetsEnabled=false is passed as a global property (not just on
       # the BTCPay ProjectReference) so the submodule graph resolves to a single
@@ -149,7 +123,7 @@ jobs:
       - name: Test artifact verifier fixtures
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      - name: Publish staged pre-package artifact (Release)
+      - name: Publish artifact (Release)
         run: |
           set -euo pipefail
           dotnet publish BTCPayServer.Plugins.RgbUtexo.csproj \
@@ -159,12 +133,11 @@ jobs:
             -p:StaticWebAssetsEnabled=false \
             -o ci-publish-out
 
-      - name: Verify complete staged publish artifact
+      - name: Verify complete publish artifact under strict provenance
         run: |
           python3 scripts/verify_plugin_artifact.py ci-publish-out \
-            --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages" \
-            --gate-native-source "linux-x64=$GATE_NATIVE_BUILD"
+            --provenance strict \
+            --package-cache "$HOME/.nuget/packages"
 
       - name: Assert the published gate native loads on Debian 12
         run: bash scripts/verify-artifact-native-loads.sh ci-publish-out
@@ -189,3 +162,11 @@ jobs:
           set -euo pipefail
           rustc --version && cargo --version
           cargo test --release --locked
+
+      # The manifest records the crate sources and build recipe the published RgbVerifyCffi native is
+      # built from. It cannot show that the package's binary was compiled from them, but it does catch a
+      # source change that was never recorded, and this is the job that owns those sources. release.yml
+      # runs the same check before it can tag.
+      - name: Require the gate-native source manifest to match the tree
+        working-directory: .
+        run: bash scripts/verify-tracked-gate-native-freshness.sh

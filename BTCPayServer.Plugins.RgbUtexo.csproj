@@ -6,7 +6,7 @@
         <Nullable>enable</Nullable>
         <Product>RGB Payments</Product>
         <Description>Accept RGB (client-side validated assets) payments in BTCPay Server. Issue and receive RGB20 tokens on Bitcoin.</Description>
-        <Version>1.0.10</Version>
+        <Version>1.0.11-rc.1</Version>
         <Authors>Utexo</Authors>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>
         <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -69,6 +69,7 @@
         <ProjectReference Include="../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" Condition="!Exists('submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj') And Exists('../NArk/submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj')" />
         
         <PackageReference Include="RgbLib" Version="0.3.0-beta.30" />
+        <PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.2" />
         <PackageReference Include="SharpCompress" Version="0.50.4" />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.4">
             <PrivateAssets>all</PrivateAssets>
@@ -83,13 +84,6 @@
         
         <EmbeddedResource Include="rgb-icon.svg" />
         <None Include="README.md" Pack="true" PackagePath="\" />
-
-        <None Include="native/rgb-verify/runtimes/**">
-            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-            <Pack>true</Pack>
-            <PackagePath>runtimes/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
-            <Link>runtimes/%(RecursiveDir)%(Filename)%(Extension)</Link>
-        </None>
     </ItemGroup>
 
     <ItemGroup>

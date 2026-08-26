@@ -50,11 +50,6 @@ jobs:
       PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
       MANIFEST_FILE: btcpay.plugin.json
       TAG: v${{ inputs.version }}
-      # Cargo's own output, deliberately NOT the tracked runtimes/ copy. native/rgb-verify/.gitignore
-      # ignores /target, so this path cannot exist in a clean checkout: if the build step is removed or
-      # silently does nothing, the gate has no source to bind to and fails, instead of comparing the
-      # shipped entry against the tracked bytes it was copied from.
-      GATE_NATIVE_BUILD: native/rgb-verify/target/release/librgbverifycffi.so
 
     steps:
       - name: Checkout
@@ -95,37 +90,23 @@ jobs:
           dotnet-version: |
             10.0.x
 
-      # Judges the bytes THIS COMMIT carries, read out of the git object database, before anything can
-      # be tagged. The rebuild below overwrites the tracked native in the workspace, so every
-      # artifact-level check after it inspects a replacement that is not what ships:
-      # plugin-builder.btcpayserver.org compiles the plugin from the tag and ships the committed
-      # binary. Architecture, exact exports and a Debian 12 dlopen are all properties of the object,
-      # and the source manifest below can observe none of them.
-      - name: Require the COMMITTED gate native to pass architecture, exact exports and a Debian 12 load
+      # Records the commit being judged before anything can be tagged, so a HEAD that moves during the
+      # run is caught at the tag step rather than silently tagging something else. The gate native
+      # itself is no longer a blob in this commit: it arrives from the published RgbVerifyCffi package
+      # through the locked restore below, and the artifact checks after it run under
+      # --provenance strict, which binds the shipped entry to the package-cache copy.
+      - name: Record the release commit
         run: |
           set -euo pipefail
-          bash scripts/verify-committed-gate-native.sh
           echo "RELEASE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      # Runs BEFORE the build, and that ordering is the whole point: the build rewrites the manifest,
-      # so afterwards this would compare a record against one the same step had just written. ci.yml
-      # triggers only on pull_request, push to main and manual dispatch, none of which a tag
+      # ci.yml triggers only on pull_request, push to main and manual dispatch, none of which a tag
       # publication implies, while this workflow is dispatchable on any ref, so without this step a
-      # release could tag a commit whose tracked native was never freshness-checked. plugin-builder
-      # builds from that tag and ships the tracked binary, so the check has to happen here too.
-      - name: Require the tagged commit's tracked gate native to match its recorded sources
+      # release could tag a commit whose crate sources were never checked against the recorded
+      # manifest. It says nothing about the package's binary -- that is what strict provenance below
+      # is for -- only that the recorded inputs still match the tree.
+      - name: Require the tagged commit's gate-native source manifest to match its recorded sources
         run: bash scripts/verify-tracked-gate-native-freshness.sh
-
-      # Built in rust:1-bookworm, not on the runner: ubuntu-latest links against a newer glibc than
-      # BTCPay's Debian 12 images and the result fails to dlopen there. The script deletes both output
-      # paths before building, so a build that compiles nothing cannot leave the tracked binary behind
-      # to be mistaken for a fresh one.
-      - name: Build rgbverifycffi native in rust:1-bookworm (linux-x64 = prod RID)
-        run: |
-          set -euo pipefail
-          bash scripts/build-gate-native-linux-x64.sh
-          python3 scripts/assert-native-exports.py --load "$GATE_NATIVE_BUILD"
-          echo "built $GATE_NATIVE_BUILD ($(wc -c < "$GATE_NATIVE_BUILD") bytes)"
 
       - name: Restore (locked mode — packages.lock.json must match)
         run: |
@@ -144,12 +125,11 @@ jobs:
             -p:Deterministic=true \
             -o publish-out
 
-      - name: Verify complete publish artifact
+      - name: Verify complete publish artifact under strict provenance
         run: |
           python3 scripts/verify_plugin_artifact.py publish-out \
-            --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages" \
-            --gate-native-source "linux-x64=$GATE_NATIVE_BUILD"
+            --provenance strict \
+            --package-cache "$HOME/.nuget/packages"
 
       - name: Pack .btcpay
         run: |
@@ -158,12 +138,11 @@ jobs:
           sha256sum "$ARTIFACT_NAME" | tee "$ARTIFACT_NAME.sha256"
           ls -lh "$ARTIFACT_NAME" "$ARTIFACT_NAME.sha256"
 
-      - name: Verify final .btcpay archive
+      - name: Verify final .btcpay archive under strict provenance
         run: |
           python3 scripts/verify_plugin_artifact.py "$ARTIFACT_NAME" \
-            --provenance pre-package \
-            --package-cache "$HOME/.nuget/packages" \
-            --gate-native-source "linux-x64=$GATE_NATIVE_BUILD"
+            --provenance strict \
+            --package-cache "$HOME/.nuget/packages"
 
       # Loads the gate native extracted from the archive that actually ships, inside Debian 12, and
       # resolves all five exports. Content checks cannot see staleness, but they do see a wrong
@@ -180,12 +159,12 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${RELEASE_COMMIT:-}" ]]; then
-            echo "::error::RELEASE_COMMIT is unset, so the committed-gate-native check either never ran or never recorded the commit it judged. An absent value must not read as agreement. Refusing to tag."
+            echo "::error::RELEASE_COMMIT is unset, so the step that records the commit under verification either never ran or never recorded it. An absent value must not read as agreement. Refusing to tag."
             exit 1
           fi
           SHA=$(git rev-parse HEAD)
           if [[ "$SHA" != "$RELEASE_COMMIT" ]]; then
-            echo "::error::HEAD is now $SHA but the gate native was verified on $RELEASE_COMMIT. The object that passed is not the object this tag would carry."
+            echo "::error::HEAD is now $SHA but the artifact was verified on $RELEASE_COMMIT. The commit that passed is not the commit this tag would carry."
             exit 1
           fi
           if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then

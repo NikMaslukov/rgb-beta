@@ -683,6 +683,11 @@
         "resolved": "0.3.0-beta.30",
         "contentHash": "tSdiDoag8VWynkAoKmDxbP7+SM+u3ibubpbJM9Lu9cFN8VWxRq1mKxcwgOyE7NpUWGjjUCNh8TAC7zgJ/Ot1Hw=="
       },
+      "RgbVerifyCffi": {
+        "type": "Transitive",
+        "resolved": "0.11.1-rc.10-native.2",
+        "contentHash": "n/UVs2Af4v/myBNP5Fpcz8rKZlUtH8SaXB8dpraiDkzqeG+/RmmFQqDZ7+evs8p5wODW87s7hmY21SmZgJU+kA=="
+      },
       "Serilog": {
         "type": "Transitive",
         "resolved": "4.3.0",
@@ -1107,6 +1112,7 @@
           "NBitcoin": "[10.0.5, )",
           "Npgsql.EntityFrameworkCore.PostgreSQL": "[10.0.2, )",
           "RgbLib": "[0.3.0-beta.30, )",
+          "RgbVerifyCffi": "[0.11.1-rc.10-native.2, )",
           "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.4, )",
           "SharpCompress": "[0.50.4, )"
         }

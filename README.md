@@ -424,10 +424,10 @@ Verify your Electrum server is reachable. Check `RGB_ELECTRUM_URL` environment v
 | Platform | Status |
 |----------|--------|
 | Linux x64 | Supported |
-| Linux ARM64 | Not supported (no `rgbverifycffi` has ever been built for this RID, and `RgbLib 0.3.0-beta.30` carries no `linux-arm64` core native either) |
-| macOS ARM64 (Apple Silicon) | Not supported by a clean build (`RgbLib` supplies the core, but the `osx-arm64` gate native is a gitignored local build artifact, so it is absent from a fresh clone) |
+| Linux ARM64 | Not supported (`RgbVerifyCffi 0.11.1-rc.10-native.2` does supply a `linux-arm64` gate native, but `RgbLib 0.3.0-beta.30` carries no `linux-arm64` core native, so the pair is incomplete) |
+| macOS ARM64 (Apple Silicon) | Not supported: both natives are now available from packages (`RgbLib` supplies the core, `RgbVerifyCffi` the gate), but this RID has not been reviewed or end-to-end verified, and the contract does not declare it |
 | macOS x64 (Intel) | Not supported (neither native is available for this RID) |
-| Windows | Not supported (no `rgbverifycffi` has ever been built for `win-x64`; `RgbLib` does supply a `win-x64` core, and that extra core creates no support on its own) |
+| Windows | Not supported (`RgbVerifyCffi` ships no `win-x64` gate native; `RgbLib` does supply a `win-x64` core, and that extra core creates no support on its own) |
 
 Support is an explicit end-to-end claim and requires both `rgbverifycffi` and `rgblibcffi` for a RID.
 An extra native supplied by either package does not expand this table by itself. The reviewed matrix is
@@ -435,40 +435,43 @@ An extra native supplied by either package does not expand this table by itself.
 
 ### How the `linux-x64` gate native reaches you
 
-The `linux-x64` gate native is **tracked in this repository** at
-`native/rgb-verify/runtimes/linux-x64/native/librgbverifycffi.so`, and the plugin project ships it with
-the `<None Include="native/rgb-verify/runtimes/**">` item. BTCPay's hosted Plugin Builder runs only
-`dotnet publish`, and the `.btcpay` bundle is a flat ZIP of that publish directory, so the tracked
-native is in the artifact a merchant installs. It is not staged by hand and it does not depend on any
-unpublished NuGet package.
+The `linux-x64` gate native comes from the **`RgbVerifyCffi` package on nuget.org**, pinned by the
+`<PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.2" />` item in
+`BTCPayServer.Plugins.RgbUtexo.csproj` and hash-locked in `packages.lock.json`. No binary is tracked in
+this repository. BTCPay's hosted Plugin Builder runs only `dotnet restore` + `dotnet publish`, the
+package drops its asset at `runtimes/linux-x64/native/librgbverifycffi.so`, and the `.btcpay` bundle is a
+flat ZIP of that publish directory, so the package's native is in the artifact a merchant installs.
 
 The core native (`librgblibcffi.so`) comes from the `RgbLib` package on nuget.org, so a `linux-x64`
 publish carries the complete pair the pre-sign gate needs.
 
-Four checks bind that binary, all runnable from a clone:
+Three checks bind that binary, all runnable from a clone:
 
 - **existence and layout** — `scripts/verify_plugin_artifact.py` against a publish directory or the
   `.btcpay`, using the declarative contract above;
-- **byte-binding** — `--gate-native-source linux-x64=<cargo output>` requires the shipped entry to be
-  byte-identical to the build output produced in the same job;
+- **package-origin integrity plus one byte-continuity hop** — `--provenance strict --package-cache <dir>`
+  requires the shipped entry to be declared `assetType: native` of `RgbVerifyCffi` in the plugin's own
+  `.deps.json` **and** byte-identical to the global-packages-cache copy of that pinned version. A native
+  substituted anywhere in this repository fails this check instead of passing it;
 - **loadability** — `scripts/verify-artifact-native-loads.sh <artifact>` extracts the archive entry and
-  `dlopen`s it inside a Debian 12 container, resolving all five exports;
-- **recorded-input consistency** — `native/rgb-verify/gate-native-source-manifest.txt` records the
-  SHA-256 of the shipped binary alongside per-file hashes of the sources and build scripts recorded
-  beside it; `scripts/verify-tracked-gate-native-freshness.sh` checks both against the working tree.
-  This is **not** a source binding: the manifest is written from whatever is on disk, so it cannot show
-  that the binary was compiled from those inputs. Nothing in this repository establishes that today.
+  `dlopen`s it inside a Debian 12 container, resolving all five exports.
 
-Rebuild and re-stage the tracked native with `scripts/build-gate-native-linux-x64.sh`, which builds in
-`rust:1-bookworm` (the glibc floor), refuses to leave a stale binary in place, and rewrites the manifest.
+Alongside them, `native/rgb-verify/gate-native-source-manifest.txt` records per-file hashes of the crate
+sources and the build recipe, and `scripts/verify-tracked-gate-native-freshness.sh` checks them against
+the working tree. That is **recorded-input consistency** only: the manifest no longer records any binary,
+and it cannot show that the published package was compiled from the inputs it records.
 
-**Known limitation.** The manifest records hashes of the binary and of the inputs beside it; it does
-**not** bind one to the other, because regenerating the manifest *without* rebuilding the binary makes a
-stale binary look consistent. Closing that needs a CI rule that refuses a manifest change unless the
-binary changes too; it is not yet in place. Note also that the Rust build is **not** byte-reproducible —
-two builds from byte-identical sources produce the same size but different SHA-256 and different build
-IDs — so a committed expected-hash pin is not implementable. Same-job byte comparison gives byte
-continuity on that one hop; **nothing here establishes source-to-binary provenance.**
+Rebuild and re-stage the natives locally with `scripts/pack-rgbverify.sh --stage`, which builds each RID
+in `rust:1-bookworm` (the glibc floor) or on the host and asserts the exact export set. Staged natives are
+gitignored build artifacts used to pack a package; they are not what a clean publish ships.
+
+**Known limitation.** Strict mode gives **package-origin integrity** — a known publisher at a pinned
+version, hash-locked — plus **byte continuity** on the package-cache-to-artifact hop. It does **not**
+establish **source-to-binary provenance**: nothing here checks how the published package's binary was
+produced. Closing that needs a build attestation over the exact published nupkg, tied to the reviewed
+source revision, and no workflow in this repository emits one. Note also that the Rust build is **not**
+byte-reproducible — two builds from byte-identical sources produce the same size but different SHA-256
+and different build IDs — so a committed expected-hash pin is not implementable either.
 
 ## Building from source
 
@@ -481,7 +484,7 @@ This repository uses NuGet lockfiles (`packages.lock.json`) for both the plugin 
 
 ### Packaging the gate native (`RgbVerifyCffi`)
 
-The pre-sign verification library (`native/rgb-verify`, built by `native/rgb-verify/build-native.sh`) can also be packed as a native-only NuGet package. Nothing references that package yet — this is the machinery that produces it.
+The pre-sign verification library (`native/rgb-verify`, built by `native/rgb-verify/build-native.sh`) is packed as a native-only NuGet package, and the plugin consumes it through the `PackageReference` described under [Platform Support](#platform-support). For step-by-step publishing instructions — including who is permitted to push the package ID, the API-key scope required, and what to do after a version bump — see [`native/rgb-verify/PUBLISHING.md`](native/rgb-verify/PUBLISHING.md).
 
 ```bash
 # stage every gate-package RID and pack (host RID natively, cross RIDs in containers)
@@ -514,7 +517,7 @@ The feed path must be **absolute**. Measured on this project graph: both `--sour
 
 **glibc floor.** The canonical Linux natives are built in `rust:1-bookworm` (Debian 12), because a native linked against a newer glibc than the deployment target fails to `dlopen` there. `scripts/verify-native-loads-debian.sh` loads the packed `linux-x64` native inside a Debian 12 container and resolves all five exports, so a floor mistake surfaces at pack time rather than at a merchant's startup.
 
-For releases, `.github/workflows/pack-native.yml` (manual dispatch) builds each RID on a runner of that architecture, checks the exports with a tool that can read that object format, and uploads the assembled `.nupkg` as an artifact. It deliberately does not tag or publish a release. It has never been dispatched, so its `linux-arm64` job has never run and no `linux-arm64` gate native exists anywhere — which is why the platform table above does not claim that RID. This workflow is also not on the path that ships to merchants; the plugin gets its gate native from the tracked file described under [Platform Support](#platform-support).
+For releases, `.github/workflows/pack-native.yml` (manual dispatch) builds each RID on a runner of that architecture, checks the exports with a tool that can read that object format, and uploads the assembled `.nupkg` as an artifact. It deliberately neither tags a release nor publishes to nuget.org — see [`native/rgb-verify/PUBLISHING.md`](native/rgb-verify/PUBLISHING.md) for the publish step. A `linux-arm64` gate native does now exist and ships in the package; the platform table above still declines that RID because `RgbLib` carries no `linux-arm64` core native, so the pair is incomplete.
 
 ### Verifying a plugin artifact
 
@@ -523,25 +526,22 @@ declarative contract:
 
 ```bash
 python3 scripts/verify_plugin_artifact.py publish-out \
-  --provenance pre-package \
+  --provenance strict \
   --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 
 python3 scripts/verify_plugin_artifact.py BTCPayServer.Plugins.RgbUtexo.btcpay \
-  --provenance pre-package \
+  --provenance strict \
   --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 ```
 
-`pre-package` means only that **gate-package** provenance is not established: the shipped gate native is
-the one tracked in this repository rather than one declared by an `RgbVerifyCffi` `PackageReference`.
-What the neighbouring checks do establish is narrower than it sounds: `--gate-native-source` gives
-**byte continuity** on one hop (artifact entry against a build output supplied in the same job), and the
-manifest gives **recorded-input consistency**. Neither is source-to-binary provenance, and no
-combination of them is. Once a published `RgbVerifyCffi` dependency is connected, `--provenance strict`
-becomes available; strict mode requires the gate to be declared by that package and byte-identical to
-its global-packages-cache copy — **package-origin integrity plus one more byte-continuity hop**, still
-not a statement about how that package's binary was produced. Strict mode is the only thing that publish
-gates: a `linux-x64` plugin artifact verifies end to end today without it. A locally built three-RID gate
-package can be checked without network access:
+`strict` requires the shipped gate native to be declared `assetType: native` of `RgbVerifyCffi` in the
+plugin's own `.deps.json` and byte-identical to the global-packages-cache copy of the pinned version —
+**package-origin integrity plus one byte-continuity hop**. It is what CI and the release workflow run,
+and it applies to *every* gate native the artifact carries, so an extra undeclared one fails the run
+rather than passing quietly. The weaker `pre-package` mode remains for inspecting a hand-staged tree; in
+that mode the gate native is only checked for existence and non-emptiness, and the verifier says so on
+its own output. Neither mode is a statement about how the package's binary was produced. A locally built
+three-RID gate package can be checked without network access:
 
 ```bash
 python3 scripts/verify_plugin_artifact.py \
