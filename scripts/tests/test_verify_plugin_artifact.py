@@ -48,7 +48,7 @@ class ArtifactFixture:
 
         plain_files = {
             "btcpay.plugin.json": b"{}",
-            "BTCPayServer.Plugins.RgbUtexo.dll": b"plugin",
+            "rgb-beta.dll": b"plugin",
             "RgbRestoreHelper.dll": b"helper",
             "RgbRestoreHelper.runtimeconfig.json": b"{}",
             "SharpCompress.dll": b"sharp",
@@ -76,7 +76,7 @@ class ArtifactFixture:
                 }
             }
         self.write_json(
-            "BTCPayServer.Plugins.RgbUtexo.deps.json",
+            "rgb-beta.deps.json",
             {"targets": {"net10.0": plugin_packages}},
         )
         self.write_json(
@@ -254,13 +254,13 @@ class VerifyPluginArtifactTests(unittest.TestCase):
         fixture.write("runtimes/linux-arm64/native/librgbverifycffi.so", b"extra gate")
         win_core = "runtimes/win-x64/native/rgblibcffi.dll"
         fixture.write(win_core, b"extra core")
-        deps_path = fixture.publish / "BTCPayServer.Plugins.RgbUtexo.deps.json"
+        deps_path = fixture.publish / "rgb-beta.deps.json"
         deps = json.loads(deps_path.read_text(encoding="utf-8"))
         deps["targets"]["net10.0"]["RgbLib/0.3.0-test"]["runtimeTargets"][win_core] = {
             "rid": "win-x64",
             "assetType": "native",
         }
-        fixture.write_json("BTCPayServer.Plugins.RgbUtexo.deps.json", deps)
+        fixture.write_json("rgb-beta.deps.json", deps)
         fixture.cache_write("RgbLib", "0.3.0-test", win_core, b"extra core")
         result = self.run_verify(fixture)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)

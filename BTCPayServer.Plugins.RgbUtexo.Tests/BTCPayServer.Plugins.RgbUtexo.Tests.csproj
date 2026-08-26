@@ -32,7 +32,7 @@
     <PackageReference Include="NBXplorer.Client" Version="5.0.6" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../BTCPayServer.Plugins.RgbUtexo.csproj" />
+    <ProjectReference Include="../rgb-beta.csproj" />
     <ProjectReference Include="../RgbRestoreHelper/RgbRestoreHelper.csproj" />
   </ItemGroup>
 </Project>

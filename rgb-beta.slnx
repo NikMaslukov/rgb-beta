@@ -8,6 +8,6 @@
     <Project Path="submodules/btcpayserver/BTCPayServer.Rating/BTCPayServer.Rating.csproj" />
     <Project Path="submodules/btcpayserver/BTCPayServer/BTCPayServer.csproj" />
   </Folder>
-  <Project Path="BTCPayServer.Plugins.RgbUtexo.csproj" />
+  <Project Path="rgb-beta.csproj" />
   <Project Path="BTCPayServer.Plugins.RgbUtexo.Tests/BTCPayServer.Plugins.RgbUtexo.Tests.csproj" />
 </Solution>

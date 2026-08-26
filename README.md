@@ -437,7 +437,7 @@ An extra native supplied by either package does not expand this table by itself.
 
 The `linux-x64` gate native comes from the **`RgbVerifyCffi` package on nuget.org**, pinned by the
 `<PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.2" />` item in
-`BTCPayServer.Plugins.RgbUtexo.csproj` and hash-locked in `packages.lock.json`. No binary is tracked in
+`rgb-beta.csproj` and hash-locked in `packages.lock.json`. No binary is tracked in
 this repository. BTCPay's hosted Plugin Builder runs only `dotnet restore` + `dotnet publish`, the
 package drops its asset at `runtimes/linux-x64/native/librgbverifycffi.so`, and the `.btcpay` bundle is a
 flat ZIP of that publish directory, so the package's native is in the artifact a merchant installs.
@@ -536,7 +536,7 @@ python3 scripts/verify_plugin_artifact.py publish-out \
   --provenance strict \
   --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 
-python3 scripts/verify_plugin_artifact.py BTCPayServer.Plugins.RgbUtexo.btcpay \
+python3 scripts/verify_plugin_artifact.py rgb-beta.btcpay \
   --provenance strict \
   --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 ```

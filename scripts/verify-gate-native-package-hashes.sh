@@ -63,7 +63,7 @@ mode = sys.argv[3]
 
 PACKAGE_ID = "RgbVerifyCffi"
 manifest_path = root / "native/rgb-verify/gate-native-package-manifest.txt"
-project_path = root / "BTCPayServer.Plugins.RgbUtexo.csproj"
+project_path = root / "rgb-beta.csproj"
 repair = (
     "bash scripts/verify-gate-native-package-hashes.sh --write, then review every hash it changed"
     " against the published package"

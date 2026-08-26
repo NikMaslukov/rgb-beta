@@ -274,7 +274,7 @@ def verify_plugin(
             fail(f"host assembly must not ship in the plugin artifact: {forbidden}")
 
     manifests = verify_dependency_manifests(artifact, plugin)
-    plugin_deps_path = "BTCPayServer.Plugins.RgbUtexo.deps.json"
+    plugin_deps_path = "rgb-beta.deps.json"
     plugin_deps = manifests[plugin_deps_path]
     helper_deps = manifests["RgbRestoreHelper.deps.json"]
     gate_package = contract["packages"]["gate"]

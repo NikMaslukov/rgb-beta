@@ -3,7 +3,7 @@ name: Release
 # Manually triggered release pipeline.
 #
 # How to run:
-#   1. Bump <Version> in BTCPayServer.Plugins.RgbUtexo.csproj and "version"
+#   1. Bump <Version> in rgb-beta.csproj and "version"
 #      in btcpay.plugin.json on the branch you want to release from.
 #   2. Push that branch.
 #   3. GitHub -> Actions -> "Release" -> Run workflow.
@@ -46,8 +46,8 @@ jobs:
       hashes: ${{ steps.subjects.outputs.hashes }}
       tag: ${{ steps.subjects.outputs.tag }}
     env:
-      ARTIFACT_NAME: BTCPayServer.Plugins.RgbUtexo.btcpay
-      PROJECT_FILE: BTCPayServer.Plugins.RgbUtexo.csproj
+      ARTIFACT_NAME: rgb-beta.btcpay
+      PROJECT_FILE: rgb-beta.csproj
       MANIFEST_FILE: btcpay.plugin.json
       TAG: v${{ inputs.version }}
 
@@ -234,8 +234,8 @@ jobs:
   # transparency log, and attaches `*.intoto.jsonl` to the Release created above.
   #
   # Verify with:
-  #   slsa-verifier verify-artifact BTCPayServer.Plugins.RgbUtexo.btcpay \
-  #     --provenance-path BTCPayServer.Plugins.RgbUtexo.btcpay.intoto.jsonl \
+  #   slsa-verifier verify-artifact rgb-beta.btcpay \
+  #     --provenance-path rgb-beta.btcpay.intoto.jsonl \
   #     --source-uri github.com/UTEXO-Protocol/rgb-btcpay-plugin \
   #     --source-tag vX.Y.Z
   provenance:
