@@ -5,8 +5,8 @@ This repository ships releases via the manual GitHub Actions workflow
 
 - a Git tag `vX.Y.Z` on the chosen commit,
 - a GitHub Release with auto-generated notes,
-- a `rgb-beta.btcpay` artifact attached to the release,
-- a `rgb-beta.btcpay.sha256` checksum file next to it.
+- a `BTCPayServer.Plugins.RgbUtexoBeta.btcpay` artifact attached to the release,
+- a `BTCPayServer.Plugins.RgbUtexoBeta.btcpay.sha256` checksum file next to it.
 
 The same artifact can later be uploaded by hand into a BTCPay Server instance
 or referenced when re-pointing
@@ -21,7 +21,7 @@ to a tag.
 ## TL;DR
 
 1. Bump the version in `btcpay.plugin.json` and
-   `rgb-beta.csproj` on a branch.
+   `BTCPayServer.Plugins.RgbUtexoBeta.csproj` on a branch.
 2. Open a PR, merge it into `main` (or whichever branch you release from).
 3. GitHub → **Actions** → **Release** → **Run workflow**.
 4. Pick the branch (or tag) under *Use workflow from*, type the same version
@@ -44,7 +44,7 @@ Two files must be in sync — the workflow refuses to run otherwise.
 }
 ```
 
-**`rgb-beta.csproj`**
+**`BTCPayServer.Plugins.RgbUtexoBeta.csproj`**
 
 ```xml
 <Version>1.0.7</Version>
@@ -84,7 +84,7 @@ What the workflow does, in order:
    `ContinuousIntegrationBuild=true`.
 4. Sanity-checks the publish output: the plugin DLL and manifest are
    present, and `BTCPayServer.dll` (the host) is **not** packed in.
-5. Zips the publish output into `rgb-beta.btcpay`
+5. Zips the publish output into `BTCPayServer.Plugins.RgbUtexoBeta.btcpay`
    and computes its SHA-256.
 6. Tags the commit:
    - if `vX.Y.Z` does not exist — creates it and pushes;
@@ -103,11 +103,11 @@ What the workflow does, in order:
   `https://github.com/UTEXO-Protocol/rgb-btcpay-plugin/releases/tag/vX.Y.Z`
   and skim the auto-generated notes. Edit them if needed — they are not
   set in stone.
-- Optional: download `rgb-beta.btcpay` and verify the
+- Optional: download `BTCPayServer.Plugins.RgbUtexoBeta.btcpay` and verify the
   hash locally:
 
   ```bash
-  sha256sum -c rgb-beta.btcpay.sha256
+  sha256sum -c BTCPayServer.Plugins.RgbUtexoBeta.btcpay.sha256
   ```
 
 - Update the BTCPay plugin registry (manual UI step on
@@ -219,7 +219,7 @@ To regenerate the lockfile locally after a deliberate dependency change:
 # fails with "A new project reference to btcpayserver was found".
 git submodule update --init --recursive
 
-dotnet restore rgb-beta.csproj --force-evaluate
+dotnet restore BTCPayServer.Plugins.RgbUtexoBeta.csproj --force-evaluate
 git add packages.lock.json
 ```
 
@@ -233,7 +233,7 @@ reusable workflow (`generator_generic_slsa3.yml@v2.1.0`).
 The attestation is a signed [in-toto](https://in-toto.io/) JSON document
 that records:
 
-- the SHA-256 of `rgb-beta.btcpay`,
+- the SHA-256 of `BTCPayServer.Plugins.RgbUtexoBeta.btcpay`,
 - the commit and ref the build ran on,
 - the exact GitHub Actions workflow file and runner identity,
 - the timestamp of the build.
@@ -254,11 +254,11 @@ go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@latest
 TAG=v1.0.6
 gh release download "$TAG" \
   --repo UTEXO-Protocol/rgb-btcpay-plugin \
-  --pattern 'rgb-beta.btcpay' \
+  --pattern 'BTCPayServer.Plugins.RgbUtexoBeta.btcpay' \
   --pattern '*.intoto.jsonl'
 
 # verify
-slsa-verifier verify-artifact rgb-beta.btcpay \
+slsa-verifier verify-artifact BTCPayServer.Plugins.RgbUtexoBeta.btcpay \
   --provenance-path *.intoto.jsonl \
   --source-uri github.com/UTEXO-Protocol/rgb-btcpay-plugin \
   --source-tag "$TAG"

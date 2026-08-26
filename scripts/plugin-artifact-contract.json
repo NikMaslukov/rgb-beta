@@ -3,8 +3,8 @@
   "plugin": {
     "required_root_files": [
       "btcpay.plugin.json",
-      "rgb-beta.dll",
-      "rgb-beta.deps.json",
+      "BTCPayServer.Plugins.RgbUtexoBeta.dll",
+      "BTCPayServer.Plugins.RgbUtexoBeta.deps.json",
       "RgbRestoreHelper.dll",
       "RgbRestoreHelper.deps.json",
       "RgbRestoreHelper.runtimeconfig.json",
@@ -15,7 +15,7 @@
     ],
     "helper_basename": "RgbRestoreHelper",
     "dependency_manifests": {
-      "rgb-beta.deps.json": {
+      "BTCPayServer.Plugins.RgbUtexoBeta.deps.json": {
         "RgbLib": {
           "runtime": "RgbLib.dll"
         },
