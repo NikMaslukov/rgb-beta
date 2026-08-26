@@ -174,11 +174,39 @@ public class RgbLibService : IRgbLibService
                 walletId, dataDir, masterFingerprint, configJson, keysJson);
             throw;
         }
-        wallet.GoOnline(networkSettings.ElectrumUrl, true);
+        return CreateHandleOrDisposeWallet(
+            wallet,
+            w => w.GoOnline(networkSettings.ElectrumUrl, true),
+            w =>
+            {
+                _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
+                return new RgbLibWalletHandle(w, walletId,
+                    Path.Combine(dataDir, masterFingerprint), _log);
+            },
+            w => w.Dispose(),
+            disposeError => _log.LogError(disposeError,
+                "Failed to dispose the rgb-lib wallet for {WalletId} after a failed bring-online; its rgb_runtime.lock may still be on disk",
+                walletId));
+    }
 
-        _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
-        return new RgbLibWalletHandle(wallet, walletId,
-            Path.Combine(dataDir, masterFingerprint), _log);
+    internal static THandle CreateHandleOrDisposeWallet<TWallet, THandle>(
+        TWallet wallet,
+        Action<TWallet> bringOnline,
+        Func<TWallet, THandle> buildHandle,
+        Action<TWallet> disposeWallet,
+        Action<Exception> reportDisposeFailure)
+    {
+        try
+        {
+            bringOnline(wallet);
+            return buildHandle(wallet);
+        }
+        catch
+        {
+            try { disposeWallet(wallet); }
+            catch (Exception disposeError) { reportDisposeFailure(disposeError); }
+            throw;
+        }
     }
 
     public bool UnloadWallet(string walletId) => UnloadFromCache(_wallets, walletId, _log);

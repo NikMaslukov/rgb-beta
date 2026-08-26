@@ -176,6 +176,24 @@ public class RGBConfiguration
     int _autoUtxoCooldownMinutes = DefaultAutoUtxoCooldownMinutes;
     int _autoUtxoMaxBackoffMinutes = DefaultAutoUtxoMaxBackoffMinutes;
 
+    const int DefaultCheckoutInvoiceHotScanWindowHours = 72;
+
+    internal const int MinCheckoutInvoiceHotScanWindowHours = 48;
+    internal const int MaxCheckoutInvoiceHotScanWindowHours = 24 * 365 * 10;
+    internal const int CheckoutInvoiceMonitoringSafetyMarginHours = 48;
+
+    int _checkoutInvoiceHotScanWindowHours = DefaultCheckoutInvoiceHotScanWindowHours;
+
+    [JsonPropertyName("checkout_invoice_hot_scan_window_hours")]
+    public int CheckoutInvoiceHotScanWindowHours
+    {
+        get => _checkoutInvoiceHotScanWindowHours;
+        set => _checkoutInvoiceHotScanWindowHours = Math.Clamp(
+            value > 0 ? value : DefaultCheckoutInvoiceHotScanWindowHours,
+            MinCheckoutInvoiceHotScanWindowHours,
+            MaxCheckoutInvoiceHotScanWindowHours);
+    }
+
     const int DefaultMaxAutoColorableUtxos = 50;
 
     int _maxAutoColorableUtxos = DefaultMaxAutoColorableUtxos;

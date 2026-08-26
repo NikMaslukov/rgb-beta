@@ -83,6 +83,9 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
                     b.Property<long?>("ExpirationTimestamp")
                         .HasColumnType("bigint");
 
+                    b.Property<long?>("MonitoringExpirationTimestamp")
+                        .HasColumnType("bigint");
+
                     b.Property<string>("Invoice")
                         .IsRequired()
                         .HasColumnType("text");
@@ -148,6 +151,9 @@ namespace BTCPayServer.Plugins.RgbUtexo.Migrations
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("boolean");
+
+                    b.Property<string>("HotInvoiceScanCursor")
+                        .HasColumnType("text");
 
                     b.Property<string>("InvoiceScanCursor")
                         .HasColumnType("text");

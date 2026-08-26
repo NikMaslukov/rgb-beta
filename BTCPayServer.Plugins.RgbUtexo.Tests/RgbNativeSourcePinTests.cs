@@ -609,6 +609,14 @@ public class RgbNativeSourcePinTests
             ["Backup"] =
                 "NOT IN THIS CLASS: rgblib_backup returns a CResult whose inner is a COpaqueStruct, not a "
                 + "string, so there is no marshalled payload for ReadNativeResult to own or free.",
+            ["Dispose"] =
+                "MARSHALS NOTHING: rgblib_drop_wallet returns void, so there is no CResultString payload "
+                + "for ReadNativeResult to own or free. It is called on the failure path of wallet "
+                + "construction because anything that throws after the rgb-lib constructor returns would "
+                + "otherwise abandon a LIVE native wallet still holding rgb_runtime.lock — the failed Lazy "
+                + "is never IsValueCreated so the cache cannot reach it, and beta.30 declares no finalizer "
+                + "so the Rust Drop that removes that marker would never run. The next construction would "
+                + "then reclaim a live owner's marker and open a second wallet on one directory.",
             ["RestoreKeys"] =
                 "LEAKS ONE STRING PER WALLET RESTORE, deliberately not reflected: same witness_version "
                 + "literal, same derivation risk, same one-string prize as GenerateKeys."

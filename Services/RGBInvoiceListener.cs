@@ -37,6 +37,10 @@ public class RGBInvoiceListener : IHostedService
     internal const int InvoiceQueueCapacity = 256;
     internal const int InvoiceDrainBatchSize = 64;
     internal const int DurableInvoicePageSize = 64;
+    internal const int DurableInvoiceNewestSliceSize = 8;
+    internal const int DurableInvoiceHotPageSize = 24;
+    internal const int DurableInvoiceColdPageSize =
+        DurableInvoicePageSize - DurableInvoiceNewestSliceSize - DurableInvoiceHotPageSize;
     internal const int DurableWalletPageSize = 64;
     internal const int DurableAssetPageSize = 64;
     internal static readonly TimeSpan InvoiceDrainBudget = TimeSpan.FromSeconds(1);
@@ -466,6 +470,92 @@ public class RGBInvoiceListener : IHostedService
            && currentDecision.RequestCount == expectedRequestCount
            && currentDecision.UtxoSize == expectedUtxoSize;
 
+    async Task<long> ResolveHotScanFloorUnixAsync(string storeId)
+    {
+        var storeMonitoringWindow = TimeSpan.Zero;
+        try
+        {
+            var store = await _stores.FindStore(storeId);
+            if (store != null) storeMonitoringWindow = store.GetStoreBlob().MonitoringExpiration;
+        }
+        catch (Exception ex)
+        {
+            _log.LogDebug(ex,
+                "Could not read the monitoring window of store {StoreId}; using the configured hot-scan window alone",
+                storeId);
+        }
+        var window = ResolveHotScanWindow(
+            storeMonitoringWindow, _cfg.CheckoutInvoiceHotScanWindowHours);
+        return DateTimeOffset.UtcNow.ToUnixTimeSeconds() - (long)window.TotalSeconds;
+    }
+
+    internal static TimeSpan ResolveHotScanWindow(
+        TimeSpan storeMonitoringWindow, int configuredWindowHours)
+    {
+        var configured = TimeSpan.FromHours(Math.Clamp(
+            configuredWindowHours,
+            RGBConfiguration.MinCheckoutInvoiceHotScanWindowHours,
+            RGBConfiguration.MaxCheckoutInvoiceHotScanWindowHours));
+        var monitoring = storeMonitoringWindow > TimeSpan.Zero ? storeMonitoringWindow : TimeSpan.Zero;
+        var beyondMonitoring = monitoring
+            + TimeSpan.FromHours(RGBConfiguration.CheckoutInvoiceMonitoringSafetyMarginHours);
+        return configured > beyondMonitoring ? configured : beyondMonitoring;
+    }
+
+    internal static Expression<Func<RGBInvoice, bool>> CheckoutSettlementScanPredicate(string walletId)
+        => i => i.WalletId == walletId
+                && i.AssetId != null
+                && (i.Status == RGBInvoiceStatus.Pending
+                    || i.Status == RGBInvoiceStatus.WaitingConfirmations
+                    || i.Status == RGBInvoiceStatus.Underpaid);
+
+    internal static long MonitoringFloorUnix(long nowUnix)
+        => nowUnix - (long)TimeSpan
+            .FromHours(RGBConfiguration.CheckoutInvoiceMonitoringSafetyMarginHours).TotalSeconds;
+
+    internal static Expression<Func<RGBInvoice, bool>> StillPayableCheckoutPredicate(
+        long hotScanFloorUnix, long monitoringFloorUnix)
+        => i => (i.MonitoringExpirationTimestamp != null
+                    && i.MonitoringExpirationTimestamp > monitoringFloorUnix)
+                || (i.MonitoringExpirationTimestamp == null
+                    && i.ExpirationTimestamp != null
+                    && i.ExpirationTimestamp > hotScanFloorUnix);
+
+    internal static Expression<Func<RGBInvoice, bool>> BeyondPayableCheckoutPredicate(
+        long hotScanFloorUnix, long monitoringFloorUnix)
+        => i => (i.MonitoringExpirationTimestamp != null
+                    && i.MonitoringExpirationTimestamp <= monitoringFloorUnix)
+                || (i.MonitoringExpirationTimestamp == null
+                    && (i.ExpirationTimestamp == null
+                        || i.ExpirationTimestamp <= hotScanFloorUnix));
+
+    internal static IQueryable<RGBInvoice> NewestCheckoutInvoiceSlice(IQueryable<RGBInvoice> scanSet)
+        => scanSet
+            .OrderByDescending(i => i.CreatedAt)
+            .ThenByDescending(i => i.Id)
+            .Take(DurableInvoiceNewestSliceSize);
+
+    internal static IQueryable<RGBInvoice> HotCheckoutInvoicePage(
+        IQueryable<RGBInvoice> scanSet, long hotScanFloorUnix, long monitoringFloorUnix, string? cursor)
+        => AfterCursor(
+                scanSet.Where(StillPayableCheckoutPredicate(hotScanFloorUnix, monitoringFloorUnix)),
+                cursor)
+            .OrderBy(i => i.Id)
+            .Take(DurableInvoiceHotPageSize);
+
+    internal static IQueryable<RGBInvoice> ColdCheckoutInvoicePage(
+        IQueryable<RGBInvoice> scanSet, long hotScanFloorUnix, long monitoringFloorUnix, string? cursor)
+        => AfterCursor(
+                scanSet.Where(BeyondPayableCheckoutPredicate(hotScanFloorUnix, monitoringFloorUnix)),
+                cursor)
+            .OrderBy(i => i.Id)
+            .Take(DurableInvoiceColdPageSize);
+
+    static IQueryable<RGBInvoice> AfterCursor(IQueryable<RGBInvoice> tier, string? cursor)
+        => string.IsNullOrEmpty(cursor)
+            ? tier
+            : tier.Where(i => string.Compare(i.Id, cursor) > 0);
+
     async Task<bool> ProcessTransfers(string walletId, string expectedStoreId, CancellationToken ct)
     {
         await using var ctx = _db.CreateContext();
@@ -480,26 +570,33 @@ public class RGBInvoiceListener : IHostedService
             return true;
         }
 
-        var pendingQuery = ctx.RGBInvoices.Where(i => i.WalletId == walletId
-            && i.AssetId != null
-            && (i.Status == RGBInvoiceStatus.Pending
-                || i.Status == RGBInvoiceStatus.WaitingConfirmations
-                || i.Status == RGBInvoiceStatus.Underpaid));
-        if (!string.IsNullOrEmpty(wallet.InvoiceScanCursor))
-            pendingQuery = pendingQuery.Where(i => string.Compare(i.Id, wallet.InvoiceScanCursor) > 0);
-        var pending = await pendingQuery.OrderBy(i => i.Id).Take(DurableInvoicePageSize).ToListAsync(ct);
-        _log.LogInformation("ProcessTransfers: {Count} pending/waiting invoices for wallet {WalletId}", pending.Count, walletId);
+        var scanSet = ctx.RGBInvoices.Where(CheckoutSettlementScanPredicate(walletId));
+        var hotScanFloorUnix = await ResolveHotScanFloorUnixAsync(expectedStoreId);
+        var monitoringFloorUnix = MonitoringFloorUnix(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var newest = await NewestCheckoutInvoiceSlice(scanSet).ToListAsync(ct);
+        var hot = await HotCheckoutInvoicePage(
+            scanSet, hotScanFloorUnix, monitoringFloorUnix, wallet.HotInvoiceScanCursor).ToListAsync(ct);
+        var cold = await ColdCheckoutInvoicePage(
+            scanSet, hotScanFloorUnix, monitoringFloorUnix, wallet.InvoiceScanCursor).ToListAsync(ct);
+        var pending = newest.Concat(hot).Concat(cold)
+            .DistinctBy(i => i.Id, StringComparer.Ordinal).ToList();
+        _log.LogInformation(
+            "ProcessTransfers: {Count} pending/waiting invoices for wallet {WalletId} ({Newest} newest, {Hot} still-payable, {Cold} from the cold tail)",
+            pending.Count, walletId, newest.Count, hot.Count, cold.Count);
         if (pending.Count == 0)
         {
-            if (wallet.InvoiceScanCursor != null)
+            if (wallet.HotInvoiceScanCursor != null || wallet.InvoiceScanCursor != null)
             {
+                wallet.HotInvoiceScanCursor = null;
                 wallet.InvoiceScanCursor = null;
                 await ctx.SaveChangesAsync(ct);
             }
             return true;
         }
+        wallet.HotInvoiceScanCursor = DurableInvoiceScan.NextCursor(
+            hot.Select(i => i.Id).ToList(), DurableInvoiceHotPageSize);
         wallet.InvoiceScanCursor = DurableInvoiceScan.NextCursor(
-            pending.Select(i => i.Id).ToList(), DurableInvoicePageSize);
+            cold.Select(i => i.Id).ToList(), DurableInvoiceColdPageSize);
 
         var recipientIdsByAsset = pending
             .Where(i => !string.IsNullOrEmpty(i.AssetId) && !string.IsNullOrEmpty(i.RecipientId))

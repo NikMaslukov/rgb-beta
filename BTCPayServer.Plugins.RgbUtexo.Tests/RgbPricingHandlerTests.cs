@@ -123,7 +123,7 @@ public class RgbPricingHandlerTests
 
         public Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount,
             TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1,
-            CancellationToken ct = default)
+            long? monitoringExpirationTimestamp = null, CancellationToken ct = default)
         {
             RecordedAmount = amount;
             return Task.FromResult(new RGBInvoice

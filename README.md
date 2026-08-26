@@ -89,9 +89,24 @@ Alternatively, create `rgb.json` in your BTCPay Server data directory:
 {
   "rgb_base_dir": "/data",
   "native_send_timeout_seconds": 30,
-  "max_auto_colorable_utxos": 50
+  "max_auto_colorable_utxos": 50,
+  "checkout_invoice_hot_scan_window_hours": 72
 }
 ```
+
+`checkout_invoice_hot_scan_window_hours` sizes the *hot* tier of the payment-detection scan for
+invoices created before this release. Each poll the listener inspects three slices of a store's
+unfinished checkout invoices: the newest few, a page of every invoice BTCPay could still credit walked
+by a durable cursor, and a page of the older tail walked by a second cursor. An invoice created by this
+release records BTCPay's own absolute monitoring deadline, so it stays in that middle tier until two
+days past **its own** deadline however the store or that invoice's `checkout.monitoringMinutes` is set;
+an invoice created by an earlier release has no such record and falls back to its expiry plus this
+window instead. A brand-new invoice is therefore inspected on the next poll however large the history
+is, every still-payable invoice is revisited on a schedule set by how many are in flight rather than by
+how many the store has ever created, and nothing in the tail is ever left permanently unvisited. No
+checkout row is ever discarded: an unpaid one simply ages into the tail. The window is never shorter
+than the store's BTCPay **monitoring expiration** plus two days, and never shorter than 48 hours; a
+value outside those bounds is clamped, never honoured.
 
 `rgb_base_dir` is the parent of every wallet's RGB data directory, and the key name matters:
 an unrecognised key is ignored silently. If you write this file, **set `rgb_base_dir`

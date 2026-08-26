@@ -26,7 +26,7 @@ public class ReceiveAnyAssetControllerTests
         public Task<RGBWallet?> GetWalletForStoreAsync(string storeId, CancellationToken ct = default)
             => GetWalletForStoreImpl?.Invoke(storeId) ?? Task.FromResult<RGBWallet?>(null);
 
-        public Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, CancellationToken ct = default)
+        public Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, long? monitoringExpirationTimestamp = null, CancellationToken ct = default)
             => CreateInvoiceImpl?.Invoke(walletId, assetId, amount, expiration, btcPayInvoiceId, minConfirmations, ct)
                ?? throw new NotImplementedException();
 

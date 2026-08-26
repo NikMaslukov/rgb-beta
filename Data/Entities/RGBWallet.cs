@@ -32,6 +32,7 @@ public class RGBWallet
     public int MaxAllocationsPerUtxo { get; set; } = 10;
     public bool NeedsRecovery { get; set; }
     public string? InvoiceScanCursor { get; set; }
+    public string? HotInvoiceScanCursor { get; set; }
     public string? DiscoveryScanCursor { get; set; }
     public int DiscoveryAssetPage { get; set; }
 }

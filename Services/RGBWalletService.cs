@@ -554,7 +554,7 @@ public class RGBWalletService : IRGBWalletService
         return asset;
     }
 
-    public async Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, CancellationToken ct = default)
+    public async Task<RGBInvoice> CreateInvoiceAsync(string walletId, string? assetId, long? amount, TimeSpan? expiration, string? btcPayInvoiceId = null, int minConfirmations = 1, long? monitoringExpirationTimestamp = null, CancellationToken ct = default)
     {
         await GetWalletOrThrow(walletId, ct);
 
@@ -571,6 +571,7 @@ public class RGBWalletService : IRGBWalletService
             AssetId = assetId,
             Amount = amount,
             ExpirationTimestamp = resp.ExpirationTimestamp,
+            MonitoringExpirationTimestamp = monitoringExpirationTimestamp,
             BatchTransferIdx = resp.BatchTransferIdx,
             Status = RGBInvoiceStatus.Pending,
             IsBlind = true,

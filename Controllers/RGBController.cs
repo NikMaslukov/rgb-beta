@@ -28,6 +28,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Controllers;
 [Authorize(AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Cookie)]
 [AutoValidateAntiforgeryToken]
+[RefuseUnlessRouteStoreIsTheAuthorizedStore]
 [Route("stores/{storeId}/rgb")]
 public class RGBController : Controller
 {
@@ -61,7 +62,7 @@ public class RGBController : Controller
     }
 
     [HttpGet]
-    public async Task<IActionResult> Index(string storeId, bool sync = false)
+    public async Task<IActionResult> Index([FromRoute] string storeId, bool sync = false)
     {
         var wallet = await _wallets.GetWalletForStoreAsync(storeId);
         if (wallet == null)
@@ -131,7 +132,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("setup")]
-    public IActionResult Setup(string storeId)
+    public IActionResult Setup([FromRoute] string storeId)
     {
         var defaultNetwork = MapChainNameToRgbNetwork(_btcPayOptions.NetworkType);
         var networkSettings = NetworkSettings.GetForNetwork(defaultNetwork);
@@ -184,7 +185,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("setup")]
-    public async Task<IActionResult> SetupWallet(string storeId, RGBSetupViewModel model)
+    public async Task<IActionResult> SetupWallet([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
@@ -239,7 +240,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("restore")]
-    public async Task<IActionResult> RestoreWallet(string storeId, RGBSetupViewModel model)
+    public async Task<IActionResult> RestoreWallet([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
@@ -299,7 +300,7 @@ public class RGBController : Controller
 
     [HttpPost("restore-backup")]
     [RequestSizeLimit(5_242_880)]
-    public async Task<IActionResult> RestoreFromBackup(string storeId, RGBSetupViewModel model)
+    public async Task<IActionResult> RestoreFromBackup([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
             return RedirectToAction(nameof(Index), new { storeId });
@@ -399,7 +400,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("assets")]
-    public async Task<IActionResult> Assets(string storeId)
+    public async Task<IActionResult> Assets([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -414,7 +415,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("assets/issue")]
-    public async Task<IActionResult> IssueAsset(string storeId)
+    public async Task<IActionResult> IssueAsset([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -423,7 +424,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("assets/issue")]
-    public async Task<IActionResult> IssueAsset(string storeId, RGBIssueAssetViewModel model)
+    public async Task<IActionResult> IssueAsset([FromRoute] string storeId, RGBIssueAssetViewModel model)
     {
         if (!ModelState.IsValid) return View(model);
 
@@ -444,7 +445,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("utxos")]
-    public async Task<IActionResult> Utxos(string storeId)
+    public async Task<IActionResult> Utxos([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -489,7 +490,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("utxos/create")]
-    public async Task<IActionResult> CreateUtxos(string storeId)
+    public async Task<IActionResult> CreateUtxos([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -515,7 +516,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("send-btc")]
-    public async Task<IActionResult> SendBtc(string storeId)
+    public async Task<IActionResult> SendBtc([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -529,7 +530,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("send-btc")]
-    public async Task<IActionResult> SendBtc(string storeId, RGBSendBtcViewModel model)
+    public async Task<IActionResult> SendBtc([FromRoute] string storeId, RGBSendBtcViewModel model)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -590,7 +591,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("send-asset")]
-    public async Task<IActionResult> SendAsset(string storeId)
+    public async Task<IActionResult> SendAsset([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -601,7 +602,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("send-asset")]
-    public async Task<IActionResult> SendAsset(string storeId, RGBSendAssetViewModel model)
+    public async Task<IActionResult> SendAsset([FromRoute] string storeId, RGBSendAssetViewModel model)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -643,7 +644,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("btc-transactions")]
-    public async Task<IActionResult> BtcTransactions(string storeId)
+    public async Task<IActionResult> BtcTransactions([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -677,7 +678,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("transfers")]
-    public async Task<IActionResult> Transfers(string storeId, string? assetId = null)
+    public async Task<IActionResult> Transfers([FromRoute] string storeId, string? assetId = null)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -703,7 +704,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("receive-any-asset")]
-    public async Task<IActionResult> CreateReceiveAnyAsset(string storeId)
+    public async Task<IActionResult> CreateReceiveAnyAsset([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -724,7 +725,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("receive-any-asset/{rgbInvoiceId}")]
-    public async Task<IActionResult> ReceiveAnyAsset(string storeId, string rgbInvoiceId)
+    public async Task<IActionResult> ReceiveAnyAsset([FromRoute] string storeId, string rgbInvoiceId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -751,7 +752,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("refresh")]
-    public async Task<IActionResult> Refresh(string storeId)
+    public async Task<IActionResult> Refresh([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -770,7 +771,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("delete")]
-    public async Task<IActionResult> DeleteWallet(string storeId, bool acknowledgedRecoveryPhrase)
+    public async Task<IActionResult> DeleteWallet([FromRoute] string storeId, bool acknowledgedRecoveryPhrase)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -837,7 +838,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("backup")]
-    public async Task<IActionResult> BackupWallet(string storeId, string password)
+    public async Task<IActionResult> BackupWallet([FromRoute] string storeId, string password)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -867,7 +868,7 @@ public class RGBController : Controller
     }
 
     [HttpGet("settings")]
-    public async Task<IActionResult> Settings(string storeId)
+    public async Task<IActionResult> Settings([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -1049,7 +1050,7 @@ public class RGBController : Controller
 
     [HttpPost("view-seed")]
     [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-    public async Task<IActionResult> ViewSeed(string storeId, [FromForm] string password)
+    public async Task<IActionResult> ViewSeed([FromRoute] string storeId, [FromForm] string password)
     {
         var user = await _userManager.GetUserAsync(User);
         if (user == null) return Unauthorized();
@@ -1103,7 +1104,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("test-connection")]
-    public async Task<IActionResult> TestConnection(string storeId)
+    public async Task<IActionResult> TestConnection([FromRoute] string storeId)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -1122,7 +1123,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("auto-replenishment")]
-    public async Task<IActionResult> SetAutomaticReplenishmentAuthorization(string storeId, bool grant)
+    public async Task<IActionResult> SetAutomaticReplenishmentAuthorization([FromRoute] string storeId, bool grant)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
@@ -1149,7 +1150,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("settings")]
-    public async Task<IActionResult> SaveSettings(string storeId, RGBSettingsViewModel model)
+    public async Task<IActionResult> SaveSettings([FromRoute] string storeId, RGBSettingsViewModel model)
     {
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });

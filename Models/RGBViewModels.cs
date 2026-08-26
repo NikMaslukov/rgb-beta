@@ -9,6 +9,8 @@ namespace BTCPayServer.Plugins.RgbUtexo.Models;
 
 public abstract class StoreViewModel
 {
+    [BindNever]
+    [ValidateNever]
     public string StoreId { get; set; } = "";
 }
 
