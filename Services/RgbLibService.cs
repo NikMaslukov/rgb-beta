@@ -115,7 +115,7 @@ public class RgbLibService : IRgbLibService
         return RgbNativeSendLease.WithProcessGate(walletDir, () =>
         {
             // Recovery is admitted by execution-context lease ownership, never by a public bypass.
-            using var walletAccess = RgbNativeSendLease.AcquireWalletAccess(walletDir);
+            using var walletAccess = RgbNativeSendLease.AcquireWalletConstructionAccess(walletDir);
             if (RgbNativeSendLease.Exists(walletDir)
                 && !RgbNativeSendLease.IsOwnedByCurrentContext(walletDir))
                 throw new RgbWalletQuarantinedException(

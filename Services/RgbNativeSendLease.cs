@@ -16,6 +16,7 @@ internal sealed class RgbNativeSendLease : IDisposable
     internal const string ParentFileName = ".send-helper-parent";
     internal const string WorkerFileName = ".send-helper-worker";
     internal const string WalletAccessFileName = ".wallet-native-access";
+    internal const string RgbRuntimeLockFileName = "rgb_runtime.lock";
 
     static readonly StringComparer PathComparer =
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
@@ -38,11 +39,13 @@ internal sealed class RgbNativeSendLease : IDisposable
     readonly FlowOwnership? _previousOwnership;
     bool _disposed;
 
-    sealed class FlowOwnership(string walletDir, string? workerToken, FlowOwnership? previous)
+    sealed class FlowOwnership(
+        string walletDir, string? workerToken, FileStream? workerLease, FlowOwnership? previous)
     {
         internal readonly string WalletDir = walletDir;
         internal readonly FlowOwnership? Previous = previous;
         internal string? WorkerToken = workerToken;
+        internal FileStream? WorkerLease = workerLease;
         internal bool Active = true;
     }
 
@@ -92,7 +95,8 @@ internal sealed class RgbNativeSendLease : IDisposable
         if (ownedWalletDir != null)
         {
             _previousOwnership = FlowOwner.Value;
-            _ownership = new FlowOwnership(ownedWalletDir, workerToken, _previousOwnership);
+            _ownership = new FlowOwnership(
+                ownedWalletDir, workerToken, second, _previousOwnership);
             FlowOwner.Value = _ownership;
         }
     }
@@ -100,6 +104,8 @@ internal sealed class RgbNativeSendLease : IDisposable
     internal static string ParentPathFor(string walletDir) => Path.Combine(walletDir, ParentFileName);
     internal static string WorkerPathFor(string walletDir) => Path.Combine(walletDir, WorkerFileName);
     internal static string WalletAccessPathFor(string walletDir) => Path.Combine(walletDir, WalletAccessFileName);
+    internal static string RgbRuntimeLockPathFor(string walletDir) =>
+        Path.Combine(walletDir, RgbRuntimeLockFileName);
 
     // The parent file is a permanent mutex. Only the worker file is the durable "helper may run"
     // marker, so removing that marker while the parent mutex is held closes the release/delete gap.
@@ -220,14 +226,17 @@ internal sealed class RgbNativeSendLease : IDisposable
     }
 
     internal static bool IsOwnedByCurrentContext(string walletDir)
+        => CurrentOwnershipFor(walletDir) != null;
+
+    static FlowOwnership? CurrentOwnershipFor(string walletDir)
     {
         var key = Normalize(walletDir);
         for (var owner = FlowOwner.Value; owner != null; owner = owner.Previous)
         {
             if (Volatile.Read(ref owner.Active) && PathComparer.Equals(owner.WalletDir, key))
-                return true;
+                return owner;
         }
-        return false;
+        return null;
     }
 
     internal static string GetWorkerTokenForCurrentContext(string walletDir)
@@ -254,6 +263,7 @@ internal sealed class RgbNativeSendLease : IDisposable
         HardenWorkerFile(WorkerPathFor(walletDir));
         WriteWorkerToken(_second, workerToken);
         _ownership.WorkerToken = workerToken;
+        Volatile.Write(ref _ownership.WorkerLease, null);
         _second.Dispose();
         _second = null;
         return workerToken;
@@ -279,6 +289,7 @@ internal sealed class RgbNativeSendLease : IDisposable
             WriteWorkerToken(worker, NewWorkerToken());
             _ownership.WorkerToken = null;
             _second = worker;
+            Volatile.Write(ref _ownership.WorkerLease, worker);
         }
         catch
         {
@@ -296,6 +307,55 @@ internal sealed class RgbNativeSendLease : IDisposable
     internal static IDisposable AcquireWalletAccess(
         string walletDir, bool allowMarked = false, TimeSpan? wait = null) =>
         AcquireWalletAccessCore(walletDir, allowMarked, wait);
+
+    internal static IDisposable AcquireWalletConstructionAccess(
+        string walletDir, TimeSpan? wait = null)
+    {
+        var access = AcquireWalletAccessCore(walletDir, allowMarked: false, wait);
+        try
+        {
+            ReclaimRgbRuntimeLockForConstruction(walletDir);
+            return access;
+        }
+        catch
+        {
+            access.Dispose();
+            throw;
+        }
+    }
+
+    static void ReclaimRgbRuntimeLockForConstruction(string walletDir)
+    {
+        var runtimeLock = RgbRuntimeLockPathFor(walletDir);
+        if (!File.Exists(runtimeLock)) return;
+
+        if (Exists(walletDir))
+        {
+            var ownership = CurrentOwnershipFor(walletDir)
+                ?? throw new RgbWalletQuarantinedException(
+                    "native send helper may still own this wallet — refusing runtime lock reclamation");
+            var heldWorker = Volatile.Read(ref ownership.WorkerLease);
+            if (heldWorker != null)
+            {
+                WriteWorkerToken(heldWorker, NewWorkerToken());
+                ownership.WorkerToken = null;
+            }
+            else
+            {
+                using var worker = OpenExclusiveWithRetry(
+                    WorkerPathFor(walletDir), FileMode.Open, CrossProcessAccessWait);
+                VerifyWorkerToken(worker, ownership.WorkerToken
+                    ?? throw new InvalidOperationException(
+                        "the wallet lease has no worker authorization to rotate"));
+                var replacementToken = NewWorkerToken();
+                WriteWorkerToken(worker, replacementToken);
+                ownership.WorkerToken = replacementToken;
+            }
+        }
+
+        File.Delete(runtimeLock);
+        FlushDirectory(walletDir);
+    }
 
     static IDisposable AcquireWalletAccessCore(
         string walletDir, bool allowMarked, TimeSpan? wait = null)
@@ -348,6 +408,8 @@ internal sealed class RgbNativeSendLease : IDisposable
     // parent mutex remains held so no replacement recovery or send can enter the transition.
     internal void ClearActiveMarker(string walletDir)
     {
+        if (_ownership != null)
+            Volatile.Write(ref _ownership.WorkerLease, null);
         _second?.Dispose();
         _second = null;
         Delete(walletDir);
@@ -490,6 +552,8 @@ internal sealed class RgbNativeSendLease : IDisposable
         // continuation must never observe authorization during the close interval.
         if (_ownership != null)
             Volatile.Write(ref _ownership.Active, false);
+        if (_ownership != null)
+            Volatile.Write(ref _ownership.WorkerLease, null);
         _second?.Dispose();
         _second = null;
         _first.Dispose();

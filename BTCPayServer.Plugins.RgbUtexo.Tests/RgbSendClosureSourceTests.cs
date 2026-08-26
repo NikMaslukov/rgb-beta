@@ -455,7 +455,7 @@ public class RgbSendClosureSourceTests
         var walletAccess = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {
-                Name: "AcquireWalletAccess",
+                Name: "AcquireWalletConstructionAccess",
                 ContainingType.Name: "RgbNativeSendLease"
             });
         Assert.True(cachedReturn.SpanStart < processGate.SpanStart);
@@ -502,7 +502,7 @@ public class RgbSendClosureSourceTests
         var acquire = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Single(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {
-                Name: "AcquireWalletAccess",
+                Name: "AcquireWalletConstructionAccess",
                 ContainingType.Name: "RgbNativeSendLease"
             });
         Assert.Single(acquire.ArgumentList.Arguments);
