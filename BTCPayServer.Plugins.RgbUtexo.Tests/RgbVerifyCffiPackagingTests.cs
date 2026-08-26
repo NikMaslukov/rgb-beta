@@ -36,7 +36,7 @@ public class RgbVerifyCffiPackagingTests
                 File.WriteAllText(path, "// planted by PackagingProject_ExcludedFromPluginGlobs\n");
             }
 
-            var project = Path.Combine(repoRoot, "BTCPayServer.Plugins.RgbUtexoBeta.csproj");
+            var project = Path.Combine(repoRoot, "BTCPayServer.Plugins.RGB.csproj");
 
             foreach (var itemType in new[] { "Compile", "Content", "EmbeddedResource", "None" })
             {

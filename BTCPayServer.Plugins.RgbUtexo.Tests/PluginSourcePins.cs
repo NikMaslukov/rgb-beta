@@ -14,7 +14,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 /// </summary>
 internal sealed class PluginCompilation
 {
-    const string PluginAssemblyFileName = "BTCPayServer.Plugins.RgbUtexoBeta.dll";
+    const string PluginAssemblyFileName = "BTCPayServer.Plugins.RGB.dll";
 
     static readonly Lazy<PluginCompilation> Lazy = new(() => new PluginCompilation(), isThreadSafe: true);
 

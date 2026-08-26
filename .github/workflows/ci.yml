@@ -22,7 +22,7 @@ jobs:
   clean-publish-negative-control:
     runs-on: ubuntu-latest
     env:
-      PROJECT_FILE: BTCPayServer.Plugins.RgbUtexoBeta.csproj
+      PROJECT_FILE: BTCPayServer.Plugins.RGB.csproj
     steps:
       # A plain checkout, with no native build step anywhere in this job. That is the point: this is
       # what plugin-builder.btcpayserver.org compiles from, so the gate native this job publishes is
@@ -132,7 +132,7 @@ jobs:
       - name: Publish artifact (Release)
         run: |
           set -euo pipefail
-          dotnet publish BTCPayServer.Plugins.RgbUtexoBeta.csproj \
+          dotnet publish BTCPayServer.Plugins.RGB.csproj \
             -c Release \
             --no-restore \
             -p:ContinuousIntegrationBuild=true \

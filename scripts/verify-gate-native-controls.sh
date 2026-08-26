@@ -162,7 +162,7 @@ for relative in Cargo.toml Cargo.lock build.rs cbindgen.toml build-native.sh; do
   cp "$REPO_ROOT/native/rgb-verify/$relative" "$SCRATCH_ROOT/native/rgb-verify/$relative"
 done
 cp "$REPO_ROOT/scripts/pack-rgbverify.sh" "$SCRATCH_ROOT/scripts/"
-cp "$REPO_ROOT/BTCPayServer.Plugins.RgbUtexoBeta.csproj" "$SCRATCH_ROOT/"
+cp "$REPO_ROOT/BTCPayServer.Plugins.RGB.csproj" "$SCRATCH_ROOT/"
 cp "$REPO_ROOT/native/rgb-verify/gate-native-package-manifest.txt" "$SCRATCH_ROOT/native/rgb-verify/"
 PACKAGE_HASHES="$REPO_ROOT/scripts/verify-gate-native-package-hashes.sh"
 PACKAGE_MANIFEST="$SCRATCH_ROOT/native/rgb-verify/gate-native-package-manifest.txt"

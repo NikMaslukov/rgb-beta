@@ -13,7 +13,7 @@ same ID is rejected with HTTP 403**, however valid its API key is. So before a n
 * add their nuget.org account as a co-owner on the package page (Manage Owners), or
 * transfer ownership to them, or
 * publish under a different ID they own — which means changing `PackageId` in
-  `packaging/RgbVerifyCffi.csproj`, the `PackageReference` in `BTCPayServer.Plugins.RgbUtexoBeta.csproj`, and
+  `packaging/RgbVerifyCffi.csproj`, the `PackageReference` in `BTCPayServer.Plugins.RGB.csproj`, and
   regenerating both `packages.lock.json` files.
 
 Prefer owning the package through a nuget.org **organization** rather than a personal account, so
@@ -60,8 +60,8 @@ log, or a chat.
 Point the plugin at the new version and refresh the lockfiles:
 
 ```bash
-# edit BTCPayServer.Plugins.RgbUtexoBeta.csproj: <PackageReference Include="RgbVerifyCffi" Version="<VERSION>" />
-dotnet restore BTCPayServer.Plugins.RgbUtexoBeta.csproj --force-evaluate
+# edit BTCPayServer.Plugins.RGB.csproj: <PackageReference Include="RgbVerifyCffi" Version="<VERSION>" />
+dotnet restore BTCPayServer.Plugins.RGB.csproj --force-evaluate
 dotnet restore BTCPayServer.Plugins.RgbUtexo.Tests/BTCPayServer.Plugins.RgbUtexo.Tests.csproj --force-evaluate
 ```
 
@@ -72,7 +72,7 @@ Both lockfiles must be regenerated and committed together with the version chang
 Then confirm the shipped artifact really carries the package's bytes, rather than a stray local file:
 
 ```bash
-dotnet publish BTCPayServer.Plugins.RgbUtexoBeta.csproj -c Release -o <out>
+dotnet publish BTCPayServer.Plugins.RGB.csproj -c Release -o <out>
 python3 scripts/verify_plugin_artifact.py <out> \
   --provenance strict --package-cache "${NUGET_PACKAGES:-$HOME/.nuget/packages}"
 ```
