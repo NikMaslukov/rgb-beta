@@ -35,6 +35,8 @@ public class SigningPolicy
     /// gate's independent Stock scan.
     /// </summary>
     public bool RequireRgbVanillaKeychainInputs { get; set; }
+
+    public bool RequireUnfinalizedWitnessProgramInputs { get; set; }
 }
 
 public interface IRgbWalletSigner : IDisposable

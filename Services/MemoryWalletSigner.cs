@@ -69,6 +69,8 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
         CalibrateIndexCeiling(psbt);
         PopulateInputKeyPaths(psbt, network);
+        if (policy.RequireUnfinalizedWitnessProgramInputs || policy.RequireRgbVanillaKeychainInputs)
+            EnsureInputsAreUnfinalizedWitnessPrograms(psbt, cancellationToken);
         if (policy.RequireRgbVanillaKeychainInputs)
             EnsureInputsOnRgbVanillaAccount(psbt, network, cancellationToken);
         ValidateOutputs(psbt, network, policy);
@@ -379,6 +381,42 @@ public class MemoryWalletSigner : IRgbWalletSigner
         var pubKey = _masterKey.Derive(claimed).GetPublicKey();
         return pubKey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script
             || pubKey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == script;
+    }
+
+    void EnsureInputsAreUnfinalizedWitnessPrograms(PSBT psbt, CancellationToken cancellationToken)
+    {
+        for (int i = 0; i < psbt.Inputs.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var input = psbt.Inputs[i];
+
+            if (input.FinalScriptSig != null || input.FinalScriptWitness != null)
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} already carries producer-supplied final script data — refusing to sign");
+
+            var prevOut = input.GetTxOut();
+            if (prevOut == null)
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} has an unresolvable prevout — refusing to sign");
+
+            if (input.WitnessUtxo != null && input.NonWitnessUtxo != null)
+            {
+                var n = input.PrevOut.N;
+                var declared = n < input.NonWitnessUtxo.Outputs.Count
+                    ? input.NonWitnessUtxo.Outputs[(int)n]
+                    : null;
+                if (declared == null
+                    || declared.ScriptPubKey != input.WitnessUtxo.ScriptPubKey
+                    || declared.Value != input.WitnessUtxo.Value)
+                    throw new InvalidOperationException(
+                        $"PSBT input #{i} has conflicting utxo fields — refusing to sign");
+            }
+
+            var script = prevOut.ScriptPubKey;
+            if (!script.IsScriptType(ScriptType.P2WPKH) && !script.IsScriptType(ScriptType.Taproot))
+                throw new InvalidOperationException(
+                    $"PSBT input #{i} prevout is not a witness program — refusing to sign");
+        }
     }
 
     void EnsureInputsOnRgbVanillaAccount(PSBT psbt, Network network, CancellationToken cancellationToken)

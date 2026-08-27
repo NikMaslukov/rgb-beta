@@ -66,6 +66,18 @@ internal static class RgbSendRecoveryJournal
         return record;
     }
 
+    internal static bool IsUnparseable(string path)
+    {
+        if (!File.Exists(path))
+            return false;
+        try
+        {
+            Read(path);
+            return false;
+        }
+        catch (InvalidDataException) { return true; }
+    }
+
     internal static void Write(string path, RgbSendRecoveryPhase phase)
         => Write(path, new RgbSendRecoveryRecord(phase));
 

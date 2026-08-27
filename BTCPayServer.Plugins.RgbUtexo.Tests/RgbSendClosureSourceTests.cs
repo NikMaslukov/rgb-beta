@@ -113,12 +113,17 @@ public class RgbSendClosureSourceTests
                 Name: "FindOutgoingBatchStatusAsync",
                 ContainingType.Name: "RGBWalletService"
             }));
-        Assert.Single(reconcile.DescendantNodes().OfType<InvocationExpressionSyntax>(),
-            i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
+        var ackDurabilityDecisions = reconcile.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Count(i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {
                 Name: "ShouldQuarantineIncompleteAckRecovery",
                 ContainingType.Name: "RGBWalletService"
             });
+        Assert.True(ackDurabilityDecisions == 2,
+            $"exactly two ACK-durability decisions are mandated, found {ackDurabilityDecisions}: the "
+            + "phase-only journal's, and the unparseable journal reusing that same decision so it can "
+            + "never be discharged on weaker evidence than a journal that parses. A third is an "
+            + "unreviewed quarantine rule; one means an unparseable journal decides for itself.");
         Assert.Single(reconcile.DescendantNodes().OfType<InvocationExpressionSyntax>(),
             i => model.GetSymbolInfo(i).Symbol is IMethodSymbol
             {
