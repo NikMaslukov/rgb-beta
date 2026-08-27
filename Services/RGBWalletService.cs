@@ -1388,8 +1388,9 @@ public class RGBWalletService : IRGBWalletService
             if (stagingFingerprintDirs.Count > 0 && !string.IsNullOrEmpty(expectedFingerprint)
                 && !stagingFingerprintDirs.Contains(expectedFingerprint))
             {
-                _log.LogError("Mnemonic/backup mismatch: user mnemonic derives fingerprint {Expected} but backup contains {Found}",
-                    expectedFingerprint, string.Join(",", stagingFingerprintDirs));
+                _log.LogError(
+                    "Mnemonic/backup mismatch for wallet {Id}: the supplied recovery phrase derives a master fingerprint that none of the backup's {BackupFingerprintDirectoryCount} key directories match (the fingerprints themselves are withheld from logs)",
+                    wallet.Id, stagingFingerprintDirs.Count);
                 try { Directory.Delete(stagingDir, true); }
                 catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after fingerprint mismatch"); }
                 throw new InvalidOperationException(

@@ -163,30 +163,32 @@ public class RgbLibService : IRgbLibService
 
         var configJson = JsonSerializer.Serialize(walletConfig);
         var keysJson = JsonSerializer.Serialize(keysConfig);
-        RgbLibWallet wallet;
         try
         {
-            wallet = new RgbLibWallet(configJson, keysJson);
+            var wallet = new RgbLibWallet(configJson, keysJson);
+            return CreateHandleOrDisposeWallet(
+                wallet,
+                w => w.GoOnline(networkSettings.ElectrumUrl, true),
+                w =>
+                {
+                    _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
+                    return new RgbLibWalletHandle(w, walletId,
+                        Path.Combine(dataDir, masterFingerprint), _log);
+                },
+                w => w.Dispose(),
+                disposeError => _log.LogError(disposeError,
+                    "Failed to dispose the rgb-lib wallet for {WalletId} after a failed bring-online; its rgb_runtime.lock may still be on disk",
+                    walletId));
         }
         catch (Exception ex)
         {
-            _log.LogError(ex, "RgbLibWallet ctor failed. walletId={WalletId} dataDir={DataDir} fingerprint={Fingerprint} config={Config} keys={Keys}",
-                walletId, dataDir, masterFingerprint, configJson, keysJson);
-            throw;
+            var detailWithKeyMaterialRemoved = RgbNativeMessageSanitizer.Sanitize(ex.Message);
+            _log.LogError(
+                "Failed to bring up the rgb-lib wallet. walletId={WalletId} network={Network} failure={FailureType} detail={KeyMaterialSanitizedDetail}",
+                walletId, walletNetwork, ex.GetType().Name, detailWithKeyMaterialRemoved);
+            throw new RgbWalletConstructionException(
+                $"rgb-lib could not bring up wallet {walletId} on {walletNetwork} ({ex.GetType().Name}): {detailWithKeyMaterialRemoved}");
         }
-        return CreateHandleOrDisposeWallet(
-            wallet,
-            w => w.GoOnline(networkSettings.ElectrumUrl, true),
-            w =>
-            {
-                _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
-                return new RgbLibWalletHandle(w, walletId,
-                    Path.Combine(dataDir, masterFingerprint), _log);
-            },
-            w => w.Dispose(),
-            disposeError => _log.LogError(disposeError,
-                "Failed to dispose the rgb-lib wallet for {WalletId} after a failed bring-online; its rgb_runtime.lock may still be on disk",
-                walletId));
     }
 
     internal static THandle CreateHandleOrDisposeWallet<TWallet, THandle>(

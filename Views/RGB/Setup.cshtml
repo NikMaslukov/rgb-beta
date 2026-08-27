@@ -114,7 +114,7 @@
 
                             <div class="mb-3">
                                 <label class="form-label">Recovery Phrase</label>
-                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces">@Model.Mnemonic</textarea>
+                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces"></textarea>
                                 <span asp-validation-for="Mnemonic" class="text-danger"></span>
                                 <div class="form-text">Enter the BIP39 recovery phrase (seed words) of the wallet you want to restore.</div>
                             </div>
@@ -182,7 +182,7 @@
 
                             <div class="mb-3">
                                 <label class="form-label">Recovery Phrase</label>
-                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces">@(Model.IsBackupRestore ? Model.Mnemonic : "")</textarea>
+                                <textarea name="Mnemonic" class="form-control font-monospace" rows="3" placeholder="Enter your 12 or 24 word recovery phrase separated by spaces"></textarea>
                                 <span asp-validation-for="Mnemonic" class="text-danger"></span>
                                 <div class="form-text">Your seed phrase is needed to restore signing keys for the wallet.</div>
                             </div>

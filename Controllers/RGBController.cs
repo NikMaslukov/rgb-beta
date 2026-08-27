@@ -185,6 +185,7 @@ public class RGBController : Controller
     }
 
     [HttpPost("setup")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     public async Task<IActionResult> SetupWallet([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
@@ -194,13 +195,13 @@ public class RGBController : Controller
         {
             TempData[WellKnownTempData.ErrorMessage] =
                 "You must acknowledge the custodial hot-wallet risk to create a wallet.";
-            model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
         if (!ModelState.IsValid)
         {
-            model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -208,7 +209,7 @@ public class RGBController : Controller
         if (networkError != null)
         {
             TempData[WellKnownTempData.ErrorMessage] = networkError;
-            model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -234,12 +235,13 @@ public class RGBController : Controller
         catch (Exception ex)
         {
             ModelState.AddModelError("", ex.Message);
-            model.AvailableNetworks = NetworkSettings.AvailableNetworks;
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
     }
 
     [HttpPost("restore")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     public async Task<IActionResult> RestoreWallet([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
@@ -250,14 +252,14 @@ public class RGBController : Controller
             TempData[WellKnownTempData.ErrorMessage] =
                 "You must acknowledge the custodial hot-wallet risk to create a wallet.";
             model.IsRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
         if (!ValidateMnemonic(model.Mnemonic))
         {
             model.IsRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -266,7 +268,7 @@ public class RGBController : Controller
         {
             TempData[WellKnownTempData.ErrorMessage] = networkError;
             model.IsRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -293,12 +295,13 @@ public class RGBController : Controller
         {
             ModelState.AddModelError("", ex.Message);
             model.IsRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
     }
 
     [HttpPost("restore-backup")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [RequestSizeLimit(5_242_880)]
     public async Task<IActionResult> RestoreFromBackup([FromRoute] string storeId, RGBSetupViewModel model)
     {
@@ -310,14 +313,14 @@ public class RGBController : Controller
             TempData[WellKnownTempData.ErrorMessage] =
                 "You must acknowledge the custodial hot-wallet risk to create a wallet.";
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
         if (!ValidateMnemonic(model.Mnemonic))
         {
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -325,7 +328,7 @@ public class RGBController : Controller
         {
             ModelState.AddModelError("BackupFile", "Backup file is required");
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -337,7 +340,7 @@ public class RGBController : Controller
         {
             ModelState.AddModelError("BackupFile", ex.Message);
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -345,7 +348,7 @@ public class RGBController : Controller
         {
             ModelState.AddModelError("BackupPassword", "Backup password is required");
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -354,7 +357,7 @@ public class RGBController : Controller
         {
             TempData[WellKnownTempData.ErrorMessage] = networkError;
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
 
@@ -389,7 +392,7 @@ public class RGBController : Controller
         {
             ModelState.AddModelError("", $"Restore failed: {ex.Message}");
             model.IsBackupRestore = true;
-            PopulateSetupModel(model);
+            PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
         finally
@@ -1241,10 +1244,22 @@ public class RGBController : Controller
         return true;
     }
 
-    void PopulateSetupModel(RGBSetupViewModel model)
+    void PopulateSetupModelAndDropRecoverySecrets(RGBSetupViewModel model)
     {
         model.AvailableNetworks = NetworkSettings.AvailableNetworks;
         model.AllNetworkSettings = BuildAllNetworkSettings();
+        model.Mnemonic = null;
+        model.BackupPassword = null;
+        DropSubmittedValueButKeepValidationErrors(nameof(RGBSetupViewModel.Mnemonic));
+        DropSubmittedValueButKeepValidationErrors(nameof(RGBSetupViewModel.BackupPassword));
+    }
+
+    void DropSubmittedValueButKeepValidationErrors(string fieldName)
+    {
+        if (!ModelState.TryGetValue(fieldName, out var entry) || entry == null)
+            return;
+        entry.RawValue = null;
+        entry.AttemptedValue = null;
     }
 
     internal static bool ArePersistedReplenishmentFiguresValid(RGBPaymentMethodConfig? storedConfig)
