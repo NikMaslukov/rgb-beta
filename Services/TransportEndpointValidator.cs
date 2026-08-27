@@ -232,6 +232,29 @@ public static class TransportEndpointValidator
             if (bytes.Length >= 1 && bytes[0] == 0xFF)
                 throw new InvalidOperationException(
                     $"Transport endpoint resolves to multicast IPv6: {endpoint}");
+            if (IsIPv4TranslationOrTunnelPrefix(bytes))
+                throw new InvalidOperationException(
+                    $"Transport endpoint resolves to an IPv6 address that embeds or translates to an "
+                    + $"IPv4 destination, which this validator cannot check: {endpoint}");
         }
+    }
+
+    internal static bool IsIPv4TranslationOrTunnelPrefix(byte[] bytes)
+    {
+        if (bytes.Length != 16) return false;
+
+        var wellKnownNat64 = bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xFF && bytes[3] == 0x9B;
+        if (wellKnownNat64) return true;
+
+        var sixToFour = bytes[0] == 0x20 && bytes[1] == 0x02;
+        if (sixToFour) return true;
+
+        var teredo = bytes[0] == 0x20 && bytes[1] == 0x01
+                     && bytes[2] == 0x00 && bytes[3] == 0x00;
+        if (teredo) return true;
+
+        var ipv4Compatible = bytes.AsSpan(0, 12).IndexOfAnyExcept((byte)0) < 0
+                             && bytes.AsSpan(12, 4).IndexOfAnyExcept((byte)0) >= 0;
+        return ipv4Compatible;
     }
 }

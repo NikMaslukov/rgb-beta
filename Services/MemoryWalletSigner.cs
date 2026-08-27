@@ -15,6 +15,10 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
     const uint GapLimitScanBuffer = 200;
     const uint MinScanBaseline = 1000;
+    const uint OnlyKeychainBranchTheColoredDescriptorCovers = 0;
+    const uint HighestKeychainBranchSeenFromRgbLibOnTheVanillaAccount = 1;
+    const int RgbColoredAccountPrefixIndex = 2;
+    const long MaxIndexIterationsPerPsbt = 1_000_000;
     const uint MaxReasonableIndex = 100_000;
     internal const long ValueProportionalFeeCeilingFloorSats = 10_000;
     KeyPath[]? _allowedAccountPrefixes;
@@ -52,12 +56,14 @@ public class MemoryWalletSigner : IRgbWalletSigner
         if (_allowedAccountPrefixes == null || path.Indexes.Length != 5) return false;
         var chain = path.Indexes[3];
         var index = path.Indexes[4];
-        if (chain > 1) return false;
+        if (chain > HighestKeychainBranchSeenFromRgbLibOnTheVanillaAccount) return false;
         if ((index & 0x80000000) != 0 || index > MaxReasonableIndex) return false;
         var accountIndexes = path.Indexes.AsSpan()[..3];
-        foreach (var prefix in _allowedAccountPrefixes)
-            if (prefix.Indexes.AsSpan().SequenceEqual(accountIndexes))
-                return true;
+        for (var i = 0; i < _allowedAccountPrefixes.Length; i++)
+        {
+            if (!_allowedAccountPrefixes[i].Indexes.AsSpan().SequenceEqual(accountIndexes)) continue;
+            return chain <= HighestChainBranchAllowedForAccountPrefix(i);
+        }
         return false;
     }
     
@@ -68,12 +74,12 @@ public class MemoryWalletSigner : IRgbWalletSigner
         var psbt = PSBT.Parse(psbtBase64.Trim('"'), network);
 
         CalibrateIndexCeiling(psbt);
-        PopulateInputKeyPaths(psbt, network);
+        PopulateInputKeyPaths(psbt, network, cancellationToken);
         if (policy.RequireUnfinalizedWitnessProgramInputs || policy.RequireRgbVanillaKeychainInputs)
             EnsureInputsAreUnfinalizedWitnessPrograms(psbt, cancellationToken);
         if (policy.RequireRgbVanillaKeychainInputs)
             EnsureInputsOnRgbVanillaAccount(psbt, network, cancellationToken);
-        ValidateOutputs(psbt, network, policy);
+        ValidateOutputs(psbt, network, policy, cancellationToken);
         RgbSighashGuard.EnsureAllInputsAllowed(psbt);
 
         foreach (var input in psbt.Inputs)
@@ -196,30 +202,61 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
     const int MaxVerifiedScripts = 10_000;
 
-    internal bool IsOwnScript(Script script, Network network)
+    static uint HighestChainBranchAllowedForAccountPrefix(int accountPrefixIndex) =>
+        accountPrefixIndex == RgbColoredAccountPrefixIndex
+            ? OnlyKeychainBranchTheColoredDescriptorCovers
+            : HighestKeychainBranchSeenFromRgbLibOnTheVanillaAccount;
+
+    readonly record struct KeychainBranch(ExtPubKey ChainPub, KeyPath AccountPath, uint Chain);
+
+    List<KeychainBranch> EnumerateKeychainBranches(Network network)
+    {
+        var accounts = new ExtKey?[] { _vanillaAccountKey, _coloredAccountKey, _rgbColoredAccountKey };
+        var branches = new List<KeychainBranch>();
+        for (var accountPrefixIndex = 0; accountPrefixIndex < accounts.Length; accountPrefixIndex++)
+        {
+            var account = accounts[accountPrefixIndex];
+            if (account == null) continue;
+            var accountPath = account == _vanillaAccountKey
+                ? (network != Network.Main ? new KeyPath("84'/1'/0'") : new KeyPath("84'/0'/0'"))
+                : account == _coloredAccountKey
+                    ? (network != Network.Main ? new KeyPath("86'/1'/0'") : new KeyPath("86'/0'/0'"))
+                    : new KeyPath($"86'/{(network != Network.Main ? 827167 : 827166)}'/0'");
+
+            var xpub = account.Neuter();
+            var highestChain = HighestChainBranchAllowedForAccountPrefix(accountPrefixIndex);
+            for (uint chain = 0; chain <= highestChain; chain++)
+                branches.Add(new KeychainBranch(xpub.Derive(chain), accountPath, chain));
+        }
+        return branches;
+    }
+
+    uint FastScanCeiling() =>
+        Math.Max(MinScanBaseline, Volatile.Read(ref _highestVerifiedIndex) + GapLimitScanBuffer);
+
+    uint ScanCeilingFor(bool scriptIsAssertedToBeOurs) =>
+        scriptIsAssertedToBeOurs ? MaxReasonableIndex : FastScanCeiling();
+
+    internal bool IsOwnScript(Script script, Network network, bool scriptIsAssertedToBeOurs = false,
+        CancellationToken cancellationToken = default)
     {
         if (_verifiedScripts.ContainsKey(script)) return true;
 
-        var accounts = new ExtKey?[] { _vanillaAccountKey, _coloredAccountKey, _rgbColoredAccountKey };
-        foreach (var account in accounts)
+        var scanCeiling = ScanCeilingFor(scriptIsAssertedToBeOurs);
+        var branches = EnumerateKeychainBranches(network);
+        for (uint idx = 0; idx <= scanCeiling; idx++)
         {
-            if (account == null) continue;
-            var xpub = account.Neuter();
-            for (int chain = 0; chain <= 1; chain++)
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (var branch in branches)
             {
-                var chainPub = xpub.Derive((uint)chain);
-                uint scanLimit = Math.Max(MinScanBaseline, Volatile.Read(ref _highestVerifiedIndex) + GapLimitScanBuffer);
-                for (uint idx = 0; idx <= scanLimit; idx++)
+                var pubkey = branch.ChainPub.Derive(idx).PubKey;
+                if (pubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script ||
+                    pubkey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == script)
                 {
-                    var pubkey = chainPub.Derive(idx).PubKey;
-                    if (pubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script ||
-                        pubkey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == script)
-                    {
-                        if (_verifiedScripts.Count < MaxVerifiedScripts)
-                            _verifiedScripts.TryAdd(script, 0);
-                        InterlockedMax(ref _highestVerifiedIndex, idx);
-                        return true;
-                    }
+                    if (_verifiedScripts.Count < MaxVerifiedScripts)
+                        _verifiedScripts.TryAdd(script, 0);
+                    InterlockedMax(ref _highestVerifiedIndex, idx);
+                    return true;
                 }
             }
         }
@@ -238,7 +275,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
         } while (Interlocked.CompareExchange(ref location, computed, initial) != initial);
     }
 
-    void ValidateOutputs(PSBT psbt, Network network, SigningPolicy policy)
+    void ValidateOutputs(PSBT psbt, Network network, SigningPolicy policy, CancellationToken cancellationToken)
     {
         if (policy.MaxOutputCount.HasValue && psbt.Outputs.Count > policy.MaxOutputCount.Value)
             throw new InvalidOperationException(
@@ -247,7 +284,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
         if (policy.AllowedScripts != null)
         {
             foreach (var script in policy.AllowedScripts)
-                if (!IsOwnScript(script, network))
+                if (!IsOwnScript(script, network, scriptIsAssertedToBeOurs: true, cancellationToken))
                     throw new InvalidOperationException(
                         $"AllowedScripts contains address not derivable from wallet keys: {script.GetDestinationAddress(network)?.ToString() ?? script.ToHex()}");
         }
@@ -467,7 +504,10 @@ public class MemoryWalletSigner : IRgbWalletSigner
 
             if (claimed.Count == 0)
                 throw new InvalidOperationException(
-                    $"PSBT input #{i} carries no qualifying key path for this wallet — refusing to sign");
+                    $"PSBT input #{i} carries no qualifying key path for this wallet — refusing to sign. "
+                    + $"Every keychain index up to {MaxReasonableIndex} was searched, so this input's "
+                    + "script is either not derivable from this wallet's seed at all, or sits above the "
+                    + "highest index this signer will accept. Retrying will not change the outcome.");
 
             foreach (var path in claimed)
             {
@@ -481,57 +521,68 @@ public class MemoryWalletSigner : IRgbWalletSigner
         }
     }
 
-    void PopulateInputKeyPaths(PSBT psbt, Network network)
+    void PopulateInputKeyPaths(PSBT psbt, Network network, CancellationToken cancellationToken)
     {
         var fingerprint = new HDFingerprint(Convert.FromHexString(MasterFingerprint));
-        var accounts = new ExtKey?[] { _vanillaAccountKey, _coloredAccountKey, _rgbColoredAccountKey };
-
+        var inputsAwaitingAPathByScript = new Dictionary<Script, List<PSBTInput>>();
         foreach (var input in psbt.Inputs)
         {
             if (input.HDKeyPaths.Count > 0 || input.HDTaprootKeyPaths.Count > 0) continue;
             if (input.WitnessUtxo == null) continue;
             var script = input.WitnessUtxo.ScriptPubKey;
+            if (!inputsAwaitingAPathByScript.TryGetValue(script, out var sharingThisScript))
+                inputsAwaitingAPathByScript[script] = sharingThisScript = [];
+            sharingThisScript.Add(input);
+        }
+        if (inputsAwaitingAPathByScript.Count == 0) return;
 
-            foreach (var account in accounts)
+        var branches = EnumerateKeychainBranches(network);
+        var indexIterationsRemaining = MaxIndexIterationsPerPsbt;
+
+        void BindEverythingFoundInRange(uint firstIndex, uint lastIndex)
+        {
+            for (var idx = firstIndex; idx <= lastIndex && inputsAwaitingAPathByScript.Count > 0; idx++)
             {
-                if (account == null) continue;
-                var xpub = account.Neuter();
-                var accountPath = account == _vanillaAccountKey
-                    ? (network != Network.Main ? new KeyPath("84'/1'/0'") : new KeyPath("84'/0'/0'"))
-                    : account == _coloredAccountKey
-                        ? (network != Network.Main ? new KeyPath("86'/1'/0'") : new KeyPath("86'/0'/0'"))
-                        : new KeyPath($"86'/{(network != Network.Main ? 827167 : 827166)}'/0'");
+                cancellationToken.ThrowIfCancellationRequested();
+                if (indexIterationsRemaining-- <= 0) return;
 
-                for (int chain = 0; chain <= 1; chain++)
+                foreach (var branch in branches)
                 {
-                    var chainPub = xpub.Derive((uint)chain);
-                    uint scanLimit = Math.Max(MinScanBaseline, Volatile.Read(ref _highestVerifiedIndex) + GapLimitScanBuffer);
-                    for (uint idx = 0; idx <= scanLimit; idx++)
+                    var pubkey = branch.ChainPub.Derive(idx).PubKey;
+                    foreach (var candidate in new[]
+                             {
+                                 pubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey,
+                                 pubkey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey
+                             })
                     {
-                        var pubkey = chainPub.Derive(idx).PubKey;
+                        if (!inputsAwaitingAPathByScript.TryGetValue(candidate, out var awaiting)) continue;
 
-                        if (pubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script)
-                        {
-                            var fullPath = accountPath.Derive(new KeyPath($"{chain}/{idx}"));
-                            input.HDTaprootKeyPaths.Add(
-                                pubkey.GetTaprootFullPubKey(),
-                                new TaprootKeyPath(new RootedKeyPath(fingerprint, fullPath)));
-                            InterlockedMax(ref _highestVerifiedIndex, idx);
-                            goto nextInput;
-                        }
-
-                        if (pubkey.GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == script)
-                        {
-                            var fullPath = accountPath.Derive(new KeyPath($"{chain}/{idx}"));
-                            input.HDKeyPaths.Add(pubkey, new RootedKeyPath(fingerprint, fullPath));
-                            InterlockedMax(ref _highestVerifiedIndex, idx);
-                            goto nextInput;
-                        }
+                        var fullPath = branch.AccountPath.Derive(new KeyPath($"{branch.Chain}/{idx}"));
+                        foreach (var input in awaiting)
+                            AttachKeyPathForScript(input, candidate, fullPath, network, fingerprint);
+                        inputsAwaitingAPathByScript.Remove(candidate);
+                        InterlockedMax(ref _highestVerifiedIndex, idx);
                     }
                 }
             }
-            nextInput:;
         }
+
+        var fastCeiling = FastScanCeiling();
+        BindEverythingFoundInRange(0, fastCeiling);
+        if (inputsAwaitingAPathByScript.Count > 0 && fastCeiling < MaxReasonableIndex)
+            BindEverythingFoundInRange(fastCeiling + 1, MaxReasonableIndex);
+    }
+
+    void AttachKeyPathForScript(
+        PSBTInput input, Script script, KeyPath fullPath, Network network, HDFingerprint fingerprint)
+    {
+        if (_masterKey == null) return;
+        var pubkey = _masterKey.Derive(fullPath).GetPublicKey();
+        if (pubkey.GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == script)
+            input.HDTaprootKeyPaths.Add(
+                pubkey.GetTaprootFullPubKey(), new TaprootKeyPath(new RootedKeyPath(fingerprint, fullPath)));
+        else
+            input.HDKeyPaths.Add(pubkey, new RootedKeyPath(fingerprint, fullPath));
     }
 
     void SignInput(PSBT psbt, PSBTInput input)

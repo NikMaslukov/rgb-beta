@@ -189,6 +189,55 @@ public class RgbPricingHandlerTests
     }
 
     [Fact]
+    public async Task LazyPaymentMethods_RefusesTheRgbPromptInsteadOfHandingOutAnUnsettleableDestination()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, wallets) = Build(new RecordingRateSource(RgbRateResult.Ok(1m, "test")), asset);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+        ctx.InvoiceEntity.LazyPaymentMethods = true;
+
+        var refusal = await Assert.ThrowsAsync<PaymentMethodUnavailableException>(
+            () => handler.ConfigurePrompt(ctx));
+
+        Assert.Contains("lazy payment-method activation", refusal.Message);
+        Assert.True(wallets.RecordedAmount == null,
+            "the handler created an RGB invoice on the lazy activation path. BTCPay persists that prompt "
+            + "from a freshly re-read invoice blob, which discards the pricing rate this handler records, "
+            + "and every later read of the invoice then throws on the missing rate — so a customer would be "
+            + "handed a payable destination for an invoice that can never settle");
+    }
+
+    [Fact]
+    public async Task AnInvoiceThatOptedOutOfLazyActivation_IsPricedEvenWhenTheStoreDefaultIsLazy()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, wallets) = Build(new RecordingRateSource(RgbRateResult.Ok(2m, "test")), asset);
+        var store = Store(AssetA);
+        var blob = store.GetStoreBlob();
+        blob.LazyPaymentMethods = true;
+        store.SetStoreBlob(blob);
+
+        var ctx = Context(store, handler, price: 100m, currency: "USD");
+        ctx.InvoiceEntity.LazyPaymentMethods = false;
+
+        await handler.ConfigurePrompt(ctx);
+
+        Assert.Equal(50L, wallets.RecordedAmount);
+    }
+
+    [Fact]
+    public async Task EagerPaymentMethods_StillPriceTheInvoice()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, wallets) = Build(new RecordingRateSource(RgbRateResult.Ok(2m, "test")), asset);
+
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+        await handler.ConfigurePrompt(ctx);
+
+        Assert.Equal(50L, wallets.RecordedAmount);
+    }
+
+    [Fact]
     public async Task OmittedConfigWalletId_UsesTheStoresAuthoritativeActiveWallet()
     {
         var asset = AssetRow(AssetA, "USDT", 0);

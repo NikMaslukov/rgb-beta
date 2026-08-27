@@ -101,6 +101,15 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         if (!ctx.Store.GetPaymentMethodConfigs().TryGetValue(PaymentMethodId, out var configToken))
             throw new PaymentMethodUnavailableException("RGB not configured for this store");
 
+        if (ctx.InvoiceEntity.LazyPaymentMethods)
+            throw new PaymentMethodUnavailableException(
+                "RGB payments require lazy payment-method activation to be OFF for this invoice — the "
+                + "store setting \"Only enable the payment method after the user selects it\", or the "
+                + "invoice's own checkout.lazyPaymentMethods override. On the lazy activation path "
+                + "BTCPay persists the payment prompt "
+                + "from a freshly re-read invoice blob, which discards the RGB pricing rate this handler "
+                + "records, and every later read of the invoice then fails on the missing rate.");
+
         var config = ParsePaymentMethodConfig(configToken);
         try
         {

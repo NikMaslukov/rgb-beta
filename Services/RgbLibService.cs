@@ -246,7 +246,16 @@ public class RgbLibService : IRgbLibService
             return true;
         }
 
-        handle.Dispose();
+        try
+        {
+            handle.Dispose();
+        }
+        catch (Exception disposeFault)
+        {
+            log?.LogWarning(disposeFault,
+                "Wallet {WalletId} threw while disposing; falling through to the not-freed path so the cache entry is still evicted once the native wallet is released",
+                walletId);
+        }
 
         if (handle.NativeWalletFreed)
         {

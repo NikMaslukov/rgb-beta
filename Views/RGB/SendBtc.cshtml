@@ -102,7 +102,7 @@
                     </div>
 
                     <button type="submit" class="btn btn-primary" id="sendBtn"
-                            onclick="if(!this.form.reportValidity()) return false; if(!confirm('Send ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
+                            onclick="if(!this.form.reportValidity()) return false; if(!confirm(document.getElementById('Amount').value === '@Model.VanillaBalance' ? 'Send your entire spendable balance of ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?\n\nThe network fee is deducted from this amount, so the destination receives slightly less.' : 'Send ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
                         <span class="fa fa-paper-plane"></span> Send BTC
                     </button>
                 </form>
