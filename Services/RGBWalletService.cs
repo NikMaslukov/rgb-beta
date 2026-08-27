@@ -1379,6 +1379,18 @@ public class RGBWalletService : IRGBWalletService
                     $"Restored wallet data exceeds size limit ({dirSize / 1024 / 1024}MB > {diskCap / 1024 / 1024}MB)");
             }
 
+            var reservedNameUsedAsDirectory = FindDirectoryAtAReservedSingleFileName(stagingDir);
+            if (reservedNameUsedAsDirectory != null)
+            {
+                _log.LogError(
+                    "Refusing restore for wallet {Id}: the backup holds a directory at the reserved single-file name {ReservedName}, which would leave the wallet unable to send or to be deleted",
+                    wallet.Id, reservedNameUsedAsDirectory);
+                try { Directory.Delete(stagingDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after reserved name rejection"); }
+                throw new InvalidOperationException(
+                    ReservedSingleFileNameUsedAsDirectoryRefusal(reservedNameUsedAsDirectory));
+            }
+
             var expectedFingerprint = wallet.MasterFingerprint?.ToLowerInvariant();
             var stagingFingerprintDirs = Directory.GetDirectories(stagingDir)
                 .Select(d => Path.GetFileName(d).ToLowerInvariant())
@@ -1489,6 +1501,30 @@ public class RGBWalletService : IRGBWalletService
         var candidate = create();
         return Interlocked.CompareExchange(ref _restoreCooldown, candidate, null) ?? candidate;
     }
+
+    internal static readonly StringComparer ReservedNameComparerThatMatchesCaseInsensitiveFilesystems =
+        StringComparer.OrdinalIgnoreCase;
+
+    internal static string? FindDirectoryAtAReservedSingleFileName(string stagingDir)
+    {
+        if (!Directory.Exists(stagingDir)) return null;
+        foreach (var directory in Directory.EnumerateDirectories(stagingDir, "*", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(directory);
+            var reserved = RgbWalletDirectoryReservedNames.NamesThatMustBeRegularFilesNotDirectories
+                .FirstOrDefault(candidate =>
+                    ReservedNameComparerThatMatchesCaseInsensitiveFilesystems.Equals(candidate, name));
+            if (reserved != null) return reserved;
+        }
+        return null;
+    }
+
+    internal static string ReservedSingleFileNameUsedAsDirectoryRefusal(string reservedName) =>
+        $"This backup holds a directory named \"{reservedName}\". That name is reserved for a single file "
+        + "this plugin writes inside the wallet directory, so restoring the backup would produce a wallet "
+        + "that can neither send nor be deleted and would need filesystem access to repair. A backup "
+        + "produced by this plugin never contains a directory with that name. Restore a backup taken by "
+        + "this plugin, or remove that directory from the archive, then try again.";
 
     static bool CanDiscardUnparseableRecoveryJournal(string journalPath, string dbPath) =>
         RgbSendRecoveryJournal.IsUnparseable(journalPath) && File.Exists(dbPath);

@@ -436,10 +436,9 @@ internal sealed class RgbNativeSendLease : IDisposable
     static string EnsureDurableWorkerFile(string path)
     {
         var workerToken = NewWorkerToken();
-        FileStream? stream = null;
+        var stream = OpenExclusive(path, FileMode.CreateNew);
         try
         {
-            stream = OpenExclusive(path, FileMode.CreateNew);
             HardenWorkerFile(path);
             WriteWorkerToken(stream, workerToken);
             FlushDirectory(Path.GetDirectoryName(path)!);
@@ -448,7 +447,7 @@ internal sealed class RgbNativeSendLease : IDisposable
         }
         catch
         {
-            stream?.Dispose();
+            stream.Dispose();
             RollBackNewWorkerFile(path);
             throw;
         }

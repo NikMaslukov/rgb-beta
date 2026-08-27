@@ -53,15 +53,113 @@ public class RGBPluginMigrationRunner : IStartupTask
             ALTER TABLE "RGB_Assets" ADD CONSTRAINT "PK_RGB_Assets" PRIMARY KEY ("WalletId", "AssetId");
             """, cancellationToken);
 
-        await ctx.Database.ExecuteSqlRawAsync("""
-            DROP INDEX IF EXISTS "IX_RGB_Wallets_StoreId";
-            CREATE UNIQUE INDEX IF NOT EXISTS "IX_RGB_Wallets_StoreId"
-            ON "RGB_Wallets" ("StoreId") WHERE "IsActive" = true;
-            """, cancellationToken);
+        await HardenStoreWalletUniquenessAsync(
+            ct => FindDuplicateActiveStoreWalletsAsync(ctx, ct),
+            ct => ctx.Database.ExecuteSqlRawAsync(StoreWalletUniqueIndexSql, ct),
+            _log,
+            cancellationToken);
 
         await MigrateAcceptAnyAssetAsync(ctx, cancellationToken);
         await MigrateApprovedToDefaultAsync(ctx, cancellationToken);
         CleanupStaleStagingDirs();
+    }
+
+    internal const string StoreWalletUniqueIndexSql = """
+        DROP INDEX IF EXISTS "IX_RGB_Wallets_StoreId";
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_RGB_Wallets_StoreId"
+        ON "RGB_Wallets" ("StoreId") WHERE "IsActive" = true;
+        """;
+
+    internal sealed record DuplicateActiveStoreWallet(string StoreId, string WalletId);
+
+    internal static async Task<IReadOnlyList<DuplicateActiveStoreWallet>> FindDuplicateActiveStoreWalletsAsync(
+        RGBPluginDbContext ctx, CancellationToken ct)
+    {
+        var contestedStoreIds = await ctx.RGBWallets
+            .Where(w => w.IsActive)
+            .GroupBy(w => w.StoreId)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToListAsync(ct);
+
+        if (contestedStoreIds.Count == 0)
+            return [];
+
+        return await ctx.RGBWallets
+            .Where(w => w.IsActive && contestedStoreIds.Contains(w.StoreId))
+            .OrderBy(w => w.StoreId)
+            .ThenBy(w => w.Id)
+            .Select(w => new DuplicateActiveStoreWallet(w.StoreId, w.Id))
+            .ToListAsync(ct);
+    }
+
+    internal static IReadOnlyList<DuplicateActiveStoreWallet> ContestedActiveStoreWallets(
+        IReadOnlyList<DuplicateActiveStoreWallet> activeStoreWallets) =>
+        activeStoreWallets
+            .GroupBy(w => w.StoreId, StringComparer.Ordinal)
+            .Where(g => g.Skip(1).Any())
+            .SelectMany(g => g)
+            .ToList();
+
+    internal static string DescribeDuplicateActiveStoreWallets(
+        IReadOnlyList<DuplicateActiveStoreWallet> duplicates) =>
+        string.Join("; ", duplicates
+            .GroupBy(d => d.StoreId, StringComparer.Ordinal)
+            .Select(g => $"store {g.Key} -> wallets {string.Join(", ", g.Select(d => d.WalletId))}"));
+
+    internal static async Task<bool> HardenStoreWalletUniquenessAsync(
+        Func<CancellationToken, Task<IReadOnlyList<DuplicateActiveStoreWallet>>> findDuplicateActiveStoreWallets,
+        Func<CancellationToken, Task> createUniqueStoreWalletIndex,
+        ILogger log,
+        CancellationToken ct)
+    {
+        IReadOnlyList<DuplicateActiveStoreWallet> contested;
+        try
+        {
+            contested = ContestedActiveStoreWallets(await findDuplicateActiveStoreWallets(ct));
+        }
+        catch (Exception probeFault) when (probeFault is not OperationCanceledException)
+        {
+            log.LogCritical(probeFault,
+                "RGB wallet uniqueness hardening skipped: the duplicate-active-wallet probe failed, so the "
+                + "unique index IX_RGB_Wallets_StoreId was not created and BTCPay is starting WITHOUT that "
+                + "guard. Until it exists, a concurrent wallet create or restore can add a second active "
+                + "wallet to a store. The probe is retried on every restart; this startup was allowed to "
+                + "continue because aborting it would take every store on this instance offline.");
+            return false;
+        }
+
+        if (contested.Count > 0)
+        {
+            log.LogCritical(
+                "RGB wallet uniqueness hardening skipped: {StoreCount} store(s) already hold more than one "
+                + "active RGB wallet row, so the unique index IX_RGB_Wallets_StoreId cannot be created and "
+                + "BTCPay is starting WITHOUT that guard. Affected: {AffectedStoreWallets}. Operator action: "
+                + "for each store listed, open Store > RGB Settings, back up the recovery phrase of the "
+                + "wallet shown, delete the wallet that must not remain, and repeat until one active wallet "
+                + "per store is left, then restart BTCPay. Do not delete rows directly in the database: each "
+                + "row's recovery phrase is encrypted with this server's data-protection key ring and may be "
+                + "the only copy of a funded wallet.",
+                contested.Select(d => d.StoreId).Distinct(StringComparer.Ordinal).Count(),
+                DescribeDuplicateActiveStoreWallets(contested));
+            return false;
+        }
+
+        try
+        {
+            await createUniqueStoreWalletIndex(ct);
+            return true;
+        }
+        catch (Exception indexFault) when (indexFault is not OperationCanceledException)
+        {
+            log.LogCritical(indexFault,
+                "RGB wallet uniqueness hardening failed: creating the unique index IX_RGB_Wallets_StoreId "
+                + "was rejected, so BTCPay is starting WITHOUT that guard. Until it exists, a concurrent "
+                + "wallet create or restore can add a second active wallet to a store. Creation is retried "
+                + "on every restart; this startup was allowed to continue because aborting it would take "
+                + "every store on this instance offline.");
+            return false;
+        }
     }
 
     internal void CleanupStaleStagingDirs()

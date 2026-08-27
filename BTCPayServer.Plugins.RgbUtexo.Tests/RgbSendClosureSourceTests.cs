@@ -675,6 +675,32 @@ public class RgbSendClosureSourceTests
     }
 
     [Fact]
+    public void DurableWorkerPublicationRollsBackOnlyTheFileTheSameCallCreated()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree("Services/RgbNativeSendLease.cs");
+
+        foreach (var publisher in new[] { "EnsureDurableWorkerFile", "CreateDurableWorkerFile" })
+        {
+            var body = RoslynPins.BodyOf(
+                RoslynPins.Method(tree, "RgbNativeSendLease", publisher));
+            var create = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Single(i => i.ArgumentList.Arguments
+                    .Any(a => a.ToString() == "FileMode.CreateNew"));
+            var rollback = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Single(i => i.Expression.ToString() == "RollBackNewWorkerFile");
+            var guarded = rollback.Ancestors().OfType<TryStatementSyntax>().First();
+
+            Assert.False(create.Ancestors().OfType<TryStatementSyntax>().Contains(guarded),
+                $"{publisher}: the FileMode.CreateNew open must sit OUTSIDE the try whose catch calls "
+                + "RollBackNewWorkerFile. Inside it, a CreateNew that failed precisely because another "
+                + "owner already published the durable helper marker makes the rollback unlink a file "
+                + "this call never created, and the next AcquireParent retry then walks through the "
+                + "quarantine.");
+        }
+    }
+
+    [Fact]
     public void InvoiceHintsCannotBypassRefreshAndExpiryCleanup()
     {
         var source = File.ReadAllText(Path.Combine(RepoRoot(), "Services", "RGBInvoiceListener.cs"));

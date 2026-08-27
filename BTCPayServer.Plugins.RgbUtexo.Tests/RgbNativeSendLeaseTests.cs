@@ -27,6 +27,47 @@ public class RgbNativeSendLeaseTests : IDisposable
     }
 
     [Fact]
+    public void RefusedAcquireParentLeavesADurableMarkerItDidNotCreateOnDisk()
+    {
+        using (RgbNativeSendLease.AcquireParent(_walletDir)) { }
+        Assert.True(RgbNativeSendLease.Exists(_walletDir),
+            "the seeded state under test is a durable helper marker left on disk with no live handle");
+
+        Assert.Throws<IOException>(() => RgbNativeSendLease.AcquireParent(_walletDir));
+        Assert.True(RgbNativeSendLease.Exists(_walletDir),
+            "a refused AcquireParent must not unlink the durable helper marker another owner published: "
+            + "that marker is the only quarantine gate on the SendBtc path, so consuming it turns the "
+            + "operator's next retry into a send that signs and broadcasts over an unresolved wallet");
+    }
+
+    [Fact]
+    public void RetryingARefusedAcquireParentIsRefusedAgainInsteadOfUnlockingTheQuarantine()
+    {
+        using (RgbNativeSendLease.AcquireParent(_walletDir)) { }
+
+        Assert.Throws<IOException>(() => RgbNativeSendLease.AcquireParent(_walletDir));
+        Assert.Throws<IOException>(() => RgbNativeSendLease.AcquireParent(_walletDir));
+        Assert.True(RgbNativeSendLease.Exists(_walletDir),
+            "an ordinary operator retry must not discharge a durable quarantine — only reconciliation "
+            + "(AcquireRecovery plus ClearActiveMarker) may remove the marker");
+    }
+
+    [Fact]
+    public void RecoveryStillDischargesAMarkerThatAcquireParentNowRefusesToConsume()
+    {
+        using (RgbNativeSendLease.AcquireParent(_walletDir)) { }
+        Assert.Throws<IOException>(() => RgbNativeSendLease.AcquireParent(_walletDir));
+
+        using (var recovery = RgbNativeSendLease.AcquireRecovery(_walletDir))
+            recovery.ClearActiveMarker(_walletDir);
+
+        Assert.False(RgbNativeSendLease.Exists(_walletDir),
+            "the refusal must be recoverable without shell access, or a funded wallet is stranded");
+        using var reclaimed = RgbNativeSendLease.AcquireParent(_walletDir);
+        reclaimed.ClearActiveMarker(_walletDir);
+    }
+
+    [Fact]
     public void WorkerAuthorizationFileIsPrivateOnUnix()
     {
         if (OperatingSystem.IsWindows()) return;

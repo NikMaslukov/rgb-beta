@@ -78,6 +78,12 @@ public class RGBAssetsViewModel : StoreViewModel
 
 public class RGBAssetViewModel
 {
+    public const int ContractIdHeadCharsShown = 12;
+    public const int ContractIdTailCharsShown = 8;
+    public const string ContractIdElidedMiddleMarker = "…";
+    const int LongestContractIdShownWhole =
+        ContractIdHeadCharsShown + ContractIdTailCharsShown + 1;
+
     public string AssetId { get; set; } = "";
     public string Ticker { get; set; } = "";
     public string Name { get; set; } = "";
@@ -89,6 +95,19 @@ public class RGBAssetViewModel
     public string PricingCode { get; set; } = "";
     public long PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
     public long PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
+
+    public string AssetIdAbbreviatedKeepingHeadAndTail
+    {
+        get
+        {
+            var contractId = AssetId ?? "";
+            return contractId.Length <= LongestContractIdShownWhole
+                ? contractId
+                : contractId[..ContractIdHeadCharsShown]
+                  + ContractIdElidedMiddleMarker
+                  + contractId[^ContractIdTailCharsShown..];
+        }
+    }
 }
 
 public class RGBIssueAssetViewModel : StoreViewModel
