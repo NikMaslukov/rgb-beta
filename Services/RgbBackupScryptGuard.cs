@@ -63,14 +63,13 @@ public static class RgbBackupScryptGuard
     // frames emitted by beta.30 while cutting the library default by 16x.
     internal const int MaxZstandardWindowLog = 23;
 
-    static readonly ReaderOptions ArchiveOptions = new()
-    {
-        // Only formats rgb-lib beta.30 has emitted (plus Stored for simple fixtures/future-compatible
-        // archives) are available while parsing attacker-controlled data in the parent process.
-        Providers = CompressionProviderRegistry.Empty
-            .With(new DeflateCompressionProvider())
-            .With(new BoundedZstandardProvider())
-    };
+    // Only formats rgb-lib beta.30 has emitted (plus Stored for simple fixtures/future-compatible
+    // archives) are available while parsing attacker-controlled data in the parent process.
+    internal static readonly CompressionProviderRegistry BoundedProviders = CompressionProviderRegistry.Empty
+        .With(new DeflateCompressionProvider())
+        .With(new BoundedZstandardProvider());
+
+    static readonly ReaderOptions ArchiveOptions = new() { Providers = BoundedProviders };
 
     public static void ValidateFile(string backupPath, long maxMemoryBytes = DefaultMaxScryptMemoryBytes)
     {

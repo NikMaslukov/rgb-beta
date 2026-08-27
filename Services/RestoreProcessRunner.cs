@@ -29,6 +29,12 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
         string backupPath, string stagingDir, string password,
         RestoreLimits limits, CancellationToken ct)
     {
+        if (ContainsALineBreakTheSingleLineStdinTransportCannotCarry(password))
+            throw new InvalidOperationException(
+                "The restore password contains a line break (CR or LF). It is handed to the restore "
+                + "helper as a single line on standard input, which truncates it at the break, so "
+                + "decryption could only ever fail. The wallet was not restored.");
+
         var helperDll = _resolveHelperDll();
         if (!File.Exists(helperDll))
             throw new InvalidOperationException(
@@ -108,6 +114,20 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
             return new RestoreRunResult(outcome, null, "", reaped, sw.Elapsed);
         }
     }
+
+    public static bool ContainsALineBreakTheSingleLineStdinTransportCannotCarry(string? password)
+    {
+        if (password == null) return false;
+        foreach (var c in password)
+            if (c is '\n' or '\r') return true;
+        return false;
+    }
+
+    public const string BackupPasswordLineBreakRefusal =
+        "Backup password must not contain a line break (CR or LF). Restore hands the password to its "
+        + "helper as a single line on standard input, so a password containing a line break is truncated "
+        + "at the break before it is ever used and the backup could never be decrypted again. Spaces, "
+        + "tabs, punctuation and non-ASCII letters are all fine.";
 
     // Framework-dependent hosting (BTCPay prod runs `dotnet BTCPayServer.dll`, dev runs `dotnet run`)
     // makes the current process host the dotnet muxer, so `<host> exec <helper.dll>` launches the

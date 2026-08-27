@@ -164,14 +164,55 @@ public class RgbPricingSourcePinTests
         Assert.Equal("plan.PromptCurrency", Text(promptCurrency.Right));
 
         var ratesWrite = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-            .Single(a => a.Left is ElementAccessExpressionSyntax e
-                         && Text(e.Expression) == "ctx.InvoiceEntity.Rates");
-        var ratesKey = ((ElementAccessExpressionSyntax)ratesWrite.Left).ArgumentList.Arguments[0];
-        Assert.Equal("plan.RatesKey", Text(ratesKey));
+            .Single(a => Text(a.Left) == "ctx.InvoiceEntity.Rates");
+        var copy = Assert.IsType<InvocationExpressionSyntax>(ratesWrite.Right);
+        Assert.True(Text(copy.Expression) == "RatesCopyThatNoSiblingPromptCanBeEnumerating",
+            $"the pricing rate must reach Rates by REPLACING the dictionary, so that no sibling prompt "
+            + $"enumerating it concurrently can throw; it reaches it via '{Text(copy.Expression)}'");
+        Assert.True(Text(Argument(copy, "ratesKey", 1)) == "plan.RatesKey",
+            $"the Rates key must be plan.RatesKey, not '{Text(Argument(copy, "ratesKey", 1))}'");
+        Assert.True(Text(Argument(copy, "rate", 2)) == "rate.Rate",
+            $"the recorded rate must be the fetched rate the units were priced from, not "
+            + $"'{Text(Argument(copy, "rate", 2))}'");
 
         var promptDetails = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
             .Single(a => a.Left is IdentifierNameSyntax { Identifier.ValueText: "PricingCode" });
         Assert.Equal("plan.PricingCode", Text(promptDetails.Right));
+    }
+
+    [Fact]
+    public void PF3_ConfigurePrompt_NeverMutatesTheRatesDictionaryEveryConcurrentPromptShares()
+    {
+        var body = RoslynPins.BodyOf(ConfigurePrompt());
+
+        var indexerWrites = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is ElementAccessExpressionSyntax e
+                        && Text(e.Expression).EndsWith("Rates", StringComparison.Ordinal))
+            .Select(Text)
+            .ToList();
+        Assert.True(indexerWrites.Count == 0,
+            "ConfigurePrompt indexes into the Rates dictionary that every concurrent payment prompt "
+            + "shares; an in-place insert bumps its version and makes a sibling's in-flight enumeration "
+            + $"throw, dropping that prompt from the issued invoice: {string.Join("; ", indexerWrites)}");
+
+        var mutators = new[] { "Add", "Remove", "Clear", "TryAdd", "AddRate" };
+        var inPlaceCalls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => mutators.Contains(NameOf(i)))
+            .Where(i => i.Expression is MemberAccessExpressionSyntax m
+                        && (Text(m.Expression).EndsWith("Rates", StringComparison.Ordinal)
+                            || Text(m.Expression).EndsWith("InvoiceEntity", StringComparison.Ordinal)))
+            .Select(Text)
+            .ToList();
+        Assert.True(inPlaceCalls.Count == 0,
+            "ConfigurePrompt mutates the shared rate table through a method call rather than replacing "
+            + $"it: {string.Join("; ", inPlaceCalls)}");
+
+        var replacements = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => Text(a.Left) == "ctx.InvoiceEntity.Rates")
+            .ToList();
+        Assert.True(replacements.Count == 1,
+            $"the pricing rate must be recorded by exactly one whole-dictionary replacement, found "
+            + $"{replacements.Count}");
     }
 
     // P-E6 — closes the whole "rebind the local the pin reads" family in one clause. It does NOT close

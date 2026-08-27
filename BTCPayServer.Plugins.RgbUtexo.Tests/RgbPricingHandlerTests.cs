@@ -5,6 +5,7 @@ using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 using BTCPayServer.Plugins.RgbUtexo.Services;
 using BTCPayServer.Services.Invoices;
+using System.Numerics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Newtonsoft.Json.Linq;           // JObject
 using Xunit;
@@ -677,5 +678,145 @@ public class RgbPricingHandlerTests
 
         Assert.Equal(3334L, wallets.RecordedAmount);
         Assert.Equal(3334L, handler.ParsePaymentPromptDetails(ctx.Prompt.Details).AmountInAssetUnits);
+    }
+
+    [Fact]
+    public async Task ConfigurePrompt_ReplacesTheRatesInstance_BecauseEveryConcurrentPromptSharesTheOneItWasHanded()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _) = Build(new RecordingRateSource(RgbRateResult.Ok(2m, "test")), asset);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+#pragma warning disable CS0618
+        var sharedWithEverySiblingPrompt = ctx.InvoiceEntity.Rates;
+        sharedWithEverySiblingPrompt["BTC"] = 90_000m;
+        sharedWithEverySiblingPrompt["LTC"] = 80m;
+        sharedWithEverySiblingPrompt["EUR"] = 1.1m;
+
+        await handler.ConfigurePrompt(ctx);
+
+        Assert.True(!ReferenceEquals(sharedWithEverySiblingPrompt, ctx.InvoiceEntity.Rates),
+            "ConfigurePrompt mutated the dictionary instance it was handed. It runs on a post-await "
+            + "continuation inside BTCPay's CreatePaymentPrompts phase, which is Task.WhenAll over every "
+            + "payment method and hands all of them the SAME InvoiceEntity; an in-place insert bumps the "
+            + "dictionary's version while a sibling's PaymentPrompt.Calculate is enumerating it through "
+            + "RateBook's constructor, that sibling's context is marked Failed, and the invoice is issued "
+            + "to the customer with the sibling's prompt silently missing");
+        Assert.True(sharedWithEverySiblingPrompt.Count == 3,
+            $"the dictionary siblings hold gained an entry ({sharedWithEverySiblingPrompt.Count} keys)");
+        Assert.DoesNotContain(RgbPricingCode.For(AssetA), sharedWithEverySiblingPrompt.Keys);
+        Assert.Equal(2m, ctx.InvoiceEntity.Rates[RgbPricingCode.For(AssetA)]);
+        Assert.Equal(4, ctx.InvoiceEntity.Rates.Count);
+#pragma warning restore CS0618
+    }
+
+    [Fact]
+    public async Task ASiblingEnumerationInFlightAcrossConfigurePrompt_Survives_WhereARateBookConstructorWouldHaveThrown()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _) = Build(new RecordingRateSource(RgbRateResult.Ok(2m, "test")), asset);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+#pragma warning disable CS0618
+        ctx.InvoiceEntity.Rates["BTC"] = 90_000m;
+        ctx.InvoiceEntity.Rates["LTC"] = 80m;
+        ctx.InvoiceEntity.Rates["EUR"] = 1.1m;
+
+        var siblingEnumeration = ctx.InvoiceEntity.Rates.GetEnumerator();
+#pragma warning restore CS0618
+        Assert.True(siblingEnumeration.MoveNext(),
+            "the sibling's enumeration must be in flight before ConfigurePrompt runs");
+
+        await handler.ConfigurePrompt(ctx);
+
+        var seen = 1;
+        Exception? failure = null;
+        try
+        {
+            while (siblingEnumeration.MoveNext())
+                seen++;
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        Assert.True(failure is null,
+            $"the sibling's in-flight enumeration threw {failure?.GetType().Name}. This is exactly what "
+            + "BitcoinLikePaymentHandler.ConfigurePrompt hits: its own post-await continuation calls "
+            + "PaymentPrompt.Calculate, which builds a RateBook, whose constructor does "
+            + "'foreach (var rate in rates)' over this dictionary. BTCPay swallows that exception into "
+            + "ContextStatus.Failed plus one invoice-log line, so the merchant ships an invoice with no "
+            + "on-chain prompt and must void and reissue it");
+        Assert.True(seen == 3, $"the sibling's enumeration saw {seen} of the 3 entries it started with");
+    }
+
+    [Theory]
+    [InlineData(100, 3, 2, 3334L)]
+    [InlineData(100, 2.5, 2, 4000L)]
+    [InlineData(100, 3, 0, 34L)]
+    [InlineData(7, 1.3, 4, 53847L)]
+    public async Task TheUnitsDemanded_AreExactlyTheDueBTCPayDisplays_ScaledByTheAssetPrecision(
+        decimal price, decimal rate, int precision, long expectedUnits)
+    {
+        var asset = AssetRow(AssetA, "USDT", precision);
+        var (handler, wallets) = Build(new RecordingRateSource(RgbRateResult.Ok(rate, "test")), asset);
+        var ctx = Context(Store(AssetA), handler, price: price, currency: "USD");
+
+        await handler.ConfigurePrompt(ctx);
+        ctx.InvoiceEntity.UpdateTotals();
+
+        var scale = BigInteger.Pow(10, precision);
+        var displayedDue = ctx.Prompt.Calculate().TotalDue;
+        var displayedDueInUnits = (long)(displayedDue * (decimal)scale);
+
+        Assert.True(wallets.RecordedAmount == expectedUnits,
+            $"the RGB invoice demands {wallets.RecordedAmount} units, not the expected {expectedUnits}");
+        Assert.True(displayedDueInUnits == expectedUnits,
+            $"BTCPay shows {displayedDue} due, i.e. {displayedDueInUnits} units, while the RGB invoice "
+            + $"demands {expectedUnits}. PaymentPrompt.Calculate reads the rate back out of "
+            + "InvoiceEntity.Rates, so any divergence here means the invoice can settle for less than it "
+            + "asked for");
+    }
+
+    [Fact]
+    public async Task ARefusalAfterTheFetch_LeavesNoPricingEntryBehind_SoNoPartialRateIsPersisted()
+    {
+        var asset = AssetRow(AssetA, "USDT", 0);
+        var (handler, _) = Build(new RecordingRateSource(RgbRateResult.Ok(0m, "test")), asset);
+        var ctx = Context(Store(AssetA), handler, price: 100m, currency: "USD");
+#pragma warning disable CS0618
+        var before = ctx.InvoiceEntity.Rates;
+
+        await Assert.ThrowsAsync<PaymentMethodUnavailableException>(() => handler.ConfigurePrompt(ctx));
+
+        Assert.True(ReferenceEquals(before, ctx.InvoiceEntity.Rates),
+            "a refused invoice replaced the rate table anyway");
+        Assert.Empty(ctx.InvoiceEntity.Rates);
+#pragma warning restore CS0618
+    }
+
+    [Fact]
+    public void TheRatesCopy_LeavesItsInputUntouched_AndCarriesEveryEntryForward()
+    {
+        var original = new Dictionary<string, decimal> { ["BTC"] = 90_000m, ["EUR"] = 1.1m };
+
+        var copy = RGBPaymentMethodHandler.RatesCopyThatNoSiblingPromptCanBeEnumerating(
+            original, "RGB2ABC", 7m);
+
+        Assert.True(!ReferenceEquals(original, copy), "the copy is the input dictionary");
+        Assert.Equal(2, original.Count);
+        Assert.Equal(new[] { "BTC", "EUR", "RGB2ABC" }.Order(), copy.Keys.Order());
+        Assert.Equal(90_000m, copy["BTC"]);
+        Assert.Equal(1.1m, copy["EUR"]);
+        Assert.Equal(7m, copy["RGB2ABC"]);
+    }
+
+    [Fact]
+    public void TheRatesCopy_RefusesInsteadOfDroppingThePricingRate()
+    {
+        Assert.Throws<PaymentMethodUnavailableException>(() =>
+            RGBPaymentMethodHandler.RatesCopyThatNoSiblingPromptCanBeEnumerating(null, "RGB2ABC", 1m));
+        Assert.Throws<PaymentMethodUnavailableException>(() =>
+            RGBPaymentMethodHandler.RatesCopyThatNoSiblingPromptCanBeEnumerating(
+                new Dictionary<string, decimal>(), "", 1m));
     }
 }

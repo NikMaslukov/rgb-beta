@@ -185,7 +185,15 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
         ctx.Prompt.Currency = plan.PromptCurrency;
         ctx.Prompt.Divisibility = asset.Precision;
 
-        ctx.InvoiceEntity.Rates[plan.RatesKey] = rate.Rate;
+        ctx.InvoiceEntity.Rates = RatesCopyThatNoSiblingPromptCanBeEnumerating(
+            ctx.InvoiceEntity.Rates, plan.RatesKey, rate.Rate);
+
+        var rateBTCPayWillChargeAt = ctx.InvoiceEntity.GetInvoiceRate(plan.PromptCurrency);
+        if (rateBTCPayWillChargeAt != rate.Rate)
+            throw new PaymentMethodUnavailableException(
+                $"BTCPay resolves rate {rateBTCPayWillChargeAt} for {plan.PromptCurrency}, but the "
+                + $"{plan.Units} units this invoice demands were computed from {rate.Rate}. Refusing the "
+                + "invoice: a customer paying the demanded units would settle a total BTCPay never showed.");
 
         ctx.Prompt.Destination = invoice.Invoice;
         ctx.Prompt.PaymentMethodFee = 0m;
@@ -203,6 +211,25 @@ public class RGBPaymentMethodHandler : IPaymentMethodHandler
             AmountInAssetUnits = plan.Units,
             PricingCode = plan.PricingCode
         }, Serializer);
+    }
+
+    internal static Dictionary<string, decimal> RatesCopyThatNoSiblingPromptCanBeEnumerating(
+        Dictionary<string, decimal>? ratesSharedAcrossEveryConcurrentPrompt,
+        string ratesKey,
+        decimal rate)
+    {
+        if (ratesSharedAcrossEveryConcurrentPrompt is null)
+            throw new PaymentMethodUnavailableException(
+                "The invoice carries no rate table, so the RGB pricing rate cannot be recorded");
+        if (string.IsNullOrEmpty(ratesKey))
+            throw new PaymentMethodUnavailableException(
+                "The RGB pricing rate has no key, so nothing could read it back at checkout");
+
+        var copy = new Dictionary<string, decimal>(
+            ratesSharedAcrossEveryConcurrentPrompt,
+            ratesSharedAcrossEveryConcurrentPrompt.Comparer);
+        copy[ratesKey] = rate;
+        return copy;
     }
 
     public Task BeforeFetchingRates(PaymentMethodContext ctx)

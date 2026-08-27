@@ -848,6 +848,10 @@ public class RgbLibService : IRgbLibService
 
     public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
     {
+        if (RestoreProcessRunner.ContainsALineBreakTheSingleLineStdinTransportCannotCarry(password))
+            throw new InvalidOperationException(
+                RestoreProcessRunner.BackupPasswordLineBreakRefusal);
+
         var handle = await GetOrCreateWalletAsync(walletId, ct);
         var tempPath = Path.Combine(Path.GetTempPath(), $"rgb-backup-{walletId}-{Guid.NewGuid():N}.rgb");
 

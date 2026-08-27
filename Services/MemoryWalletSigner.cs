@@ -18,6 +18,7 @@ public class MemoryWalletSigner : IRgbWalletSigner
     const uint OnlyKeychainBranchTheColoredDescriptorCovers = 0;
     const uint HighestKeychainBranchSeenFromRgbLibOnTheVanillaAccount = 1;
     const int RgbColoredAccountPrefixIndex = 2;
+    const ScriptPubKeyType TheOnlyScriptTypeRgbLibDescriptorsProduce = ScriptPubKeyType.TaprootBIP86;
     const long MaxIndexIterationsPerPsbt = 1_000_000;
     const uint MaxReasonableIndex = 100_000;
     internal const long ValueProportionalFeeCeilingFloorSats = 10_000;
@@ -135,10 +136,8 @@ public class MemoryWalletSigner : IRgbWalletSigner
             if (!kp.Value.RootedKeyPath.MasterFingerprint.ToString()
                 .Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (!IsAllowedAccountPath(kp.Value.RootedKeyPath.KeyPath)) continue;
-
-            var derived = _masterKey.Derive(kp.Value.RootedKeyPath.KeyPath);
-            if (derived.GetPublicKey().GetAddress(ScriptPubKeyType.TaprootBIP86, network).ScriptPubKey == outputScript)
+            if (IsScriptRediscoverableByAnRgbLibDescriptor(
+                    outputScript, kp.Value.RootedKeyPath.KeyPath, network))
                 return true;
         }
 
@@ -147,14 +146,23 @@ public class MemoryWalletSigner : IRgbWalletSigner
             if (!kp.Value.MasterFingerprint.ToString()
                 .Equals(MasterFingerprint, StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (!IsAllowedAccountPath(kp.Value.KeyPath)) continue;
-
-            var derived = _masterKey.Derive(kp.Value.KeyPath);
-            if (derived.GetPublicKey().GetAddress(ScriptPubKeyType.Segwit, network).ScriptPubKey == outputScript)
+            if (IsScriptRediscoverableByAnRgbLibDescriptor(outputScript, kp.Value.KeyPath, network))
                 return true;
         }
 
         return false;
+    }
+
+    internal bool IsScriptRediscoverableByAnRgbLibDescriptor(
+        Script script, KeyPath claimedPath, Network network)
+    {
+        if (_masterKey == null) return false;
+        if (!IsAllowedAccountPath(claimedPath)) return false;
+        if (!TryClassifyAccount(claimedPath, out var account)) return false;
+        if (account == PrevoutAccount.UnusedBip84) return false;
+
+        return _masterKey.Derive(claimedPath).GetPublicKey()
+            .GetAddress(TheOnlyScriptTypeRgbLibDescriptorsProduce, network).ScriptPubKey == script;
     }
 
     internal bool IsRgbColoredOutput(PSBTOutput output, Script outputScript, Network network)

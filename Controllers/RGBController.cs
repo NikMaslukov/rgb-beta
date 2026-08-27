@@ -852,6 +852,12 @@ public class RGBController : Controller
             return RedirectToAction(nameof(Settings), new { storeId });
         }
 
+        if (RestoreProcessRunner.ContainsALineBreakTheSingleLineStdinTransportCannotCarry(password))
+        {
+            TempData["ErrorMessage"] = RestoreProcessRunner.BackupPasswordLineBreakRefusal;
+            return RedirectToAction(nameof(Settings), new { storeId });
+        }
+
         string? tempPath = null;
         try
         {

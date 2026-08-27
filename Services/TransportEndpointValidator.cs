@@ -226,6 +226,9 @@ public static class TransportEndpointValidator
             if (checkIp.IsIPv6LinkLocal)
                 throw new InvalidOperationException(
                     $"Transport endpoint resolves to link-local IPv6: {endpoint}");
+            if (IsIPv6SiteLocalPrefix(bytes))
+                throw new InvalidOperationException(
+                    $"Transport endpoint resolves to site-local IPv6: {endpoint}");
             if (bytes.Length >= 1 && (bytes[0] & 0xFE) == 0xFC)
                 throw new InvalidOperationException(
                     $"Transport endpoint resolves to unique-local IPv6: {endpoint}");
@@ -238,6 +241,9 @@ public static class TransportEndpointValidator
                     + $"IPv4 destination, which this validator cannot check: {endpoint}");
         }
     }
+
+    internal static bool IsIPv6SiteLocalPrefix(byte[] bytes) =>
+        bytes.Length == 16 && bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0xC0;
 
     internal static bool IsIPv4TranslationOrTunnelPrefix(byte[] bytes)
     {
