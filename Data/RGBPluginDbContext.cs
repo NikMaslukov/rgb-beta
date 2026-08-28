@@ -1,11 +1,15 @@
 using BTCPayServer.Plugins.RgbUtexo.Data.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Data;
 
 public class RGBPluginDbContext : DbContext
 {
+    static readonly ValueConverter<ulong, long> IssuedSupplyRoundTripsThroughBigintWithoutLosingBits =
+        new(supply => unchecked((long)supply), stored => unchecked((ulong)stored));
+
     public RGBPluginDbContext(DbContextOptions<RGBPluginDbContext> options) : base(options)
     {
     }
@@ -73,6 +77,8 @@ public class RGBPluginDbContext : DbContext
             entity.ToTable("RGB_Assets");
             entity.HasKey(e => new { e.WalletId, e.AssetId });
             entity.HasIndex(e => e.WalletId);
+            entity.Property(e => e.IssuedSupply)
+                .HasConversion(IssuedSupplyRoundTripsThroughBigintWithoutLosingBits);
             
             entity.HasOne(e => e.Wallet)
                 .WithMany()

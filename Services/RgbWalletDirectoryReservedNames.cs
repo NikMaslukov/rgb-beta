@@ -15,10 +15,21 @@ internal static class RgbWalletDirectoryReservedNames
         PinnedRgbLibBeta30NonWatchOnlyBdkStoreFileName
         + PinnedRgbLibBeta30BdkStoreRepairTempSuffixReReadLoadOrRecoverBdkStoreWhenBumpingRgbLib;
 
+    internal const string PinnedRgbLibBeta30SendConsignmentFileNameReReadGenConsignmentsWhenBumpingRgbLib =
+        "consignment_out";
+
+    internal const string PinnedRgbLibBeta30TransfersDirectoryNameReReadTransfersDirWhenBumpingRgbLib =
+        "transfers";
+
     internal static readonly IReadOnlyList<string> NamesWrittenByThePinnedRgbLibNotByThisPluginAndHavingNoManagedConstant =
     [
         PinnedRgbLibBeta30WatchOnlyBdkStoreRepairTempFileName,
         PinnedRgbLibBeta30NonWatchOnlyBdkStoreRepairTempFileName
+    ];
+
+    internal static readonly IReadOnlyList<string> NamesWrittenByThePinnedRgbLibsSendEndConsignmentPathAndHavingNoManagedWriter =
+    [
+        PinnedRgbLibBeta30SendConsignmentFileNameReReadGenConsignmentsWhenBumpingRgbLib
     ];
 
     internal static readonly IReadOnlyList<string> NamesThatMustBeRegularFilesNotDirectories =
@@ -28,6 +39,21 @@ internal static class RgbWalletDirectoryReservedNames
         RgbNativeSendLease.WalletAccessFileName,
         RgbNativeSendLease.RgbRuntimeLockFileName,
         RgbSendRecoveryJournal.FileName,
-        .. NamesWrittenByThePinnedRgbLibNotByThisPluginAndHavingNoManagedConstant
+        RgbSendRecoveryJournal.TransferFasciaFileName,
+        RgbSendRecoveryJournal.TransferSignedPsbtFileName,
+        .. RgbStockDurability.StockFiles,
+        .. NamesWrittenByThePinnedRgbLibNotByThisPluginAndHavingNoManagedConstant,
+        .. NamesWrittenByThePinnedRgbLibsSendEndConsignmentPathAndHavingNoManagedWriter
+    ];
+
+    internal static readonly IReadOnlyList<string>
+        NamesCreatedAsDirectoriesByThePinnedRgbLibOnlyOnPathsReachedAfterTheRestoreIsAlreadyPublished =
+    [
+        PinnedRgbLibBeta30TransfersDirectoryNameReReadTransfersDirWhenBumpingRgbLib
+    ];
+
+    internal static readonly IReadOnlyList<string> NamesThatMustBeDirectoriesNotRegularFiles =
+    [
+        .. NamesCreatedAsDirectoriesByThePinnedRgbLibOnlyOnPathsReachedAfterTheRestoreIsAlreadyPublished
     ];
 }

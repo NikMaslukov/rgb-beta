@@ -372,20 +372,25 @@ public class RgbLibService : IRgbLibService
             _walletField.SetValue(wallet, args[0]);
 
             var assetsJson = Require(ReadNativeResult(result), "list_assets");
-            var assets = JsonSerializer.Deserialize<ListAssetsResponse>(assetsJson);
-
-            return assets?.Nia?.Select(a => new RgbAsset
-            {
-                AssetId = a.AssetId ?? "",
-                Ticker = a.Ticker ?? "",
-                Name = a.Name ?? "",
-                Precision = a.Precision,
-                IssuedSupply = a.IssuedSupply,
-                Balance = a.Balance?.Settled ?? 0,
-                FutureBalance = a.Balance?.Future ?? 0,
-                SpendableBalance = a.Balance?.Spendable ?? 0
-            }).ToList() ?? [];
+            return InterpretListAssets(assetsJson);
         }, ct);
+    }
+
+    internal static List<RgbAsset> InterpretListAssets(string assetsJson)
+    {
+        var assets = JsonSerializer.Deserialize<ListAssetsResponse>(assetsJson);
+
+        return assets?.Nia?.Select(a => new RgbAsset
+        {
+            AssetId = a.AssetId ?? "",
+            Ticker = a.Ticker ?? "",
+            Name = a.Name ?? "",
+            Precision = a.Precision,
+            IssuedSupply = a.IssuedSupply,
+            Balance = a.Balance?.Settled ?? 0,
+            FutureBalance = a.Balance?.Future ?? 0,
+            SpendableBalance = a.Balance?.Spendable ?? 0
+        }).ToList() ?? [];
     }
 
     public async Task<InvoiceResponse> BlindReceiveAsync(string walletId, string? assetId, long? amount, long? expiration, int minConfirmations = 1, CancellationToken ct = default)
@@ -692,7 +697,7 @@ public class RgbLibService : IRgbLibService
                 : recipientType.Contains("\"Blind\"", StringComparison.Ordinal) ? 1 : 2;
             var issuedSupply = reader.IsDBNull(11)
                 ? 0
-                : long.TryParse(Convert.ToString(reader.GetValue(11)), out var parsedSupply)
+                : ulong.TryParse(Convert.ToString(reader.GetValue(11)), out var parsedSupply)
                     ? parsedSupply : 0;
             var matchedAsset = new RgbAsset
             {
@@ -797,7 +802,7 @@ public class RgbLibService : IRgbLibService
                 Ticker = asset?.Ticker ?? ticker,
                 Name = asset?.Name ?? name,
                 Precision = asset?.Precision ?? precision,
-                IssuedSupply = asset?.IssuedSupply ?? amounts.Sum()
+                IssuedSupply = asset?.IssuedSupply ?? checked((ulong)amounts.Sum())
             };
         }, ct);
     }
@@ -1110,15 +1115,15 @@ class AssetNiaResponse
     [JsonPropertyName("ticker")] public string? Ticker { get; set; }
     [JsonPropertyName("name")] public string? Name { get; set; }
     [JsonPropertyName("precision")] public int Precision { get; set; }
-    [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
+    [JsonPropertyName("issued_supply")] public ulong IssuedSupply { get; set; }
     [JsonPropertyName("balance")] public AssetBalanceResponse? Balance { get; set; }
 }
 
 class AssetBalanceResponse
 {
-    [JsonPropertyName("settled")] public long Settled { get; set; }
-    [JsonPropertyName("future")] public long Future { get; set; }
-    [JsonPropertyName("spendable")] public long Spendable { get; set; }
+    [JsonPropertyName("settled")] public ulong Settled { get; set; }
+    [JsonPropertyName("future")] public ulong Future { get; set; }
+    [JsonPropertyName("spendable")] public ulong Spendable { get; set; }
 }
 
 class BlindReceiveResponse
@@ -1197,7 +1202,7 @@ class IssueAssetResponse
     [JsonPropertyName("ticker")] public string? Ticker { get; set; }
     [JsonPropertyName("name")] public string? Name { get; set; }
     [JsonPropertyName("precision")] public int Precision { get; set; }
-    [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
+    [JsonPropertyName("issued_supply")] public ulong IssuedSupply { get; set; }
 }
 
 class GenerateKeysResponse

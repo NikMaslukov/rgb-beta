@@ -31,6 +31,8 @@ internal sealed record RgbSendRecoveryRecord(
 internal static class RgbSendRecoveryJournal
 {
     internal const string FileName = ".send-recovery";
+    internal const string TransferFasciaFileName = "fascia";
+    internal const string TransferSignedPsbtFileName = "signed.psbt";
     internal const int MaxBytes = 1_048_576;
 
     internal static string PathFor(string walletDataDir, string masterFingerprint) =>
@@ -141,7 +143,7 @@ internal static class RgbSendRecoveryJournal
     {
         var transferDir = ResolveTransferDir(walletDir, transactionId);
         var transfersDir = Path.GetDirectoryName(transferDir)!;
-        FsyncRequiredFile(Path.Combine(transferDir, "fascia"), "RGB transfer fascia");
+        FsyncRequiredFile(Path.Combine(transferDir, TransferFasciaFileName), "RGB transfer fascia");
         FlushDirectory(transferDir);
         FlushDirectory(transfersDir);
         FlushDirectory(walletDir);
@@ -154,8 +156,8 @@ internal static class RgbSendRecoveryJournal
     {
         FsyncPreSendEndArtifacts(walletDir, transactionId);
         var transferDir = ResolveTransferDir(walletDir, transactionId);
-        var signedPath = Path.Combine(transferDir, "signed.psbt");
-        var temporary = Path.Combine(transferDir, $".signed.psbt.{Guid.NewGuid():N}.tmp");
+        var signedPath = Path.Combine(transferDir, TransferSignedPsbtFileName);
+        var temporary = Path.Combine(transferDir, $".{TransferSignedPsbtFileName}.{Guid.NewGuid():N}.tmp");
         try
         {
             var bytes = Encoding.UTF8.GetBytes(signedPsbt);
@@ -184,7 +186,8 @@ internal static class RgbSendRecoveryJournal
     {
         if (transactionId.Length != 64 || transactionId.Any(c => !Uri.IsHexDigit(c)))
             throw new InvalidDataException("RGB recovery transaction id is invalid");
-        var transfersDir = Path.Combine(walletDir, "transfers");
+        var transfersDir = Path.Combine(walletDir,
+            RgbWalletDirectoryReservedNames.PinnedRgbLibBeta30TransfersDirectoryNameReReadTransfersDirWhenBumpingRgbLib);
         var transferDir = Path.Combine(transfersDir, transactionId);
         if (!Directory.Exists(transferDir))
             throw new DirectoryNotFoundException(

@@ -4,7 +4,7 @@ namespace BTCPayServer.Plugins.RgbUtexo.Services;
 
 public static class RgbStockDurability
 {
-    static readonly string[] StockFiles = ["index.dat", "stash.dat", "state.dat"];
+    internal static readonly IReadOnlyList<string> StockFiles = ["index.dat", "stash.dat", "state.dat"];
     // rgb-lib beta.30 selects this BDK append-log filename when the wallet is
     // watch-only (mnemonic == null), which is how the plugin always opens wallets.
     // This filename is independent from the append log's b"bdk_db" file magic.

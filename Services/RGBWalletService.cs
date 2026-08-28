@@ -1391,6 +1391,18 @@ public class RGBWalletService : IRGBWalletService
                     ReservedSingleFileNameUsedAsDirectoryRefusal(reservedNameUsedAsDirectory));
             }
 
+            var reservedNameUsedAsRegularFile = FindRegularFileAtAReservedDirectoryName(stagingDir);
+            if (reservedNameUsedAsRegularFile != null)
+            {
+                _log.LogError(
+                    "Refusing restore for wallet {Id}: the backup holds a regular file at the reserved directory name {ReservedName}, which would leave the wallet unable to send or to receive any RGB asset",
+                    wallet.Id, reservedNameUsedAsRegularFile);
+                try { Directory.Delete(stagingDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after reserved directory name rejection"); }
+                throw new InvalidOperationException(
+                    ReservedDirectoryNameUsedAsRegularFileRefusal(reservedNameUsedAsRegularFile));
+            }
+
             var expectedFingerprint = wallet.MasterFingerprint?.ToLowerInvariant();
             var stagingFingerprintDirs = Directory.GetDirectories(stagingDir)
                 .Select(d => Path.GetFileName(d).ToLowerInvariant())
@@ -1518,6 +1530,27 @@ public class RGBWalletService : IRGBWalletService
         }
         return null;
     }
+
+    internal static string? FindRegularFileAtAReservedDirectoryName(string stagingDir)
+    {
+        if (!Directory.Exists(stagingDir)) return null;
+        foreach (var file in Directory.EnumerateFiles(stagingDir, "*", SearchOption.AllDirectories))
+        {
+            var name = Path.GetFileName(file);
+            var reserved = RgbWalletDirectoryReservedNames.NamesThatMustBeDirectoriesNotRegularFiles
+                .FirstOrDefault(candidate =>
+                    ReservedNameComparerThatMatchesCaseInsensitiveFilesystems.Equals(candidate, name));
+            if (reserved != null) return reserved;
+        }
+        return null;
+    }
+
+    internal static string ReservedDirectoryNameUsedAsRegularFileRefusal(string reservedName) =>
+        $"This backup holds a regular file named \"{reservedName}\". That name is reserved for a directory "
+        + "rgb-lib creates inside the wallet directory, so restoring the backup would produce a wallet that "
+        + "could never send or receive an RGB asset again and would need filesystem access to repair. A backup "
+        + "produced by this plugin never contains a regular file with that name. Restore a backup taken by "
+        + "this plugin, or remove that file from the archive, then try again.";
 
     internal static string ReservedSingleFileNameUsedAsDirectoryRefusal(string reservedName) =>
         $"This backup holds a directory named \"{reservedName}\". That name is reserved for a single file "
@@ -2125,7 +2158,7 @@ public class RGBWalletService : IRGBWalletService
         if (asset == null)
             throw new InvalidOperationException($"Asset {resolvedAssetId[..Math.Min(20, resolvedAssetId.Length)]}... not found in wallet");
 
-        if (asset.SpendableBalance < amount)
+        if (amount < 0 || asset.SpendableBalance < (ulong)amount)
             throw new InvalidOperationException(
                 $"Insufficient {asset.Ticker} spendable balance: have {asset.SpendableBalance:N0}, need {amount:N0}");
 

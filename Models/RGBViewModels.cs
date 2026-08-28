@@ -88,13 +88,13 @@ public class RGBAssetViewModel
     public string Ticker { get; set; } = "";
     public string Name { get; set; } = "";
     public int Precision { get; set; }
-    public long IssuedSupply { get; set; }
-    public long Balance { get; set; }
-    public long FutureBalance { get; set; }
-    public long SpendableBalance { get; set; }
+    public ulong IssuedSupply { get; set; }
+    public ulong Balance { get; set; }
+    public ulong FutureBalance { get; set; }
+    public ulong SpendableBalance { get; set; }
     public string PricingCode { get; set; } = "";
-    public long PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
-    public long PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
+    public ulong PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
+    public ulong PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
 
     public string AssetIdAbbreviatedKeepingHeadAndTail
     {

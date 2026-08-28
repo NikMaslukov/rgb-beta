@@ -36,10 +36,10 @@ public class RgbAsset
     [JsonPropertyName("ticker")] public string Ticker { get; set; } = "";
     [JsonPropertyName("name")] public string Name { get; set; } = "";
     [JsonPropertyName("precision")] public int Precision { get; set; }
-    [JsonPropertyName("issued_supply")] public long IssuedSupply { get; set; }
-    public long Balance { get; set; }
-    public long FutureBalance { get; set; }
-    public long SpendableBalance { get; set; }
+    [JsonPropertyName("issued_supply")] public ulong IssuedSupply { get; set; }
+    public ulong Balance { get; set; }
+    public ulong FutureBalance { get; set; }
+    public ulong SpendableBalance { get; set; }
 }
 
 public class InvoiceResponse
