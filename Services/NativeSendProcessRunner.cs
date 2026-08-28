@@ -20,7 +20,8 @@ public sealed record NativeSendRunResult(
     string StdOut,
     string StdErr,
     bool ChildReaped,
-    TimeSpan Elapsed);
+    TimeSpan Elapsed,
+    string? HelperDllHandedToTheDotnetHost = null);
 
 public interface INativeSendProcessRunner
 {
@@ -135,7 +136,8 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
                         stdOut,
                         stdErr,
                         reaped,
-                        sw.Elapsed);
+                        sw.Elapsed,
+                        helperDll);
                 }
 
                 child.Kill(entireProcessTree: true);
@@ -143,7 +145,7 @@ public sealed class NativeSendProcessRunner : INativeSendProcessRunner
                 try { await inputTask.WaitAsync(limits.ReapGrace, CancellationToken.None); } catch { }
                 if (!childReaped)
                     _log.LogCritical("Native RGB send child could not be confirmed reaped");
-                return new NativeSendRunResult(outcome, null, "", "", childReaped, sw.Elapsed);
+                return new NativeSendRunResult(outcome, null, "", "", childReaped, sw.Elapsed, helperDll);
             }
             catch (NativeSendChildUnreapedException) { throw; }
             catch

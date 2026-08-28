@@ -76,11 +76,20 @@ RGB_NATIVE_SEND_CPU_LIMIT_SECONDS=30
 # hostile backup is still killed on whichever cap it breaches first.
 RGB_RESTORE_TIMEOUT_SECONDS=30
 RGB_RESTORE_CPU_LIMIT_SECONDS=30
+
+# Largest wallet directory a restore may unpack into its staging directory, in bytes. Accepted
+# range 52428800..4294967296; a value outside it is clamped rather than ignored. This cap is
+# measured on the wallet directory AFTER rgb-lib decompresses it, while the upload bound and
+# backup validation measure the compressed, encrypted archive, so a backup those accepted can
+# still be refused here. Raise it if a restore of a genuine, large wallet is stopped with a
+# staging size limit message; the backup file is undamaged and the restore can simply be retried.
+RGB_RESTORE_DISK_CAP_BYTES=536870912
 ```
 
-An unparseable or non-positive value for any of the four is ignored, leaving the configured value
-in place. A value above the stated range is raised to the range's maximum rather than ignored, so
-over-asking never silently leaves the 30-second default behind.
+An unparseable or non-positive value for any of the four timing knobs, or for
+`RGB_RESTORE_DISK_CAP_BYTES`, is ignored, leaving the configured value in place. A value above the
+stated range is raised to the range's maximum rather than ignored, so over-asking never silently
+leaves the 30-second default behind.
 
 ### Configuration File
 

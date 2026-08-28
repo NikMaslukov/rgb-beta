@@ -269,6 +269,176 @@ public sealed class BoundedTransferQueryTests : IDisposable
         Assert.Equal(7, match.Transfer.Amount);
     }
 
+    [Fact]
+    public async Task UiTransferListSumsEveryFungibleAssignmentInsteadOfWhicheverRowSqliteReachesFirst()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":300}"),
+            (2, 1, "{\"Fungible\":700}"));
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        Assert.True(transfer.Amount == 1000,
+            $"the Transfers page showed {transfer.Amount} of 1000. rgb-lib writes one coloring row per "
+            + "assignment and iterates a randomised HashMap doing it, so a LIMIT 1 with no ORDER BY "
+            + "reads whichever row SQLite reaches first: a short money figure that changes between "
+            + "refreshes over identical data.");
+    }
+
+    [Fact]
+    public async Task UiTransferListDoesNotCreditAReplayedAssignmentTwice()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":300}"),
+            (1, 1, "{\"Fungible\":700}"),
+            (1, 1, "{\"Fungible\":300}"),
+            (1, 1, "{\"Fungible\":700}"));
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        Assert.True(transfer.Amount == 1000,
+            $"the Transfers page showed {transfer.Amount} of 1000. set_coloring is a bare INSERT with "
+            + "no conflict clause and refresh replays the coloring write when the consignment ACK "
+            + "fails, so a plain SUM reports one payment twice; deduplicating on (txo_idx, assignment) "
+            + "is what keeps the displayed figure from over-reporting.");
+    }
+
+    [Fact]
+    public async Task UiTransferListReadsTheSameCreditWhicheverOrderTheColoringRowsWereWritten()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient-forward", status: 3,
+            (1, 1, "{\"Fungible\":11}"),
+            (2, 1, "{\"InflationRight\":9}"),
+            (3, 1, "\"NonFungible\""),
+            (4, 1, "{\"Fungible\":22}"));
+        await InsertWithColorings(2, "asset", "recipient-reverse", status: 3,
+            (1, 1, "{\"Fungible\":22}"),
+            (2, 1, "\"NonFungible\""),
+            (3, 1, "{\"InflationRight\":9}"),
+            (4, 1, "{\"Fungible\":11}"));
+
+        var transfers = await RgbLibService.QueryRecentTransfersAsync(DbPath);
+
+        Assert.Equal(2, transfers.Count);
+        Assert.All(transfers, t => Assert.Equal(33, t.Amount));
+    }
+
+    [Fact]
+    public async Task UiTransferListCreditsNoInputOrChangeColoringToAnIncomingTransfer()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":10}"),
+            (2, 1, "{\"Fungible\":20}"),
+            (3, 3, "{\"Fungible\":999999}"),
+            (4, 4, "{\"Fungible\":888888}"));
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        Assert.Equal(30, transfer.Amount);
+    }
+
+    [Fact]
+    public async Task UiTransferListDropsAssignmentsBeyondItsWorkBoundRatherThanCreditingOrWrappingThem()
+    {
+        await CreateSchema();
+        var overBound = Enumerable
+            .Range(1, RgbLibService.MaxCreditedAssignmentsPerAssetTransfer + 1)
+            .Select(i => (TxoIdx: i, Type: 1, Assignment: $"{{\"Fungible\":{i}}}"))
+            .ToArray();
+        await InsertWithColorings(1, "asset", "recipient", status: 3, overBound);
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        var boundedTotal = (long)RgbLibService.MaxCreditedAssignmentsPerAssetTransfer
+            * (RgbLibService.MaxCreditedAssignmentsPerAssetTransfer + 1) / 2;
+        Assert.Equal(boundedTotal, transfer.Amount);
+    }
+
+    [Fact]
+    public async Task UiTransferListStillReadsAnOutgoingTransferFromItsRequestedAssignment()
+    {
+        await CreateSchema();
+        await InsertOutgoing(1, "asset", "{\"Fungible\":250}");
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        Assert.Equal(250, transfer.Amount);
+        Assert.Equal(3, transfer.Kind);
+    }
+
+    [Fact]
+    public async Task UiTransferListTreatsANonFungibleOutgoingAssignmentAsZeroRatherThanFailingThePage()
+    {
+        await CreateSchema();
+        await InsertOutgoing(1, "asset", "\"NonFungible\"");
+        await InsertOutgoing(2, "asset", "{\"InflationRight\":5000}");
+        await InsertOutgoing(3, "asset", "not json at all");
+        await InsertOutgoing(4, "asset", null);
+
+        var transfers = await RgbLibService.QueryRecentTransfersAsync(DbPath);
+
+        Assert.Equal(4, transfers.Count);
+        Assert.All(transfers, t => Assert.Equal(0, t.Amount));
+    }
+
+    [Fact]
+    public async Task UiTransferListSaturatesAnOutgoingAssignmentBeyondSignedRangeInsteadOfOverReporting()
+    {
+        await CreateSchema();
+        await InsertOutgoing(1, "asset", "{\"Fungible\":18446744073709551615}");
+
+        var transfer = Assert.Single(await RgbLibService.QueryRecentTransfersAsync(DbPath));
+
+        Assert.True(transfer.Amount == long.MaxValue,
+            $"a u64 assignment past the signed range read as {transfer.Amount}. json_extract hands a "
+            + "value that does not fit an i64 back as a float, so reading the column as an integer "
+            + "either throws and takes out the whole Transfers page or lands on a rounded figure; "
+            + "clamping down to long.MaxValue never over-reports.");
+    }
+
+    [Fact]
+    public async Task UiTransferListReadsAnIncomingAndAnOutgoingRowInTheSameResultSet()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":40}"),
+            (2, 1, "{\"Fungible\":2}"));
+        await InsertOutgoing(2, "asset", "{\"Fungible\":7}");
+
+        var transfers = await RgbLibService.QueryRecentTransfersAsync(DbPath);
+
+        Assert.Equal(2, transfers.Count);
+        Assert.Equal(7, transfers.Single(t => t.Idx == 2).Amount);
+        Assert.Equal(42, transfers.Single(t => t.Idx == 1).Amount);
+    }
+
+    async Task InsertOutgoing(int idx, string assetId, string? requestedAssignment)
+    {
+        await using var connection = new SqliteConnection($"Data Source={DbPath}");
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO asset(id,ticker,name,precision,initial_supply)
+                VALUES(@asset,'TOK','Token',2,'1000');
+            INSERT INTO batch_transfer(idx,status,txid) VALUES(@idx,3,@txid);
+            INSERT INTO asset_transfer(idx,batch_transfer_idx,asset_id) VALUES(@idx,@idx,@asset);
+            INSERT INTO transfer(idx,asset_transfer_idx,incoming,recipient_type,recipient_id,requested_assignment)
+                VALUES(@idx,@idx,0,NULL,NULL,@requested);
+            """;
+        command.Parameters.AddWithValue("@asset", assetId);
+        command.Parameters.AddWithValue("@idx", idx);
+        command.Parameters.AddWithValue("@txid", idx.ToString("x64"));
+        command.Parameters.AddWithValue("@requested", (object?)requestedAssignment ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
     async Task InsertWithColorings(
         int idx, string assetId, string recipientId, int status,
         params (int TxoIdx, int Type, string Assignment)[] colorings)

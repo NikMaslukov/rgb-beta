@@ -71,6 +71,63 @@ public class RestoreExecutorTests
     }
 
     [Fact]
+    public async Task TheStagingDiskCapRefusalNamesTheLimitAndTheVariableThatRaisesIt()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.KilledDisk, null, "", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<RestoreAbortedException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.True(ex.Message.Contains("RGB_RESTORE_DISK_CAP_BYTES", StringComparison.Ordinal),
+            "This cap bounds the wallet directory AFTER decompression, while every gate that admitted "
+            + "the archive bounds the compressed, encrypted outer content, so a backup all of them "
+            + "passed can still be killed here. A store Owner has no host shell to edit rgb.json with, "
+            + "so a refusal that does not name an environment variable is a PERMANENT false REJECT of a "
+            + "funded wallet's only recovery route.");
+    }
+
+    [Fact]
+    public async Task TheStagingDiskCapRefusalReportsTheEnforcedLimitNotAnUnclampedConfigurationValue()
+    {
+        var runner = new FakeRunner
+        {
+            Result = new RestoreRunResult(RestoreOutcome.KilledDisk, null, "", ChildReaped: true)
+        };
+        var exec = new RestoreExecutor(
+            runner,
+            new RGBConfiguration(Path.GetTempPath()) { RestoreDiskCapBytes = 0 },
+            NullLogger<RestoreExecutor>.Instance);
+        var dir = StagingWithFile();
+
+        var ex = await Assert.ThrowsAsync<RestoreAbortedException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.True(
+            ex.Message.Contains(
+                $"{RGBConfiguration.RestoreDiskCapMinBytes / (1024 * 1024)} MB", StringComparison.Ordinal),
+            $"restore_disk_cap_bytes of 0 is clamped up to the floor before the watchdog ever sees it, "
+            + $"so the refusal must quote that floor. It said: {ex.Message}");
+        Assert.DoesNotContain("0MB", ex.Message);
+    }
+
+    [Fact]
+    public async Task TheRestoreTimeoutRefusalNamesTheVariableThatRaisesIt()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.TimedOut, null, "", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<RestoreAbortedException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.True(ex.Message.Contains("RGB_RESTORE_TIMEOUT_SECONDS", StringComparison.Ordinal),
+            "Raising the staging disk cap moves a large wallet's failure from the disk kill to this "
+            + "one, so this refusal has to be as actionable without host shell access as that one is.");
+    }
+
+    [Fact]
     public async Task KilledRam_ReapConfirmed_Throws_DeletesStagingDir()
     {
         var (exec, runner) = Build();
@@ -93,6 +150,91 @@ public class RestoreExecutorTests
             () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
         Assert.Contains("native boom", ex.Message);
         Assert.False(Directory.Exists(dir));
+    }
+
+    [Fact]
+    public async Task NonZeroExit_WithStderr_KeepsTheHelperTextAsTheWholeMessage_ByteForByte()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, 1, "native boom", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.Equal("Restore failed: native boom", ex.Message);
+    }
+
+    [Fact]
+    public async Task SignalDeath_LeavesEmptyStderr_AndTheRefusalStillNamesTheExitStatusAndAKnob()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, 137, "", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.True(ex.Message != "Restore failed: ",
+            "A child killed by a signal (the OOM killer, a container memory limit, or the CPU rlimit "
+            + "RestoreProcessRunner applies) writes nothing to stderr, so the redacted stderr is empty and "
+            + "this was the entire operator-facing refusal. A store Owner has no host shell, so a message "
+            + "with no cause, no exit status and no pointer to the server log is a permanent false REJECT "
+            + "of a funded wallet's backup.");
+        Assert.Contains("137", ex.Message);
+        Assert.Contains("signal 9", ex.Message);
+        Assert.Contains("RGB_RESTORE_CPU_LIMIT_SECONDS", ex.Message);
+        Assert.Contains("server log", ex.Message);
+        Assert.False(Directory.Exists(dir));
+    }
+
+    [Fact]
+    public async Task NativeErrorTextThatWasEmpty_LeavesWhitespaceOnlyStderr_AndStillGetsTheSameRefusal()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, 5, "\n   \r\n", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.True(ex.Message.Contains("exit status 5", StringComparison.Ordinal),
+            "RgbRestoreHelper writes the native error text with WriteLine, so a non-zero native return "
+            + "carrying an empty error string leaves stderr holding only a line break. Whitespace is as "
+            + "unactionable as emptiness and must reach the same fallback, not be pasted in as the refusal.");
+        Assert.DoesNotContain("signal", ex.Message);
+        Assert.Contains("RGB_RESTORE_CPU_LIMIT_SECONDS", ex.Message);
+    }
+
+    [Fact]
+    public async Task UnreadExitStatus_WithNoStderr_IsDescribedRatherThanLeftAsAnEmptyGap()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, null, "", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.Contains("could not read", ex.Message);
+        Assert.Contains("server log", ex.Message);
+        Assert.DoesNotContain("signal", ex.Message);
+    }
+
+    [Fact]
+    public async Task RefusalForAStderrlessExit_NamesNoHostPath_BecauseAStoreOwnerSeesItVerbatim()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, 137, "", ChildReaped: true,
+            HelperDllHandedToTheDotnetHost: "/Users/someone/plugins/RgbRestoreHelper.dll");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.DoesNotContain("/Users/", ex.Message);
+        Assert.DoesNotContain(dir, ex.Message);
+        Assert.DoesNotContain(".btcpayserver", ex.Message);
     }
 
     [Fact]

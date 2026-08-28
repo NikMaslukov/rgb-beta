@@ -9,10 +9,21 @@ namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 public sealed class FakeRgbLib : IRgbLibService
 {
     readonly RGBConfiguration _cfg;
-    public FakeRgbLib(RGBConfiguration cfg) => _cfg = cfg;
+    readonly string _masterFingerprintKeyDerivationYields;
+
+    public FakeRgbLib(RGBConfiguration cfg, string masterFingerprintKeyDerivationYields = "00000000")
+    {
+        _cfg = cfg;
+        _masterFingerprintKeyDerivationYields = masterFingerprintKeyDerivationYields;
+    }
 
     public RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network)
-        => new() { AccountXpubVanilla = "v", AccountXpubColored = "c", MasterFingerprint = "00000000" };
+        => new()
+        {
+            AccountXpubVanilla = "v",
+            AccountXpubColored = "c",
+            MasterFingerprint = _masterFingerprintKeyDerivationYields
+        };
 
     public string GetWalletDataDir(string walletId, string walletNetwork)
         => _cfg.GetWalletDataDir(walletId, walletNetwork);

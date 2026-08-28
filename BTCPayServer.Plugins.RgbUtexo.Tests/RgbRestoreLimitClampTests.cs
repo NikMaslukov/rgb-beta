@@ -1,3 +1,6 @@
+using System.Linq;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using BTCPayServer.Plugins.RgbUtexo;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
@@ -88,7 +91,9 @@ public class RgbRestoreLimitClampTests
         Assert.True(
             RGBConfiguration.RestoreDiskCapMinBytes
                 >= Services.RgbBackupValidator.MaxTotalUncompressedBytes,
-            "a staging byte cap under what RgbBackupValidator admits refuses content already validated");
+            "the decompressed wallet directory is never smaller than the compressed, encrypted archive "
+            + "RgbBackupValidator measured, so this is the NECESSARY minimum for the staging cap and "
+            + "never a sufficient one; covering the expansion is what the shipped default is for");
     }
 
     [Fact]
@@ -99,6 +104,73 @@ public class RgbRestoreLimitClampTests
             name == "RGB_RESTORE_RAM_CAP_BYTES" ? "1073741824" : null);
 
         Assert.Equal(1_073_741_824, cfg.ToRestoreLimits().RamCapBytes);
+    }
+
+    [Fact]
+    public void TheRestoreStagingDiskCapIsReachableFromTheEnvironmentSoAFalseRejectIsRecoverable()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, name =>
+            name == "RGB_RESTORE_DISK_CAP_BYTES" ? "1073741824" : null);
+
+        Assert.True(cfg.ToRestoreLimits().DiskCapBytes == 1_073_741_824,
+            "The staging disk cap is measured on the FULLY DECOMPRESSED wallet directory, while the "
+            + "upload bound, RgbBackupValidator and its measured-inflation pass all measure the "
+            + "compressed, encrypted outer archive. Those differ by the compression ratio, so this is "
+            + "the restore cap most likely to refuse a real funded wallet, and it was the only one an "
+            + "operator could not raise without host filesystem access to rgb.json. RGB stock is "
+            + "client-side: that archive is the only recovery route for the assets.");
+    }
+
+    [Fact]
+    public void AnEnvironmentRestoreStagingDiskCapBelowTheFloorIsClampedUpNotIgnored()
+    {
+        var cfg = new RGBConfiguration { RestoreDiskCapBytes = 3_221_225_472 };
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, name =>
+            name == "RGB_RESTORE_DISK_CAP_BYTES" ? "1" : null);
+
+        Assert.Equal(RGBConfiguration.RestoreDiskCapMinBytes, cfg.RestoreDiskCapBytes);
+    }
+
+    [Fact]
+    public void AnEnvironmentRestoreStagingDiskCapAboveTheCeilingIsClampedDownNotIgnored()
+    {
+        var cfg = new RGBConfiguration();
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, name =>
+            name == "RGB_RESTORE_DISK_CAP_BYTES" ? "99999999999999" : null);
+
+        Assert.Equal(RGBConfiguration.RestoreDiskCapMaxBytes, cfg.RestoreDiskCapBytes);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("")]
+    [InlineData("x")]
+    [InlineData("12.5")]
+    public void ANonPositiveOrUnparseableStagingDiskCapLeavesTheConfiguredValue(string raw)
+    {
+        var cfg = new RGBConfiguration { RestoreDiskCapBytes = 3_221_225_472 };
+        RGBPlugin.ApplyEnvironmentOverrides(cfg, name =>
+            name == "RGB_RESTORE_DISK_CAP_BYTES" ? raw : null);
+
+        Assert.Equal(3_221_225_472, cfg.RestoreDiskCapBytes);
+    }
+
+    [Fact]
+    public void TheShippedStagingDiskCapCoversTheDecompressedFormOfEveryArchiveTheEarlierGatesAdmit()
+    {
+        var shipped = new RGBConfiguration().RestoreDiskCapBytes;
+
+        Assert.True(shipped >= Services.RgbBackupValidator.MaxTotalUncompressedBytes * 10,
+            $"The shipped staging cap is {shipped / (1024 * 1024)} MB, measured on the wallet directory "
+            + "AFTER rgb-lib decompresses it. RgbBackupValidator admits "
+            + $"{Services.RgbBackupValidator.MaxTotalUncompressedBytes / (1024 * 1024)} MB of OUTER "
+            + "archive content, and that content is the zstd-compressed, encrypted wallet zip, so an "
+            + "admitted archive expands by its compression ratio. SQLite and the RGB stock compress "
+            + "well past 10:1, so a cap that does not clear that multiple kills restores that passed "
+            + "the upload bound, validation, the measured-inflation pass and the scrypt guard — a "
+            + "permanent false REJECT of a funded wallet, which is fund loss.");
     }
 
     [Fact]
@@ -113,5 +185,29 @@ public class RgbRestoreLimitClampTests
 
         Assert.Equal(RGBConfiguration.RestoreRamMinBytes, low.RestoreRamCapBytes);
         Assert.Equal(RGBConfiguration.RestoreRamMaxBytes, high.RestoreRamCapBytes);
+    }
+
+    [Fact]
+    public void NoRestoreDiskCapReadBypassesTheClampThatTheChildWatchdogAlreadyApplies()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(Path.Combine("Services", "RGBWalletService.cs"));
+
+        var unclampedReads = tree.GetRoot()
+            .DescendantNodes()
+            .OfType<MemberAccessExpressionSyntax>()
+            .Where(access => access.Name.Identifier.Text == nameof(RGBConfiguration.RestoreDiskCapBytes))
+            .Where(access => access.Expression is IdentifierNameSyntax { Identifier.Text: "_cfg" })
+            .Select(access => tree.GetLineSpan(access.Span).StartLinePosition.Line + 1)
+            .ToList();
+
+        Assert.True(unclampedReads.Count == 0,
+            "Services/RGBWalletService.cs reads _cfg.RestoreDiskCapBytes directly at line(s) "
+            + string.Join(", ", unclampedReads)
+            + ", bypassing the Math.Clamp that ToRestoreLimits() applies. The child watchdog enforces the "
+            + "CLAMPED cap, so a direct read makes the post-restore gate refuse at a different number than "
+            + "the one actually enforced: restore_disk_cap_bytes below the floor then refuses every restore "
+            + "of a funded wallet while quoting a limit no operator can act on. Read it through "
+            + "_cfg.ToRestoreLimits().DiskCapBytes instead.");
     }
 }

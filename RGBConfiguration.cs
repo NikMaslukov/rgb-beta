@@ -81,7 +81,7 @@ public class RGBConfiguration
     public int RestoreTimeoutSeconds { get; set; } = 30;
 
     [JsonPropertyName("restore_disk_cap_bytes")]
-    public long RestoreDiskCapBytes { get; set; } = 52_428_800;
+    public long RestoreDiskCapBytes { get; set; } = 536_870_912;
 
     [JsonPropertyName("restore_upload_max_bytes")]
     public long RestoreUploadMaxBytes { get; set; } = RestoreUploadBoundMinBytes;
@@ -145,8 +145,10 @@ public class RGBConfiguration
     // Floors on the restore side are the false-REJECT direction, and restore is the recovery path:
     // a bound below what an honest backup demonstrably needs refuses every restore, which is fund
     // loss, while a bound above the shipped default only widens a DoS window the other caps still
-    // close. RgbBackupValidator admits up to MaxTotalUncompressedBytes (50 MiB) of uncompressed
-    // content, so a staging byte cap under that can refuse what validation passed; the scrypt ceiling
+    // close. RgbBackupValidator admits up to MaxTotalUncompressedBytes (50 MiB) of OUTER-archive
+    // content, and that content is the zstd-compressed, encrypted wallet zip, so the wallet directory
+    // rgb-lib expands into the staging dir is always larger by the compression ratio: this floor is the
+    // NECESSARY minimum for a staging byte cap and never a sufficient one; the scrypt ceiling
     // the pre-flight guard admits is DefaultMaxScryptMemoryBytes, so a RAM cap under that kills a
     // backup the guard just passed (tightening the real bound is what RestoreScryptMemoryCapBytes
     // is for); and an rgb-lib wallet directory is a few dozen files, so 1 000 entries is far above

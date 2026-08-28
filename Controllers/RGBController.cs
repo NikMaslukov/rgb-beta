@@ -452,11 +452,10 @@ public class RGBController : Controller
         var wallet = await RequireWallet(storeId);
         if (wallet == null) return RedirectToAction(nameof(Setup), new { storeId });
 
+        RgbAsset asset;
         try
         {
-            var asset = await _wallets.IssueAssetAsync(wallet.Id, model.Ticker, model.Name, model.Amount, model.Precision);
-            TempData["SuccessMessage"] = $"Issued {asset.Ticker} ({asset.AssetId[..20]}...)";
-            return RedirectToAction(nameof(Assets), new { storeId });
+            asset = await _wallets.IssueAssetAsync(wallet.Id, model.Ticker, model.Name, model.Amount, model.Precision);
         }
         catch (Exception ex)
         {
@@ -465,6 +464,10 @@ public class RGBController : Controller
                 ex, $"Failed to issue asset. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             return View(model);
         }
+
+        TempData["SuccessMessage"] =
+            $"Issued {asset.Ticker} ({RGBAssetViewModel.AbbreviateContractIdKeepingHeadAndTail(asset.AssetId)})";
+        return RedirectToAction(nameof(Assets), new { storeId });
     }
 
     [HttpGet("utxos")]

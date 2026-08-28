@@ -560,16 +560,17 @@ public class RgbLibService : IRgbLibService
             SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
                    CASE
                        WHEN t.incoming = 0 THEN
-                           json_extract(t.requested_assignment, '$.Fungible')
+                           CASE WHEN json_valid(t.requested_assignment)
+                                THEN json_array(json(t.requested_assignment)) END
                        ELSE
-                           COALESCE(
-                               (SELECT json_extract(c.assignment, '$.Fungible')
-                                FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type IN (1, 2) LIMIT 1),
-                               (SELECT json_extract(c.assignment, '$.Fungible')
-                                FROM coloring c WHERE c.asset_transfer_idx = at.idx AND c.type != 3 LIMIT 1),
-                               (SELECT json_extract(c.assignment, '$.Fungible')
-                                FROM coloring c WHERE c.asset_transfer_idx = at.idx LIMIT 1)
-                           )
+                           (SELECT json_group_array(json(assignment))
+                            FROM (SELECT DISTINCT c.txo_idx AS txo_idx, c.assignment AS assignment
+                                  FROM coloring c
+                                  WHERE c.asset_transfer_idx = at.idx
+                                    AND c.type IN (1, 2)
+                                    AND json_valid(c.assignment)
+                                  ORDER BY txo_idx, assignment
+                                  LIMIT @assignmentLimit))
                    END,
                    t.recipient_type, at.asset_id, COALESCE(a.ticker, '')
             FROM transfer t
@@ -583,6 +584,7 @@ public class RgbLibService : IRgbLibService
             LIMIT @limit";
         cmd.Parameters.AddWithValue("@assetId", (object?)assetId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@limit", MaxTransferListRows);
+        cmd.Parameters.AddWithValue("@assignmentLimit", MaxCreditedAssignmentsPerAssetTransfer);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -606,7 +608,9 @@ public class RgbLibService : IRgbLibService
                 RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
                 Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
                 Kind = kind,
-                Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                Amount = RgbAssignmentJson.ToSignedByUnderReportingNeverOverReporting(
+                    RgbAssignmentJson.SumFungibleSaturatingRatherThanWrapping(
+                        reader.IsDBNull(5) ? null : reader.GetString(5))),
                 AssetId = reader.GetString(7),
                 AssetTicker = reader.GetString(8)
             });

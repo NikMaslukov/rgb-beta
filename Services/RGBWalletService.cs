@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Text.Json;
 using BTCPayServer.Plugins.RgbUtexo.Data;
@@ -1368,13 +1369,16 @@ public class RGBWalletService : IRGBWalletService
             var dirSize = new DirectoryInfo(stagingDir)
                 .EnumerateFiles("*", SearchOption.AllDirectories)
                 .Sum(f => f.Length);
-            var diskCap = _cfg.RestoreDiskCapBytes;
+            var diskCap = _cfg.ToRestoreLimits().DiskCapBytes;
             if (dirSize > diskCap)
             {
                 try { Directory.Delete(stagingDir, true); }
                 catch (Exception ex) { _log.LogDebug(ex, "Failed to clean up oversized staging dir {Dir}", stagingDir); }
+                _log.LogWarning(
+                    "Refusing restore for wallet {Id}: the decompressed wallet directory measured {DirSizeBytes} bytes against a staging cap of {DiskCapBytes} bytes",
+                    wallet.Id, dirSize, diskCap);
                 throw new InvalidOperationException(
-                    $"Restored wallet data exceeds size limit ({dirSize / 1024 / 1024}MB > {diskCap / 1024 / 1024}MB)");
+                    RestoreExecutor.RefusalForAWalletDirectoryThatOutgrewTheStagingBudget(diskCap));
             }
 
             var reservedNameUsedAsDirectory = FindDirectoryAtAReservedSingleFileName(stagingDir);
@@ -1417,6 +1421,27 @@ public class RGBWalletService : IRGBWalletService
                 catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after fingerprint mismatch"); }
                 throw new InvalidOperationException(
                     "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
+            }
+
+            var walletDirectoryRgbLibWillOpenAfterTheMove =
+                IsAFingerprintShapedWalletDirectoryName(wallet.MasterFingerprint)
+                    ? Path.Combine(stagingDir, wallet.MasterFingerprint)
+                    : null;
+            if (walletDirectoryRgbLibWillOpenAfterTheMove == null
+                || !Directory.Exists(walletDirectoryRgbLibWillOpenAfterTheMove))
+            {
+                var refusal = walletDirectoryRgbLibWillOpenAfterTheMove == null
+                    ? RecoveryPhraseYieldedNoWalletDirectoryNameRefusal
+                    : stagingFingerprintDirs.Count > 0
+                        ? BackupWalletDirectoryDiffersOnlyInLetterCaseRefusal
+                        : BackupCarriesNoWalletDirectoryForThisRecoveryPhraseRefusal;
+                _log.LogError(
+                    "Refusing restore for wallet {Id}: the backup carries no wallet directory at the name rgb-lib joins onto the data dir for the supplied recovery phrase, so publishing it would leave rgb-lib to create a fresh empty wallet beside the restored data (fingerprint-shaped top-level directories in the backup: {BackupFingerprintDirectoryCount}; the recovery phrase yielded a usable directory name: {RecoveryPhraseYieldedAUsableDirectoryName}; the fingerprints themselves are withheld from logs)",
+                    wallet.Id, stagingFingerprintDirs.Count,
+                    walletDirectoryRgbLibWillOpenAfterTheMove != null);
+                try { Directory.Delete(stagingDir, true); }
+                catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up staging dir after a missing wallet directory"); }
+                throw new InvalidOperationException(refusal);
             }
 
             try
@@ -1556,6 +1581,32 @@ public class RGBWalletService : IRGBWalletService
         + "that can neither send nor be deleted and would need filesystem access to repair. A backup "
         + "produced by this plugin never contains a directory with that name. Restore a backup taken by "
         + "this plugin, or remove that directory from the archive, then try again.";
+
+    static bool IsAFingerprintShapedWalletDirectoryName([NotNullWhen(true)] string? name) =>
+        name is { Length: 8 } && name.All(Uri.IsHexDigit);
+
+    internal const string RecoveryPhraseYieldedNoWalletDirectoryNameRefusal =
+        "The recovery phrase you supplied did not yield a usable master fingerprint, so this plugin cannot tell "
+        + "which directory inside the backup holds the wallet, and restoring it would present an empty wallet "
+        + "while the backed-up assets stayed unreachable. No wallet was created on the server and your backup "
+        + "file is unchanged. Re-enter the recovery phrase, check the network you selected, and try again.";
+
+    internal const string BackupCarriesNoWalletDirectoryForThisRecoveryPhraseRefusal =
+        "This backup holds no wallet directory for the recovery phrase you supplied. A backup taken by this "
+        + "plugin keeps the whole wallet under one top-level directory named for the master fingerprint that the "
+        + "recovery phrase derives, and this archive has no directory at that name. Restoring it would report "
+        + "success and then present an empty wallet, because rgb-lib silently creates a new empty wallet when the "
+        + "directory it expects is missing, leaving the backed-up assets unreachable under the other name. No "
+        + "wallet was created on the server and your backup file is unchanged. Restore an unmodified backup taken "
+        + "by this plugin, using the recovery phrase that belongs to it.";
+
+    internal const string BackupWalletDirectoryDiffersOnlyInLetterCaseRefusal =
+        "This backup's wallet directory is named for the same master fingerprint as the recovery phrase you "
+        + "supplied but in different letter case, and this server's filesystem treats those as two different "
+        + "directories. Restoring it would report success and then present an empty wallet, because rgb-lib would "
+        + "create a new empty wallet at the name it expects while the backed-up data sat under the other name. No "
+        + "wallet was created on the server and your backup file is unchanged. This archive was repacked after "
+        + "this plugin produced it; restore an unmodified backup taken by this plugin instead.";
 
     static bool CanDiscardUnparseableRecoveryJournal(string journalPath, string dbPath) =>
         RgbSendRecoveryJournal.IsUnparseable(journalPath) && File.Exists(dbPath);
@@ -1816,15 +1867,15 @@ public class RGBWalletService : IRGBWalletService
         finally { if (releaseLock) sendLock.Release(); }
     }
 
-    async Task<string> RunNativeSendIsolatedAsync(
+    internal async Task<string> RunNativeSendIsolatedAsync(
         RGBWallet wallet, string operation, string? recipientMapJson, float feeRate,
         int minConfirmations, string? signedPsbt, CancellationToken ct)
     {
-        var leaseWalletDir = Path.Combine(_rgbLib.GetWalletDataDir(wallet.Id, wallet.Network),
-            wallet.MasterFingerprint);
+        var walletDataDir = _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network);
+        var leaseWalletDir = Path.Combine(walletDataDir, wallet.MasterFingerprint);
         var request = JsonSerializer.Serialize(new
         {
-            DataDir = _rgbLib.GetWalletDataDir(wallet.Id, wallet.Network),
+            DataDir = walletDataDir,
             BitcoinNetwork = NetworkHelper.MapNetworkToRgbLibFormat(wallet.Network),
             ElectrumUrl = RGBConfiguration.GetNetworkSettings(wallet.Network).ElectrumUrl,
             wallet.XpubVanilla,
@@ -1849,9 +1900,22 @@ public class RGBWalletService : IRGBWalletService
             throw new NativeSendReapedFailureException(
                 $"RGB {operation} exceeded the native memory limit");
         if (result.ExitCode != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(result.StdErr))
+                _log.LogError(
+                    "RGB {Operation} helper exited with code {ExitCode}; helper stderr with host paths "
+                    + "intact and key material redacted: {StdErr} (wallet data dir {WalletDataDir}, "
+                    + "lease wallet dir {LeaseWalletDir}, helper {HelperDll})",
+                    operation, result.ExitCode, RgbNativeMessageSanitizer.Sanitize(result.StdErr),
+                    walletDataDir, leaseWalletDir, result.HelperDllHandedToTheDotnetHost);
             throw new NativeSendReapedFailureException(string.IsNullOrWhiteSpace(result.StdErr)
                 ? $"RGB {operation} helper failed with exit code {result.ExitCode}"
-                : result.StdErr.Trim());
+                : RgbHelperStderrRedaction
+                    .ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheNativeSendHelper(
+                        result.StdErr, walletDataDir, leaseWalletDir,
+                        result.HelperDllHandedToTheDotnetHost)
+                    .Trim());
+        }
         if (string.IsNullOrWhiteSpace(result.StdOut))
             throw new NativeSendReapedFailureException(
                 $"RGB {operation} helper returned no result");

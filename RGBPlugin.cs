@@ -181,6 +181,13 @@ public class RGBPlugin : BaseBTCPayServerPlugin
             cfg.RestoreRamCapBytes = Math.Clamp(restoreRam,
                 RGBConfiguration.RestoreRamMinBytes, RGBConfiguration.RestoreRamMaxBytes);
 
+        if (long.TryParse(read("RGB_RESTORE_DISK_CAP_BYTES"),
+                out var stagingCapForTheDecompressedWalletDirectoryEveryOtherGateMeasuresCompressed)
+            && stagingCapForTheDecompressedWalletDirectoryEveryOtherGateMeasuresCompressed > 0)
+            cfg.RestoreDiskCapBytes = Math.Clamp(
+                stagingCapForTheDecompressedWalletDirectoryEveryOtherGateMeasuresCompressed,
+                RGBConfiguration.RestoreDiskCapMinBytes, RGBConfiguration.RestoreDiskCapMaxBytes);
+
         if (long.TryParse(read(RgbRestoreUploadBound.EnvironmentVariableName), out var uploadBound)
             && uploadBound > 0)
             cfg.RestoreUploadMaxBytes = Math.Clamp(uploadBound,

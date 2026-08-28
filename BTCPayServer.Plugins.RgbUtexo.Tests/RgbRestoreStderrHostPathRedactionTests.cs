@@ -17,11 +17,11 @@ public class RgbRestoreStderrHostPathRedactionTests
         "/Users/someone/.btcpayserver/Plugins/BTCPayServer.Plugins.RgbUtexo/RgbRestoreHelper.dll";
 
     static string Redact(string childStdErr) =>
-        RgbRestoreStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheHelper(
+        RgbHelperStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheRestoreHelper(
             childStdErr, UploadedBackupPath, StagingDir);
 
     static string RedactWithTheHelperThePluginExecd(string childStdErr) =>
-        RgbRestoreStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheHelper(
+        RgbHelperStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheRestoreHelper(
             childStdErr, UploadedBackupPath, StagingDir, HelperDll);
 
     static void AssertNamesNoHostLocation(string shown)
@@ -40,7 +40,7 @@ public class RgbRestoreStderrHostPathRedactionTests
 
         AssertNamesNoHostLocation(shown);
         Assert.Equal(
-            $"The application '{RgbRestoreStderrRedaction.RestoreHelperAssemblyPlaceholder}' does not exist.",
+            $"The application '{RgbHelperStderrRedaction.RestoreHelperAssemblyPlaceholder}' does not exist.",
             shown);
     }
 
@@ -58,10 +58,10 @@ public class RgbRestoreStderrHostPathRedactionTests
         Assert.DoesNotContain(installDir, shown);
         Assert.Contains("A fatal error occurred.", shown);
         Assert.Contains(
-            RgbRestoreStderrRedaction.PluginInstallDirectoryPlaceholder + "/RgbRestoreHelper.runtimeconfig.json",
+            RgbHelperStderrRedaction.PluginInstallDirectoryPlaceholder + "/RgbRestoreHelper.runtimeconfig.json",
             shown);
         Assert.Contains(
-            RgbRestoreStderrRedaction.PluginInstallDirectoryPlaceholder
+            RgbHelperStderrRedaction.PluginInstallDirectoryPlaceholder
             + "/RgbRestoreHelper.runtimeconfig.dev.json",
             shown);
     }
@@ -71,7 +71,7 @@ public class RgbRestoreStderrHostPathRedactionTests
     {
         var shown = Redact($"Empty file: {UploadedBackupPath}");
 
-        Assert.Equal("Empty file: " + RgbRestoreStderrRedaction.UploadedBackupFilePlaceholder, shown);
+        Assert.Equal("Empty file: " + RgbHelperStderrRedaction.UploadedBackupFilePlaceholder, shown);
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public class RgbRestoreStderrHostPathRedactionTests
         AssertNamesNoHostLocation(shown);
         Assert.Equal(
             "The specified wallet directory already exists: "
-            + RgbRestoreStderrRedaction.StagingDirectoryPlaceholder + "/aabbccdd",
+            + RgbHelperStderrRedaction.StagingDirectoryPlaceholder + "/aabbccdd",
             shown);
     }
 
@@ -93,7 +93,7 @@ public class RgbRestoreStderrHostPathRedactionTests
         var shown = Redact($"Empty file: {UploadedBackupPath}");
 
         AssertNamesNoHostLocation(shown);
-        Assert.Equal("Empty file: " + RgbRestoreStderrRedaction.UploadedBackupFilePlaceholder, shown);
+        Assert.Equal("Empty file: " + RgbHelperStderrRedaction.UploadedBackupFilePlaceholder, shown);
     }
 
     [Fact]
@@ -104,7 +104,7 @@ public class RgbRestoreStderrHostPathRedactionTests
 
         AssertNamesNoHostLocation(shown);
         Assert.Contains("Permission denied (os error 13)", shown);
-        Assert.Contains(RgbRestoreStderrRedaction.UploadDirectoryPlaceholder + "/.tmpAbCdEf/backup.enc", shown);
+        Assert.Contains(RgbHelperStderrRedaction.UploadDirectoryPlaceholder + "/.tmpAbCdEf/backup.enc", shown);
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public class RgbRestoreStderrHostPathRedactionTests
 
         AssertNamesNoHostLocation(shown);
         Assert.Contains("No space left on device", shown);
-        Assert.Contains(RgbRestoreStderrRedaction.WalletDataDirectoryPlaceholder, shown);
+        Assert.Contains(RgbHelperStderrRedaction.WalletDataDirectoryPlaceholder, shown);
     }
 
     public static TheoryData<string> ActionableRefusalsRgbLibEmitsWithNoPathAtAll() => new()
@@ -143,7 +143,7 @@ public class RgbRestoreStderrHostPathRedactionTests
     public void ARelativeHelperArgumentIsNeverSubstituted_BecauseItNamesNoHostLocationToHide(
         string relativeBackupPath, string childStdErr)
     {
-        var shown = RgbRestoreStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheHelper(
+        var shown = RgbHelperStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheRestoreHelper(
             childStdErr, relativeBackupPath, StagingDir);
 
         Assert.Equal(childStdErr, shown);
@@ -154,7 +154,7 @@ public class RgbRestoreStderrHostPathRedactionTests
     {
         var root = Path.GetPathRoot(Path.GetTempPath())!;
 
-        var shown = RgbRestoreStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheHelper(
+        var shown = RgbHelperStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheRestoreHelper(
             "I/O error: No space left on device", root, root);
 
         Assert.Equal("I/O error: No space left on device", shown);
@@ -211,7 +211,7 @@ public class RgbRestoreStderrHostPathRedactionTests
 
             Assert.DoesNotContain(stagingDir, shown);
             Assert.Contains("Restore failed: The specified wallet directory already exists: "
-                + RgbRestoreStderrRedaction.StagingDirectoryPlaceholder, shown);
+                + RgbHelperStderrRedaction.StagingDirectoryPlaceholder, shown);
             Assert.Contains(logMessages, m => m.Contains(stagingDir, StringComparison.Ordinal)
                 && m.Contains("aabbccdd", StringComparison.Ordinal));
         }
@@ -253,7 +253,7 @@ public class RgbRestoreStderrHostPathRedactionTests
             Assert.DoesNotContain(installDir, shown);
             Assert.DoesNotContain(helperDll, shown);
             Assert.Contains("A fatal error occurred.", shown);
-            Assert.Contains(RgbRestoreStderrRedaction.PluginInstallDirectoryPlaceholder, shown);
+            Assert.Contains(RgbHelperStderrRedaction.PluginInstallDirectoryPlaceholder, shown);
             Assert.Contains(logMessages, m => m.Contains(installDir, StringComparison.Ordinal));
         }
         finally { if (Directory.Exists(stagingDir)) Directory.Delete(stagingDir, true); }
