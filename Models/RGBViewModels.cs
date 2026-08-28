@@ -96,18 +96,18 @@ public class RGBAssetViewModel
     public ulong PendingOutgoing => Balance > FutureBalance ? Balance - FutureBalance : 0;
     public ulong PendingIncoming => FutureBalance > Balance ? FutureBalance - Balance : 0;
 
-    public string AssetIdAbbreviatedKeepingHeadAndTail
+    public static string AbbreviateContractIdKeepingHeadAndTail(string? assetId)
     {
-        get
-        {
-            var contractId = AssetId ?? "";
-            return contractId.Length <= LongestContractIdShownWhole
-                ? contractId
-                : contractId[..ContractIdHeadCharsShown]
-                  + ContractIdElidedMiddleMarker
-                  + contractId[^ContractIdTailCharsShown..];
-        }
+        var contractId = assetId ?? "";
+        return contractId.Length <= LongestContractIdShownWhole
+            ? contractId
+            : contractId[..ContractIdHeadCharsShown]
+              + ContractIdElidedMiddleMarker
+              + contractId[^ContractIdTailCharsShown..];
     }
+
+    public string AssetIdAbbreviatedKeepingHeadAndTail =>
+        AbbreviateContractIdKeepingHeadAndTail(AssetId);
 }
 
 public class RGBIssueAssetViewModel : StoreViewModel
@@ -150,8 +150,11 @@ public class RGBUtxoViewModel
 public class RGBAllocationViewModel
 {
     public string AssetId { get; set; } = "";
-    public long Amount { get; set; }
+    public ulong Amount { get; set; }
     public bool Settled { get; set; }
+
+    public string AssetIdAbbreviatedKeepingHeadAndTail =>
+        RGBAssetViewModel.AbbreviateContractIdKeepingHeadAndTail(AssetId);
 }
 
 public class RGBTransfersViewModel : StoreViewModel

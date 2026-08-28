@@ -13,6 +13,7 @@ using Microsoft.Extensions.Options;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
+[Collection("RestoreSerial")]
 public class RgbRestoreSecretEchoTests
 {
     const string ValidBip39TestVector =

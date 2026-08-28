@@ -31,6 +31,13 @@ public static class RgbBackupScryptGuard
 {
     public const string PubDataEntryName = "backup.pub_data";
 
+    public const string UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath =
+        "Backup file could not be read back from the server's own temporary upload storage, so its "
+        + "key-derivation cost could not be checked before restoring. Nothing was restored and the "
+        + "backup file you hold is untouched, so upload it again; if it keeps failing, the server is "
+        + "out of temporary disk space or cannot write to it, and the underlying storage error is "
+        + "recorded in the server log.";
+
     // 512 MiB: four times the 128 MiB an honest rgb-lib backup asks for, so a legitimate file from a
     // future rgb-lib that raises log_n by one or two still restores, while the multi-GiB requests
     // that make this a DoS do not.
@@ -92,11 +99,13 @@ public static class RgbBackupScryptGuard
         {
             // Includes FileNotFoundException and DirectoryNotFoundException. Whatever this security
             // check cannot read becomes a clear restore refusal instead of an unhandled IO exception.
-            throw new InvalidOperationException($"Backup file could not be read: {ex.Message}", ex);
+            throw new InvalidOperationException(
+                UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath, ex);
         }
         catch (UnauthorizedAccessException ex)
         {
-            throw new InvalidOperationException($"Backup file could not be read: {ex.Message}", ex);
+            throw new InvalidOperationException(
+                UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath, ex);
         }
 
         using var _ = zip;

@@ -5,6 +5,7 @@ using BTCPayServer.Abstractions.Models;
 using BTCPayServer.Abstractions.Services;
 using BTCPayServer.Configuration;
 using BTCPayServer.Payments;
+using BTCPayServer.Plugins.RgbUtexo.Controllers;
 using BTCPayServer.Plugins.RgbUtexo.Data;
 using BTCPayServer.Plugins.RgbUtexo.PaymentHandler;
 using BTCPayServer.Plugins.RgbUtexo.Services;
@@ -179,6 +180,11 @@ public class RGBPlugin : BaseBTCPayServerPlugin
         if (long.TryParse(read("RGB_RESTORE_RAM_CAP_BYTES"), out var restoreRam) && restoreRam > 0)
             cfg.RestoreRamCapBytes = Math.Clamp(restoreRam,
                 RGBConfiguration.RestoreRamMinBytes, RGBConfiguration.RestoreRamMaxBytes);
+
+        if (long.TryParse(read(RgbRestoreUploadBound.EnvironmentVariableName), out var uploadBound)
+            && uploadBound > 0)
+            cfg.RestoreUploadMaxBytes = Math.Clamp(uploadBound,
+                RGBConfiguration.RestoreUploadBoundMinBytes, RGBConfiguration.RestoreUploadBoundMaxBytes);
     }
 
     internal static void ApplyResolvedRgbBaseDir(

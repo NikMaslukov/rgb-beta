@@ -96,10 +96,11 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
                 if (finalReason != RestoreKillReason.None)
                     return new RestoreRunResult(
                         finalReason == RestoreKillReason.Disk ? RestoreOutcome.KilledDisk : RestoreOutcome.KilledEntries,
-                        child.ExitCode, "", true, sw.Elapsed);
+                        child.ExitCode, "", true, sw.Elapsed, helperDll);
 
                 return new RestoreRunResult(
-                    RestoreOutcome.Exited, child.ExitCode, await child.ReadStdErrAsync(), true, sw.Elapsed);
+                    RestoreOutcome.Exited, child.ExitCode, await child.ReadStdErrAsync(), true, sw.Elapsed,
+                    helperDll);
             }
 
             child.Kill(true);
@@ -111,7 +112,7 @@ public sealed class RestoreProcessRunner : IRestoreProcessRunner
                 RestoreKillReason.Entries => RestoreOutcome.KilledEntries,
                 _ => RestoreOutcome.TimedOut
             };
-            return new RestoreRunResult(outcome, null, "", reaped, sw.Elapsed);
+            return new RestoreRunResult(outcome, null, "", reaped, sw.Elapsed, helperDll);
         }
     }
 

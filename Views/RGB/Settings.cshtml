@@ -130,7 +130,7 @@ else if (Model.VanillaReservationState == RgbVanillaReservationState.Unknown)
                             {
                                 <option value="@asset.AssetId"
                                         selected="@(Model.DefaultAssetId == asset.AssetId ? "selected" : null)">
-                                    @asset.Ticker - @asset.Name (@asset.AssetId[..20]...) — @asset.PricingCode
+                                    @asset.Ticker - @asset.Name (@asset.AssetIdAbbreviatedKeepingHeadAndTail) — @asset.PricingCode
                                 </option>
                             }
                         </select>

@@ -137,6 +137,173 @@ public sealed class BoundedTransferQueryTests : IDisposable
         Assert.DoesNotContain("foreach", method, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task SplitPaymentCreditsEveryFungibleAssignmentNotJustTheFirstRow()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":300}"),
+            (1, 1, "{\"Fungible\":700}"));
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        Assert.Equal(1000, match.Transfer.Amount);
+    }
+
+    [Fact]
+    public async Task InflationRightAndNonFungibleSiblingsNeitherHideNorInflateTheFungibleCredit()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"InflationRight\":5000}"),
+            (1, 1, "\"NonFungible\""),
+            (1, 1, "\"Any\""),
+            (1, 1, "{\"Fungible\":42}"));
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        Assert.Equal(42, match.Transfer.Amount);
+    }
+
+    [Fact]
+    public async Task CreditIsIndependentOfTheOrderRowsWereInserted()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient-forward", status: 3,
+            (1, 1, "{\"Fungible\":11}"),
+            (1, 1, "{\"InflationRight\":9}"),
+            (1, 1, "\"NonFungible\""),
+            (1, 1, "{\"Fungible\":22}"));
+        await InsertWithColorings(2, "asset", "recipient-reverse", status: 3,
+            (1, 1, "{\"Fungible\":22}"),
+            (1, 1, "\"NonFungible\""),
+            (1, 1, "{\"InflationRight\":9}"),
+            (1, 1, "{\"Fungible\":11}"));
+
+        var matches = await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient-forward", "recipient-reverse"]);
+
+        Assert.Equal(2, matches.Count);
+        Assert.All(matches, m => Assert.Equal(33, m.Transfer.Amount));
+    }
+
+    [Fact]
+    public async Task AReplayedConsignmentDoesNotCreditTheSameAssignmentTwice()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":300}"),
+            (1, 1, "{\"Fungible\":700}"),
+            (1, 1, "{\"Fungible\":300}"),
+            (1, 1, "{\"Fungible\":700}"));
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        Assert.Equal(1000, match.Transfer.Amount);
+    }
+
+    [Fact]
+    public async Task InputAndChangeColoringsAreNeverCreditedToAnIncomingTransfer()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "{\"Fungible\":10}"),
+            (1, 3, "{\"Fungible\":999999}"),
+            (1, 4, "{\"Fungible\":888888}"));
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        Assert.Equal(10, match.Transfer.Amount);
+    }
+
+    [Fact]
+    public async Task ASupplyBeyondSignedRangeSaturatesInsteadOfWrappingNegativeOrToZero()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient-pair", status: 3,
+            (1, 1, "{\"Fungible\":9223372036854775808}"),
+            (2, 1, "{\"Fungible\":9223372036854775808}"));
+        await InsertWithColorings(2, "asset", "recipient-single", status: 3,
+            (1, 1, "{\"Fungible\":18446744073709551615}"));
+
+        var matches = await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient-pair", "recipient-single"]);
+
+        Assert.Equal(2, matches.Count);
+        Assert.All(matches, m => Assert.Equal(long.MaxValue, m.Transfer.Amount));
+    }
+
+    [Fact]
+    public async Task AssignmentsBeyondTheWorkBoundAreDroppedRatherThanCreditedOrWrapped()
+    {
+        await CreateSchema();
+        var overBound = Enumerable
+            .Range(1, RgbLibService.MaxCreditedAssignmentsPerAssetTransfer + 1)
+            .Select(i => (TxoIdx: i, Type: 1, Assignment: $"{{\"Fungible\":{i}}}"))
+            .ToArray();
+        await InsertWithColorings(1, "asset", "recipient", status: 3, overBound);
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        var boundedTotal = (long)RgbLibService.MaxCreditedAssignmentsPerAssetTransfer
+            * (RgbLibService.MaxCreditedAssignmentsPerAssetTransfer + 1) / 2;
+        Assert.Equal(boundedTotal, match.Transfer.Amount);
+    }
+
+    [Fact]
+    public async Task AMalformedAssignmentIsSkippedRatherThanFailingTheWholeSweep()
+    {
+        await CreateSchema();
+        await InsertWithColorings(1, "asset", "recipient", status: 3,
+            (1, 1, "not json at all"),
+            (1, 1, "{\"Fungible\":7}"));
+
+        var match = Assert.Single(await RgbLibService.QueryIncomingTransfersForRecipientsAsync(
+            DbPath, ["recipient"]));
+
+        Assert.Equal(7, match.Transfer.Amount);
+    }
+
+    async Task InsertWithColorings(
+        int idx, string assetId, string recipientId, int status,
+        params (int TxoIdx, int Type, string Assignment)[] colorings)
+    {
+        await using var connection = new SqliteConnection($"Data Source={DbPath}");
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        await using var command = connection.CreateCommand();
+        command.Transaction = (SqliteTransaction)transaction;
+        var rows = string.Join("", colorings.Select((_, i) =>
+            $"INSERT INTO coloring(txo_idx,asset_transfer_idx,type,assignment)"
+            + $" VALUES(@txo{i},@idx,@type{i},@assignment{i});"));
+        command.CommandText = """
+            INSERT OR IGNORE INTO asset(id,ticker,name,precision,initial_supply)
+                VALUES(@asset,'TOK','Token',2,'1000');
+            INSERT INTO batch_transfer(idx,status,txid) VALUES(@idx,@status,@txid);
+            INSERT INTO asset_transfer(idx,batch_transfer_idx,asset_id) VALUES(@idx,@idx,@asset);
+            INSERT INTO transfer(idx,asset_transfer_idx,incoming,recipient_type,recipient_id)
+                VALUES(@idx,@idx,1,'"Blind"',@recipient);
+            """ + rows;
+        command.Parameters.AddWithValue("@asset", assetId);
+        command.Parameters.AddWithValue("@recipient", recipientId);
+        command.Parameters.AddWithValue("@idx", idx);
+        command.Parameters.AddWithValue("@status", status);
+        command.Parameters.AddWithValue("@txid", idx.ToString("x64"));
+        for (var i = 0; i < colorings.Length; i++)
+        {
+            command.Parameters.AddWithValue($"@txo{i}", colorings[i].TxoIdx);
+            command.Parameters.AddWithValue($"@type{i}", colorings[i].Type);
+            command.Parameters.AddWithValue($"@assignment{i}", colorings[i].Assignment);
+        }
+        await command.ExecuteNonQueryAsync();
+        await transaction.CommitAsync();
+    }
+
     async Task CreateSchema()
     {
         Directory.CreateDirectory(_dir);
@@ -153,7 +320,8 @@ public sealed class BoundedTransferQueryTests : IDisposable
                 incoming INTEGER NOT NULL, recipient_type TEXT, recipient_id TEXT,
                 requested_assignment TEXT);
             CREATE TABLE coloring (
-                idx INTEGER PRIMARY KEY, asset_transfer_idx INTEGER NOT NULL,
+                idx INTEGER PRIMARY KEY, txo_idx INTEGER NOT NULL,
+                asset_transfer_idx INTEGER NOT NULL,
                 type INTEGER NOT NULL, assignment TEXT);
             """);
     }
@@ -172,8 +340,8 @@ public sealed class BoundedTransferQueryTests : IDisposable
             INSERT INTO asset_transfer(idx,batch_transfer_idx,asset_id) VALUES(@idx,@idx,@asset);
             INSERT INTO transfer(idx,asset_transfer_idx,incoming,recipient_type,recipient_id)
                 VALUES(@idx,@idx,1,'"Blind"',@recipient);
-            INSERT INTO coloring(idx,asset_transfer_idx,type,assignment)
-                VALUES(@idx,@idx,1,@assignment);
+            INSERT INTO coloring(idx,txo_idx,asset_transfer_idx,type,assignment)
+                VALUES(@idx,1,@idx,1,@assignment);
             """;
         command.Parameters.AddWithValue("@asset", assetId);
         command.Parameters.AddWithValue("@recipient", recipientId);
@@ -204,8 +372,8 @@ public sealed class BoundedTransferQueryTests : IDisposable
                 SELECT i,i,1,'"Blind"','recipient-' || i FROM seq;
             WITH RECURSIVE seq(i) AS (
                 SELECT 1 UNION ALL SELECT i + 1 FROM seq WHERE i < {{count}}
-            ) INSERT INTO coloring(idx,asset_transfer_idx,type,assignment)
-                SELECT i,i,1,'{"Fungible":1}' FROM seq;
+            ) INSERT INTO coloring(idx,txo_idx,asset_transfer_idx,type,assignment)
+                SELECT i,1,i,1,'{"Fungible":1}' FROM seq;
             """);
     }
 

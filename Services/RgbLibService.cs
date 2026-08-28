@@ -186,10 +186,26 @@ public class RgbLibService : IRgbLibService
             _log.LogError(
                 "Failed to bring up the rgb-lib wallet. walletId={WalletId} network={Network} failure={FailureType} detail={KeyMaterialSanitizedDetail}",
                 walletId, walletNetwork, ex.GetType().Name, detailWithKeyMaterialRemoved);
-            throw new RgbWalletConstructionException(
-                $"rgb-lib could not bring up wallet {walletId} on {walletNetwork} ({ex.GetType().Name}): {detailWithKeyMaterialRemoved}");
+            throw new RgbWalletConstructionException(WalletBringUpFailureForTheOperator(
+                walletId, walletNetwork, ex, detailWithKeyMaterialRemoved));
         }
     }
+
+    internal const string DotnetRuntimeDetailWithheldBecauseItNamesServerFilesystemPaths =
+        "the .NET runtime raised this, not rgb-lib, and the runtime's own text names server "
+        + "filesystem locations. The failure type above is the actionable part; the full detail is in "
+        + "the server log.";
+
+    internal static bool DetailWasWrittenForAnOperatorRatherThanByTheDotnetRuntime(Exception ex) =>
+        ex is RgbLib.RgbLibException
+        || Controllers.RgbOperatorFacingFailure.MessageComesFromAnOperatorFacingLayerNotTheDotnetRuntime(ex);
+
+    internal static string WalletBringUpFailureForTheOperator(
+        string walletId, string walletNetwork, Exception ex, string detailWithKeyMaterialRemoved) =>
+        $"rgb-lib could not bring up wallet {walletId} on {walletNetwork} ({ex.GetType().Name}): "
+        + (DetailWasWrittenForAnOperatorRatherThanByTheDotnetRuntime(ex)
+            ? detailWithKeyMaterialRemoved
+            : DotnetRuntimeDetailWithheldBecauseItNamesServerFilesystemPaths);
 
     internal static THandle CreateHandleOrDisposeWallet<TWallet, THandle>(
         TWallet wallet,
@@ -612,6 +628,8 @@ public class RgbLibService : IRgbLibService
             dbPath, recipientIds, assetId, ct);
     }
 
+    internal const int MaxCreditedAssignmentsPerAssetTransfer = 1024;
+
     internal static async Task<List<RgbMatchedTransfer>> QueryIncomingTransfersForRecipientsAsync(
         string dbPath, IReadOnlyCollection<string> recipientIds, string? assetId = null,
         CancellationToken ct = default)
@@ -645,22 +663,18 @@ public class RgbLibService : IRgbLibService
         }
         cmd.Parameters.AddWithValue("@assetId", (object?)assetId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@limit", maxRecipients);
+        cmd.Parameters.AddWithValue("@assignmentLimit", MaxCreditedAssignmentsPerAssetTransfer);
         cmd.CommandText = $$"""
             WITH candidate AS (
                 SELECT t.idx, bt.status, t.recipient_id, bt.txid, t.incoming,
-                       COALESCE(
-                           (SELECT json_extract(c.assignment, '$.Fungible')
-                            FROM coloring c
-                            WHERE c.asset_transfer_idx = atx.idx AND c.type IN (1, 2)
-                            LIMIT 1),
-                           (SELECT json_extract(c.assignment, '$.Fungible')
-                            FROM coloring c
-                            WHERE c.asset_transfer_idx = atx.idx AND c.type != 3
-                            LIMIT 1),
-                           (SELECT json_extract(c.assignment, '$.Fungible')
-                            FROM coloring c
-                            WHERE c.asset_transfer_idx = atx.idx
-                            LIMIT 1)) AS amount,
+                       (SELECT json_group_array(json(assignment))
+                        FROM (SELECT DISTINCT c.txo_idx AS txo_idx, c.assignment AS assignment
+                              FROM coloring c
+                              WHERE c.asset_transfer_idx = atx.idx
+                                AND c.type IN (1, 2)
+                                AND json_valid(c.assignment)
+                              ORDER BY txo_idx, assignment
+                              LIMIT @assignmentLimit)) AS credited_assignments,
                        t.recipient_type,
                        atx.asset_id AS asset_id,
                        COALESCE(a.ticker, '') AS ticker,
@@ -680,7 +694,7 @@ public class RgbLibService : IRgbLibService
                   AND t.recipient_id IN ({{string.Join(", ", recipientParameters)}})
                   AND (@assetId IS NULL OR atx.asset_id = @assetId)
             )
-            SELECT idx, status, recipient_id, txid, incoming, amount, recipient_type,
+            SELECT idx, status, recipient_id, txid, incoming, credited_assignments, recipient_type,
                    asset_id, ticker, name, precision, issued_supply
             FROM candidate
             WHERE recipient_rank = 1
@@ -715,7 +729,9 @@ public class RgbLibService : IRgbLibService
                     RecipientId = reader.IsDBNull(2) ? null : reader.GetString(2),
                     Txid = reader.IsDBNull(3) ? null : reader.GetString(3),
                     Kind = kind,
-                    Amount = reader.IsDBNull(5) ? 0 : reader.GetInt64(5)
+                    Amount = RgbAssignmentJson.ToSignedByUnderReportingNeverOverReporting(
+                        RgbAssignmentJson.SumFungibleSaturatingRatherThanWrapping(
+                            reader.IsDBNull(5) ? null : reader.GetString(5)))
                 }));
         }
         return results;
@@ -1066,7 +1082,7 @@ public class RgbLibService : IRgbLibService
             u.RgbAllocations?.Select(a => new RgbAllocation
             {
                 AssetId = a.AssetId ?? "",
-                Amount = a.Amount,
+                Amount = RgbAssignmentJson.FungibleValueOrZeroForEveryOtherVariant(a.Assignment),
                 Settled = a.Settled
             }).ToList() ?? []
         )).ToList() ?? [];
@@ -1156,7 +1172,7 @@ class OutpointResponse
 class RgbAllocationResponse
 {
     [JsonPropertyName("asset_id")] public string? AssetId { get; set; }
-    [JsonPropertyName("amount")] public long Amount { get; set; }
+    [JsonPropertyName("assignment")] public JsonElement Assignment { get; set; }
     [JsonPropertyName("settled")] public bool Settled { get; set; }
 }
 

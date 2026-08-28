@@ -136,6 +136,56 @@ public class RgbBackupScryptGuardTests
     }
 
     [Fact]
+    public void AVanishedUploadFile_RefusesWithoutNamingTheServerPathTheFrameworkPutInItsMessage()
+    {
+        var vanished = Path.Combine(Path.GetTempPath(), $"scrypt-vanished-{Guid.NewGuid():N}.rgb");
+
+        var ex = Assert.Throws<InvalidOperationException>(() => RgbBackupScryptGuard.ValidateFile(vanished));
+
+        Assert.Equal(
+            RgbBackupScryptGuard.UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath,
+            ex.Message);
+        Assert.DoesNotContain(vanished, ex.Message);
+        Assert.DoesNotContain(Path.GetTempPath(), ex.Message);
+        Assert.IsAssignableFrom<IOException>(ex.InnerException);
+        Assert.Contains(vanished, ex.InnerException!.Message);
+    }
+
+    [Fact]
+    public void AnUploadPathTheProcessCannotOpen_RefusesWithoutNamingIt_OnTheUnauthorizedAccessClause()
+    {
+        var directoryStandingWhereTheUploadShouldBe =
+            Path.Combine(Path.GetTempPath(), $"scrypt-not-a-file-{Guid.NewGuid():N}.rgb");
+        Directory.CreateDirectory(directoryStandingWhereTheUploadShouldBe);
+        try
+        {
+            var ex = Assert.Throws<InvalidOperationException>(
+                () => RgbBackupScryptGuard.ValidateFile(directoryStandingWhereTheUploadShouldBe));
+
+            Assert.Equal(
+                RgbBackupScryptGuard.UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath,
+                ex.Message);
+            Assert.DoesNotContain(directoryStandingWhereTheUploadShouldBe, ex.Message);
+            Assert.IsType<UnauthorizedAccessException>(ex.InnerException);
+            Assert.Contains(directoryStandingWhereTheUploadShouldBe, ex.InnerException!.Message);
+        }
+        finally { Directory.Delete(directoryStandingWhereTheUploadShouldBe); }
+    }
+
+    [Fact]
+    public void TheUnreadableUploadRefusal_ReachesTheStoreOwnerVerbatimSoHeKnowsToUploadItAgain()
+    {
+        var shown = Controllers.RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+            new InvalidOperationException(
+                RgbBackupScryptGuard.UnreadableBackupFileRefusalWithoutTheFrameworkIoTextThatWouldNameTheServerPath),
+            Controllers.RgbOperatorFacingFailure.EscalateToServerLogs);
+
+        Assert.Contains("upload it again", shown);
+        Assert.Contains("Nothing was restored", shown);
+        Assert.NotEqual(Controllers.RgbOperatorFacingFailure.EscalateToServerLogs, shown);
+    }
+
+    [Fact]
     public void RaisedCeiling_AdmitsWhatTheDefaultRefuses()
     {
         // The recovery path for a false reject. Without this the guard could strand a genuine backup

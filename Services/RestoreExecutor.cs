@@ -28,7 +28,15 @@ public sealed class RestoreExecutor
             _log.LogWarning("Restore child not confirmed reaped — leaving staging dir {Dir} for the startup sweep", stagingDir);
 
         if (result.Outcome == RestoreOutcome.Exited)
-            throw new InvalidOperationException($"Restore failed: {result.StdErr}");
+        {
+            _log.LogError(
+                "Restore helper exited with code {ExitCode}; unredacted helper stderr: {StdErr} "
+                + "(backup file {BackupPath}, staging dir {StagingDir})",
+                result.ExitCode, result.StdErr, backupPath, stagingDir);
+            throw new InvalidOperationException("Restore failed: "
+                + RgbRestoreStderrRedaction.ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheHelper(
+                    result.StdErr, backupPath, stagingDir, result.HelperDllHandedToTheDotnetHost));
+        }
 
         if (result.Outcome is RestoreOutcome.KilledDisk)
             throw new RestoreAbortedException(

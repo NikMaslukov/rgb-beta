@@ -83,6 +83,9 @@ public class RGBConfiguration
     [JsonPropertyName("restore_disk_cap_bytes")]
     public long RestoreDiskCapBytes { get; set; } = 52_428_800;
 
+    [JsonPropertyName("restore_upload_max_bytes")]
+    public long RestoreUploadMaxBytes { get; set; } = RestoreUploadBoundMinBytes;
+
     [JsonPropertyName("restore_ram_cap_bytes")]
     public long RestoreRamCapBytes { get; set; } = 536_870_912;
 
@@ -150,6 +153,12 @@ public class RGBConfiguration
     // legitimate while still letting an operator tighten the 20 000 default.
     internal const long RestoreDiskCapMinBytes = RgbBackupValidator.MaxTotalUncompressedBytes;
     internal const long RestoreDiskCapMaxBytes = 4L * 1024 * 1024 * 1024;
+
+    internal const long RestoreUploadZipFramingHeadroomBytes = 1024L * 1024;
+    internal const long RestoreUploadBoundMinBytes =
+        RgbBackupValidator.MaxTotalUncompressedBytes + RestoreUploadZipFramingHeadroomBytes;
+    internal const long RestoreUploadBoundMaxBytes = 100L * 1024 * 1024;
+    internal const long MultipartFormBodyLengthCeilingBytes = 128L * 1024 * 1024;
 
     internal const long RestoreRamMinBytes = RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes;
     internal const long RestoreRamMaxBytes = 4L * 1024 * 1024 * 1024;

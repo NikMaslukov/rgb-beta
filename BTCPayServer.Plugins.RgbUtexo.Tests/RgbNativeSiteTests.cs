@@ -39,6 +39,41 @@ public class RgbNativeSiteTests
             Ok("""[{"utxo":{"outpoint":{"txid":"t","vout":0},"btc_amount":1000,"colorable":true},"rgb_allocations":[]}]""")));
     }
 
+    [Fact]
+    public void ListUnspents_ReadsAllocationAmountsFromTheAssignmentKeyRgbLibActuallySends()
+    {
+        var unspents = RgbLibService.InterpretListUnspents(Ok("""
+            [{"utxo":{"outpoint":{"txid":"t","vout":0},"btc_amount":1000,"colorable":true},
+              "rgb_allocations":[
+                {"asset_id":"a","assignment":{"Fungible":18446744073709551615},"settled":true},
+                {"asset_id":"b","assignment":{"InflationRight":77},"settled":false},
+                {"asset_id":"c","assignment":"NonFungible","settled":true},
+                {"asset_id":"d","assignment":"Any","settled":false}]}]
+            """));
+
+        var allocations = Assert.Single(unspents).RgbAllocations;
+        Assert.Equal(ulong.MaxValue, allocations[0].Amount);
+        Assert.Equal(0UL, allocations[1].Amount);
+        Assert.Equal(0UL, allocations[2].Amount);
+        Assert.Equal(0UL, allocations[3].Amount);
+    }
+
+    [Fact]
+    public void ListUnspents_TreatsAMissingOrUnreadableAssignmentAsZeroRatherThanThrowing()
+    {
+        var unspents = RgbLibService.InterpretListUnspents(Ok("""
+            [{"utxo":{"outpoint":{"txid":"t","vout":0},"btc_amount":1000,"colorable":true},
+              "rgb_allocations":[
+                {"asset_id":"a","settled":true},
+                {"asset_id":"b","assignment":{"Fungible":-1},"settled":true},
+                {"asset_id":"c","assignment":{"Fungible":"5"},"settled":true},
+                {"asset_id":"d","assignment":123,"settled":true}]}]
+            """));
+
+        var allocations = Assert.Single(unspents).RgbAllocations;
+        Assert.All(allocations, a => Assert.Equal(0UL, a.Amount));
+    }
+
     [Fact] // G1-T14
     public void Require_ReturnsPayloadOrThrowsWithTheCallName()
     {

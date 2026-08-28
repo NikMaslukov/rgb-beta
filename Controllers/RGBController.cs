@@ -124,8 +124,10 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
+            _log.LogWarning(ex, "Failed to load RGB wallet overview for store {StoreId}", storeId);
             vm.IsConnected = false;
-            vm.ConnectionError = ex.Message;
+            vm.ConnectionError = RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to load wallet data. {RgbOperatorFacingFailure.EscalateToServerLogs}");
         }
 
         return View(vm);
@@ -234,7 +236,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            ModelState.AddModelError("", ex.Message);
+            _log.LogError(ex, "Failed to create RGB wallet for store {StoreId}", storeId);
+            ModelState.AddModelError("", RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to create wallet. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
         }
@@ -293,7 +297,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            ModelState.AddModelError("", ex.Message);
+            _log.LogError(ex, "Failed to restore RGB wallet from mnemonic for store {StoreId}", storeId);
+            ModelState.AddModelError("", RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to restore wallet. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             model.IsRestore = true;
             PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
@@ -302,7 +308,7 @@ public class RGBController : Controller
 
     [HttpPost("restore-backup")]
     [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
-    [RequestSizeLimit(5_242_880)]
+    [BoundRgbBackupUploadToConfiguredLimit]
     public async Task<IActionResult> RestoreFromBackup([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
@@ -332,9 +338,19 @@ public class RGBController : Controller
             return View("Setup", model);
         }
 
+        var uploadBoundBytes = RgbRestoreUploadBound.ResolveBytes(_cfg);
+        if (RgbRestoreUploadBound.IsOverBound(model.BackupFile.Length, uploadBoundBytes))
+        {
+            ModelState.AddModelError("BackupFile", RgbRestoreUploadBound.RefusalMessage(uploadBoundBytes));
+            model.IsBackupRestore = true;
+            PopulateSetupModelAndDropRecoverySecrets(model);
+            return View("Setup", model);
+        }
+
         try
         {
-            await ValidateBackupFileHeader(model.BackupFile);
+            await RgbRestoreValidationGate.RunOneAtATimeOrRefuseAsync(
+                () => ValidateBackupFileHeader(model.BackupFile!));
         }
         catch (InvalidOperationException ex)
         {
@@ -390,7 +406,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            ModelState.AddModelError("", $"Restore failed: {ex.Message}");
+            _log.LogError(ex, "Failed to restore RGB wallet from backup for store {StoreId}", storeId);
+            ModelState.AddModelError("", "Restore failed: " + RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, RgbOperatorFacingFailure.EscalateToServerLogs));
             model.IsBackupRestore = true;
             PopulateSetupModelAndDropRecoverySecrets(model);
             return View("Setup", model);
@@ -442,7 +460,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            ModelState.AddModelError("", ex.Message);
+            _log.LogError(ex, "Failed to issue RGB asset for wallet {WalletId}", wallet.Id);
+            ModelState.AddModelError("", RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to issue asset. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             return View(model);
         }
     }
@@ -512,7 +532,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            TempData["ErrorMessage"] = ex.Message;
+            _log.LogError(ex, "Failed to create colorable UTXOs for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to create UTXOs. {RgbOperatorFacingFailure.EscalateToServerLogs}");
         }
 
         return RedirectToAction(nameof(Utxos), new { storeId });
@@ -565,7 +587,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            ModelState.AddModelError("", ex.Message);
+            _log.LogError(ex, "Failed to send BTC from wallet {WalletId}", wallet.Id);
+            ModelState.AddModelError("", RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to send BTC. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             await PopulateSendBtcBalance(wallet, model);
             return View(model);
         }
@@ -589,7 +613,8 @@ public class RGBController : Controller
         {
             _log.LogWarning(ex, "Failed to populate balance for send form");
             model.BalanceUnavailable = true;
-            return ex.Message;
+            return RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, RgbOperatorFacingFailure.EscalateToServerLogs);
         }
     }
 
@@ -675,7 +700,10 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            TempData["ErrorMessage"] = $"Failed to load transactions: {ex.Message}";
+            _log.LogWarning(ex, "Failed to load BTC transactions for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = "Failed to load transactions: "
+                + RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                    ex, RgbOperatorFacingFailure.EscalateToServerLogs);
             return RedirectToAction(nameof(Index), new { storeId });
         }
     }
@@ -722,7 +750,8 @@ public class RGBController : Controller
         catch (Exception ex)
         {
             _log.LogWarning(ex, "Failed to create blind-receive invoice for wallet {WalletId}", wallet.Id);
-            TempData["ErrorMessage"] = ex.Message;
+            TempData["ErrorMessage"] = RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to create a receive invoice. {RgbOperatorFacingFailure.EscalateToServerLogs}");
             return RedirectToAction(nameof(Index), new { storeId });
         }
     }
@@ -767,7 +796,9 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            TempData["ErrorMessage"] = ex.Message;
+            _log.LogWarning(ex, "Failed to refresh wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to refresh wallet. {RgbOperatorFacingFailure.EscalateToServerLogs}");
         }
 
         return RedirectToAction(nameof(Index), new { storeId });
@@ -833,7 +864,10 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            TempData["ErrorMessage"] = $"Failed to delete wallet: {ex.Message}";
+            _log.LogError(ex, "Failed to delete wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = "Failed to delete wallet: "
+                + RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                    ex, RgbOperatorFacingFailure.EscalateToServerLogs);
             return RedirectToAction(nameof(Settings), new { storeId });
         }
 
@@ -871,7 +905,9 @@ public class RGBController : Controller
             if (tempPath != null && System.IO.File.Exists(tempPath))
                 System.IO.File.Delete(tempPath);
             _log.LogError(ex, "Backup failed for wallet {WalletId}", wallet.Id);
-            TempData["ErrorMessage"] = $"Backup failed: {ex.Message}";
+            TempData["ErrorMessage"] = "Backup failed: "
+                + RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                    ex, RgbOperatorFacingFailure.EscalateToServerLogs);
             return RedirectToAction(nameof(Settings), new { storeId });
         }
     }
@@ -923,7 +959,8 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            vm.ConnectionError = ex.Message;
+            vm.ConnectionError = RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to load wallet assets. {RgbOperatorFacingFailure.EscalateToServerLogs}");
             _log.LogWarning(ex, "RGB wallet connection failed");
         }
 
@@ -1125,7 +1162,10 @@ public class RGBController : Controller
         }
         catch (Exception ex)
         {
-            TempData["ErrorMessage"] = $"Connection failed: {ex.Message}";
+            _log.LogWarning(ex, "Connection test failed for wallet {WalletId}", wallet.Id);
+            TempData["ErrorMessage"] = "Connection failed: "
+                + RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                    ex, RgbOperatorFacingFailure.EscalateToServerLogs);
         }
 
         return RedirectToAction(nameof(Settings), new { storeId });

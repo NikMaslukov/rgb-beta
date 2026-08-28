@@ -76,6 +76,61 @@ public class RgbWalletKeyMaterialLoggingTests
         Assert.DoesNotContain("ex.Message", body.Replace("Sanitize(ex.Message)", ""));
     }
 
+    [Fact]
+    public void ADotnetRuntimeBringUpFailure_NamesItsTypeAndTheLogButNotTheServerPathItsMessageCarries()
+    {
+        const string installDirBearingMessage =
+            "Unable to load shared library 'rgblibcffi': "
+            + "/Users/someone/.btcpayserver/Plugins/BTCPayServer.Plugins.RgbUtexo/librgblibcffi.dylib";
+
+        var shown = RgbLibService.WalletBringUpFailureForTheOperator(
+            "w1", "signet", new DllNotFoundException(installDirBearingMessage), installDirBearingMessage);
+
+        Assert.DoesNotContain("/Users/", shown);
+        Assert.DoesNotContain(".btcpayserver", shown);
+        Assert.Contains("DllNotFoundException", shown);
+        Assert.Contains(
+            RgbLibService.DotnetRuntimeDetailWithheldBecauseItNamesServerFilesystemPaths, shown);
+    }
+
+    [Fact]
+    public void ANativeBringUpFailure_StillReachesTheOperatorVerbatim_BecauseItIsHisOnlyIndexerDiagnosis()
+    {
+        const string nativeDetail = "Indexer error: failed to connect to https://esplora.example.com";
+
+        var shown = RgbLibService.WalletBringUpFailureForTheOperator(
+            "w1", "signet", new RgbLib.RgbLibException(nativeDetail), nativeDetail);
+
+        Assert.Contains(nativeDetail, shown);
+        Assert.DoesNotContain(
+            RgbLibService.DotnetRuntimeDetailWithheldBecauseItNamesServerFilesystemPaths, shown);
+    }
+
+    [Fact]
+    public void ThePluginsOwnRgbLibFailure_StillReachesTheOperatorVerbatim()
+    {
+        const string nativeDetail = "go_online failed: Invalid indexer";
+
+        var shown = RgbLibService.WalletBringUpFailureForTheOperator(
+            "w1", "signet", new RgbLibException(nativeDetail), nativeDetail);
+
+        Assert.Contains(nativeDetail, shown);
+    }
+
+    [Fact]
+    public void AFrameworkIoBringUpFailure_LosesTheWalletDataDirectoryItsMessageCarries()
+    {
+        const string walletDirBearingMessage =
+            "Access to the path '/Users/someone/.btcpayserver/Main/rgb-wallets/w1' is denied.";
+
+        var shown = RgbLibService.WalletBringUpFailureForTheOperator(
+            "w1", "signet", new UnauthorizedAccessException(walletDirBearingMessage),
+            walletDirBearingMessage);
+
+        Assert.DoesNotContain("rgb-wallets", shown);
+        Assert.Contains("UnauthorizedAccessException", shown);
+    }
+
     [Theory]
     [InlineData("I/O error: Descriptor mismatch for Internal keychain: loaded wpkh([1a2b3c4d/84'/1'/0']tpubDCruH7eLXMYBeuYhZzqhehsPrZr8xsmGU5Sz4dtwJhZxU8UYaYCdMBZdY5norXcbE2sy4zJjhm7L475LcKKszgupYzPEPtMZ3viuWoHUVt5/0/*), expected None")]
     [InlineData("bad key xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8")]

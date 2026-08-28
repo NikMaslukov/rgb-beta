@@ -1332,7 +1332,6 @@ public class RGBWalletService : IRGBWalletService
                 + $"Try again in {Math.Ceiling(cooldown.Remaining(nowUtc).TotalSeconds)} seconds.");
 
         // SECURITY: Backup file is validated before reaching native code:
-        // - 5MB upload limit (controller [RequestSizeLimit])
         // - ZIP structure + entry validation (controller ValidateBackupFileHeader)
         // - scrypt KDF cost cap (RgbBackupScryptGuard, inside the gate below)
         // - Post-extraction size cap (configurable RestoreDiskCapBytes, below)
@@ -1340,8 +1339,7 @@ public class RGBWalletService : IRGBWalletService
         // a hung/oversized restore is terminated and the staging dir is deleted only once the
         // child is confirmed reaped, else left for the startup sweep.
         // The single-flight gate guards the expensive native restore and every persistent
-        // side effect (staging dir, Directory.Move, DB row). It also guards parent-side archive
-        // parsing/decompression so parallel uploads cannot amplify even that bounded work. The cheap
+        // side effect (staging dir, Directory.Move, DB row). The cheap
         // key derivation and in-memory row build above remain outside it; a rejected concurrent restore
         // still creates no staging dir and no wallet row.
         var entered = await _restoreGate.WaitAsync(TimeSpan.Zero, ct);

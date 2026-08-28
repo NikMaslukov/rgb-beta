@@ -23,7 +23,8 @@ public sealed record RestoreRunResult(
     int? ExitCode,
     string StdErr,
     bool ChildReaped,
-    TimeSpan Elapsed = default);
+    TimeSpan Elapsed = default,
+    string? HelperDllHandedToTheDotnetHost = null);
 
 public interface IRestoreProcessRunner
 {

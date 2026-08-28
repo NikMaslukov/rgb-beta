@@ -26,8 +26,41 @@ public record Outpoint(string Txid, int Vout);
 public class RgbAllocation
 {
     [JsonPropertyName("asset_id")] public string AssetId { get; set; } = "";
-    [JsonPropertyName("amount")] public long Amount { get; set; }
+    public ulong Amount { get; set; }
     [JsonPropertyName("settled")] public bool Settled { get; set; }
+}
+
+public static class RgbAssignmentJson
+{
+    public static ulong FungibleValueOrZeroForEveryOtherVariant(JsonElement assignment)
+    {
+        if (assignment.ValueKind != JsonValueKind.Object) return 0;
+        if (!assignment.TryGetProperty("Fungible", out var fungible)) return 0;
+        if (fungible.ValueKind != JsonValueKind.Number) return 0;
+        return fungible.TryGetUInt64(out var value) ? value : 0;
+    }
+
+    public static ulong SumFungibleSaturatingRatherThanWrapping(string? assignmentArrayJson)
+    {
+        if (string.IsNullOrWhiteSpace(assignmentArrayJson)) return 0;
+        JsonDocument document;
+        try { document = JsonDocument.Parse(assignmentArrayJson); }
+        catch (JsonException) { return 0; }
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Array) return 0;
+            var total = 0UL;
+            foreach (var assignment in document.RootElement.EnumerateArray())
+            {
+                var value = FungibleValueOrZeroForEveryOtherVariant(assignment);
+                total = value > ulong.MaxValue - total ? ulong.MaxValue : total + value;
+            }
+            return total;
+        }
+    }
+
+    public static long ToSignedByUnderReportingNeverOverReporting(ulong total)
+        => total > long.MaxValue ? long.MaxValue : (long)total;
 }
 
 public class RgbAsset

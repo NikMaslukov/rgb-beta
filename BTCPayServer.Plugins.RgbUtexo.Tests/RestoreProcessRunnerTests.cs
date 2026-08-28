@@ -65,6 +65,30 @@ public class RestoreProcessRunnerTests
     }
 
     [Fact]
+    public async Task TheRunnerReportsTheHelperItHandedTheHost_SoTheRedactorNeverRecomputesThatPath()
+    {
+        var dir = CreateTempDir();
+        var child = new FakeChild { Exited = true, Code = 1 };
+
+        var r = await NewRunner(child).RunAsync("bk", dir, "pw", Fast(diskCap: 52_428_800), CancellationToken.None);
+
+        Assert.Equal(RestoreOutcome.Exited, r.Outcome);
+        Assert.Equal(ExistingHelper(), r.HelperDllHandedToTheDotnetHost);
+    }
+
+    [Fact]
+    public async Task AKilledRunAlsoReportsTheHelperItHandedTheHost_SoNoOutcomeLosesTheRedaction()
+    {
+        var dir = CreateTempDir();
+        var child = new FakeChild { Exited = false, Rss = 1 };
+
+        var r = await NewRunner(child).RunAsync("bk", dir, "pw", Fast(diskCap: 52_428_800), CancellationToken.None);
+
+        Assert.Equal(RestoreOutcome.TimedOut, r.Outcome);
+        Assert.Equal(ExistingHelper(), r.HelperDllHandedToTheDotnetHost);
+    }
+
+    [Fact]
     public async Task AChildThatExitsAfterBreachingTheEntryCapIsStillReportedAsKilled()
     {
         var dir = CreateTempDir();
