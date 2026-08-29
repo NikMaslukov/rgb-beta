@@ -297,12 +297,25 @@ public class RgbNativeSendStderrHostPathRedactionTests
     }
 
     [Fact]
-    public async Task EmptyHelperStderr_StillNamesTheExitCodeAndLogsNothingUnredacted()
+    public async Task EmptyHelperStderr_NamesTheExitStatusAndAKnob_AndStillReachesTheServerLog()
     {
         var outcome = await RunFailingNativeSend((_, _) => "   ", exitCode: 139);
 
-        Assert.Equal("RGB send-begin helper failed with exit code 139", outcome.ShownToTheStoreOwner);
-        Assert.Empty(outcome.LogMessages);
+        Assert.Contains("exit status 139", outcome.ShownToTheStoreOwner);
+        Assert.True(!outcome.ShownToTheStoreOwner.Contains("signal", StringComparison.Ordinal),
+            $"the refusal read \"{outcome.ShownToTheStoreOwner}\". A status in 128-255 is not proof of "
+            + "a signal: the .NET host's own failure codes land there once masked to eight bits, so a "
+            + "broken installation is reported to the operator as a signal death");
+        Assert.Contains("RGB_NATIVE_SEND_RAM_CAP_BYTES", outcome.ShownToTheStoreOwner);
+        Assert.DoesNotContain(outcome.WalletDataDirTheHelperWasGiven, outcome.ShownToTheStoreOwner);
+        Assert.True(
+            outcome.LogMessages.Any(m => m.Contains("139", StringComparison.Ordinal)
+                && m.Contains("send-begin", StringComparison.Ordinal)),
+            "a helper killed by the OOM killer, by an external signal or by its own CPU rlimit writes "
+            + "nothing to stderr, and this log call used to be gated on stderr being non-blank. That "
+            + "left the operator holding a bare exit code whose only stated remedy is the server log, "
+            + "while the server log held nothing at all about the attempt. The log messages were: "
+            + string.Join(" | ", outcome.LogMessages));
     }
 
     sealed class FakeChildThatExitsNonZero : IChildHandle

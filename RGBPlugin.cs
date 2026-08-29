@@ -166,6 +166,10 @@ public class RGBPlugin : BaseBTCPayServerPlugin
             cfg.NativeSendCpuLimitSeconds = Math.Clamp(sendCpu,
                 RGBConfiguration.NativeSendSecondsMin, RGBConfiguration.NativeSendSecondsMax);
 
+        if (long.TryParse(read("RGB_NATIVE_SEND_RAM_CAP_BYTES"), out var sendRam) && sendRam > 0)
+            cfg.NativeSendRamCapBytes = Math.Clamp(sendRam,
+                RGBConfiguration.NativeSendRamMinBytes, RGBConfiguration.NativeSendRamMaxBytes);
+
         if (int.TryParse(read("RGB_RESTORE_TIMEOUT_SECONDS"), out var restoreTimeout) && restoreTimeout > 0)
             cfg.RestoreTimeoutSeconds = Math.Clamp(restoreTimeout,
                 RGBConfiguration.RestoreSecondsMin, RGBConfiguration.RestoreSecondsMax);

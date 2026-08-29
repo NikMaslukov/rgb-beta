@@ -3,9 +3,9 @@ using BTCPayServer.Plugins.RgbUtexo.Services;
 
 namespace BTCPayServer.Plugins.RgbUtexo.Tests;
 
-// Implements only what RestoreFromBackupAsync touches before the executor call
-// (RestoreKeysFromMnemonic + GetWalletDataDir). Everything else throws — the gate
-// tests block inside the fake runner before reaching those paths.
+// Implements what RestoreFromBackupAsync touches before the executor call
+// (RestoreKeysFromMnemonic + GetWalletDataDir), plus opt-in hooks a test assigns. Everything
+// else throws — the gate tests block inside the fake runner before reaching those paths.
 public sealed class FakeRgbLib : IRgbLibService
 {
     readonly RGBConfiguration _cfg;
@@ -47,7 +47,12 @@ public sealed class FakeRgbLib : IRgbLibService
     public Task RefreshAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SnapshotStockAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<RgbVerificationSnapshot> SnapshotVerificationStateAsync(string walletId, CancellationToken ct = default) => throw new NotImplementedException();
-    public Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default) => throw new NotImplementedException();
+    public Func<string, string, string, List<long>, int, RgbAsset>? IrreversibleNiaIssuance;
+
+    public Task<RgbAsset> IssueAssetNiaAsync(string walletId, string ticker, string name, List<long> amounts, int precision, CancellationToken ct = default)
+        => IrreversibleNiaIssuance is null
+            ? throw new NotImplementedException()
+            : Task.FromResult(IrreversibleNiaIssuance(walletId, ticker, name, amounts, precision));
     public Task<string> SendBeginAsync(string walletId, string recipientMapJson, float feeRate, int minConfirmations = 1, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> SendEndAsync(string walletId, string signedPsbt, CancellationToken ct = default) => throw new NotImplementedException();
     public Task<string> CreateConsignmentsAsync(string walletId, string psbt, CancellationToken ct = default) => throw new NotImplementedException();

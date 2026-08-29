@@ -166,7 +166,7 @@ public class RestoreExecutorTests
     }
 
     [Fact]
-    public async Task SignalDeath_LeavesEmptyStderr_AndTheRefusalStillNamesTheExitStatusAndAKnob()
+    public async Task AnExitTheHelperNeverReturns_LeavesEmptyStderr_AndIsNotAttributedToASignal()
     {
         var (exec, runner) = Build();
         var dir = StagingWithFile();
@@ -182,10 +182,61 @@ public class RestoreExecutorTests
             + "with no cause, no exit status and no pointer to the server log is a permanent false REJECT "
             + "of a funded wallet's backup.");
         Assert.Contains("137", ex.Message);
-        Assert.Contains("signal 9", ex.Message);
+        Assert.True(!ex.Message.Contains("signal", StringComparison.Ordinal),
+            $"the refusal read \"{ex.Message}\" and tells the operator the helper was killed by a "
+            + "signal. The 128-to-255 range it reads that off is also where the .NET host's own failure "
+            + "codes land once the OS masks them to eight bits — FrameworkMissingFailure 0x80008093 "
+            + "arrives as 147, InvalidConfigFile 0x80008092 as 146, CoreHostLibMissingFailure "
+            + "0x80008083 as 131 — so a BTCPay installation missing its runtime is described as a "
+            + "signal death and handed memory and CPU advice that cannot fix it");
         Assert.Contains("RGB_RESTORE_CPU_LIMIT_SECONDS", ex.Message);
         Assert.Contains("server log", ex.Message);
         Assert.False(Directory.Exists(dir));
+    }
+
+    [Theory]
+    [InlineData(147)]
+    [InlineData(146)]
+    [InlineData(131)]
+    [InlineData(130)]
+    public async Task ADotnetHostFailureCodeIsNotReportedAsASignalDeath(int hostFailureExitCode)
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, hostFailureExitCode, "", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.Contains($"{hostFailureExitCode}", ex.Message);
+        Assert.True(!ex.Message.Contains("signal", StringComparison.Ordinal),
+            $"exit status {hostFailureExitCode} was described as a signal death. The documented .NET "
+            + "host failure codes are masked to eight bits by the OS and land inside 128-255: "
+            + "FrameworkMissingFailure 0x80008093 as 147, InvalidConfigFile 0x80008092 as 146, "
+            + "CoreHostLibMissingFailure 0x80008083 as 131, CoreHostLibLoadFailure 0x80008082 as 130. "
+            + "A BTCPay installation whose runtime or configuration is broken therefore reaches an "
+            + "operator as \"killed by signal 19\", which points them at host memory pressure instead "
+            + $"of at the deployment. The refusal read: {ex.Message}");
+        Assert.True(
+            ex.Message.Contains("not a status this plugin's own helper ever returns", StringComparison.Ordinal),
+            $"the refusal read \"{ex.Message}\". RgbRestoreHelper returns 0 to 4 and the send helper 0 "
+            + "to 2, so anything else came from something other than the helper's own return path and "
+            + "cannot be attributed from the status. Saying so is the only description that is true for "
+            + "every member of that open set");
+        Assert.False(Directory.Exists(dir));
+    }
+
+    [Fact]
+    public async Task AnExitStatusTheHelperItselfReturns_StillCarriesItsOwnStderrRatherThanBeingUnattributed()
+    {
+        var (exec, runner) = Build();
+        var dir = StagingWithFile();
+        runner.Result = new RestoreRunResult(RestoreOutcome.Exited, 4, "rlimit refused", ChildReaped: true);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => exec.ExecuteAsync("bk", dir, "pw", CancellationToken.None));
+
+        Assert.Equal("Restore failed: rlimit refused", ex.Message);
     }
 
     [Fact]

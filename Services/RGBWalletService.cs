@@ -533,23 +533,34 @@ public class RGBWalletService : IRGBWalletService
         var asset = await _sendCoordinator.WithSendLockAsync(walletId,
             () => _rgbLib.IssueAssetNiaAsync(walletId, ticker, name, [amt], precision, ct), ct);
 
-        await using var ctx = _db.CreateContext();
-        var existing = await ctx.RGBAssets.FindAsync([walletId, asset.AssetId], ct);
-        if (existing == null)
+        try
         {
-            var (t, n) = NormalizeAssetMetadata(asset.Ticker, asset.Name);
-            ctx.RGBAssets.Add(new RGBAsset
+            await using var ctx = _db.CreateContext();
+            var existing = await ctx.RGBAssets.FindAsync([walletId, asset.AssetId], ct);
+            if (existing == null)
             {
-                AssetId = asset.AssetId,
-                WalletId = walletId,
-                Ticker = t,
-                Name = n,
-                Precision = asset.Precision,
-                IssuedSupply = asset.IssuedSupply,
-                CreatedAt = DateTimeOffset.UtcNow
-            });
-            await ctx.SaveChangesAsync(ct);
-            await _currencyNameTable.ReloadCurrencyData(ct);
+                var (t, n) = NormalizeAssetMetadata(asset.Ticker, asset.Name);
+                ctx.RGBAssets.Add(new RGBAsset
+                {
+                    AssetId = asset.AssetId,
+                    WalletId = walletId,
+                    Ticker = t,
+                    Name = n,
+                    Precision = asset.Precision,
+                    IssuedSupply = asset.IssuedSupply,
+                    CreatedAt = DateTimeOffset.UtcNow
+                });
+                await ctx.SaveChangesAsync(ct);
+                await _currencyNameTable.ReloadCurrencyData(ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Asset {AssetId} was issued on wallet {WalletId} and the RGB Stock mutation is irreversible, "
+                + "but recording its RGBAssets row failed. Reporting the issuance as failed would make the "
+                + "operator issue a second contract; the row is reconciled by the Assets page instead",
+                asset.AssetId, walletId);
         }
 
         return asset;
@@ -1471,14 +1482,24 @@ public class RGBWalletService : IRGBWalletService
                 catch (DbUpdateException ex) when (ex.InnerException?.Message.Contains("IX_RGB_Wallets_StoreId", StringComparison.OrdinalIgnoreCase) == true
                     || ex.InnerException?.Message.Contains("duplicate key", StringComparison.OrdinalIgnoreCase) == true)
                 {
-                    try { Directory.Delete(walletDataDir, true); }
-                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after duplicate wallet detection", walletDataDir); }
-                    throw new InvalidOperationException("A wallet already exists for this store. Delete it first if you want to restore a different one.");
+                    _log.LogError(ex,
+                        "The insert of the restored wallet row {Id} was rejected as a duplicate. Its "
+                        + "unpacked wallet data is left at {Dir} rather than deleted: the row that "
+                        + "collided can be this same attempt's own committed row, re-executed by the "
+                        + "configured EF retry after an acknowledgement was lost, and deleting the data "
+                        + "under a row that survives would leave rgb-lib to create a fresh empty wallet "
+                        + "at that path and present it as the restored one",
+                        wallet.Id, walletDataDir);
+                    throw new InvalidOperationException(RestoreFoundThisStoreAlreadyHoldsAWalletRecordRefusal);
                 }
-                catch
+                catch (Exception saveFailure)
                 {
-                    try { Directory.Delete(walletDataDir, true); }
-                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after DB save failure", walletDataDir); }
+                    _log.LogError(saveFailure,
+                        "The insert of the restored wallet row {Id} reported failure, which is not proof "
+                        + "that it did not commit. Its unpacked wallet data is left at {Dir} rather than "
+                        + "deleted: deleting it under a row that did commit would leave rgb-lib to create "
+                        + "a fresh empty wallet at that path and present it as the restored one",
+                        wallet.Id, walletDataDir);
                     throw;
                 }
 
@@ -1487,21 +1508,18 @@ public class RGBWalletService : IRGBWalletService
                     await _rgbLib.GetOrCreateWalletAsync(wallet.Id, ct);
                     await _rgbLib.GetAddressAsync(wallet.Id, ct);
                 }
+                catch (OperationCanceledException ex)
+                {
+                    _log.LogWarning(ex, "Restore of wallet {Id} was cancelled while opening the restored wallet data; rolling the restore back", wallet.Id);
+                    await RollBackTheJustPublishedRestoreAsync(wallet, walletDataDir);
+                    throw;
+                }
                 catch (Exception ex)
                 {
-                    _log.LogError(ex, "Mnemonic/backup consistency check failed for wallet {Id}", wallet.Id);
-                    try
-                    {
-                        await using var ctx = _db.CreateContext();
-                        ctx.RGBWallets.Remove(wallet);
-                        await ctx.SaveChangesAsync(ct);
-                    }
-                    catch (Exception dbEx) { _log.LogDebug(dbEx, "Failed to roll back wallet row {Id}", wallet.Id); }
-                    try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
-                    try { Directory.Delete(walletDataDir, true); }
-                    catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after consistency check failure", walletDataDir); }
+                    _log.LogError(ex, "Restored wallet data for wallet {Id} could not be opened and brought online; rolling the restore back", wallet.Id);
+                    await RollBackTheJustPublishedRestoreAsync(wallet, walletDataDir);
                     throw new InvalidOperationException(
-                        "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.");
+                        RefusalForRestoredWalletDataThatCouldNotBeBroughtOnline(walletNetwork, ex));
                 }
 
                 _signerProvider.RegisterSigner(wallet.Id, mnemonic, network);
@@ -1608,6 +1626,86 @@ public class RGBWalletService : IRGBWalletService
         + "wallet was created on the server and your backup file is unchanged. This archive was repacked after "
         + "this plugin produced it; restore an unmodified backup taken by this plugin instead.";
 
+    internal const string RestoreFoundThisStoreAlreadyHoldsAWalletRecordRefusal =
+        "This store already holds a wallet record, so this restore could not add one. Open this store's "
+        + "RGB page to see the wallet it holds. If the Refresh button on that page brings that wallet "
+        + "online, it is no longer held pending recovery and you can delete it there, after which this "
+        + "backup can be restored again. Refresh can only do that when this server can open that "
+        + "wallet's data and reach the indexer; a wallet whose data cannot be opened fails Refresh the "
+        + "same way every time, cannot be deleted while it is held, and no further restore is accepted "
+        + "for this store while its record exists, so clearing it needs someone with access to this "
+        + "server to remove that record and its wallet data. The "
+        + "wallet data this attempt unpacked was left on this server rather than deleted, because this "
+        + "server cannot tell whether the record this store holds is the one this restore wrote, and "
+        + "deleting the data under a record that is using it would leave an empty wallet in its place; "
+        + "the BTCPay server log records where that data was left. Your backup file is undamaged and "
+        + "still holds everything.";
+
+    async Task RollBackTheJustPublishedRestoreAsync(RGBWallet wallet, string walletDataDir)
+    {
+        var theRowRemovalReturnedNormallyWhichIsTheOnlyProofTheRowIsGone = false;
+        try
+        {
+            await using var ctx = _db.CreateContext();
+            ctx.RGBWallets.Remove(wallet);
+            await ctx.SaveChangesAsync(CancellationToken.None);
+            theRowRemovalReturnedNormallyWhichIsTheOnlyProofTheRowIsGone = true;
+        }
+        catch (Exception dbEx)
+        {
+            _log.LogError(dbEx,
+                "The removal of wallet row {Id} reported failure, which is not proof that it did not "
+                + "commit, so this rollback claims nothing about that row. The restored wallet data is "
+                + "left at {Dir}: deleting it under a row that survives would leave rgb-lib to create a "
+                + "fresh empty wallet at that path and present it as the restored one",
+                wallet.Id, walletDataDir);
+        }
+        try { _rgbLib.UnloadWallet(wallet.Id); } catch { }
+        if (!theRowRemovalReturnedNormallyWhichIsTheOnlyProofTheRowIsGone) return;
+        try { Directory.Delete(walletDataDir, true); }
+        catch (Exception cleanupEx) { _log.LogDebug(cleanupEx, "Failed to clean up {Dir} after rolling back a restore", walletDataDir); }
+    }
+
+    internal const string IndexerUrlEnvironmentVariable = "RGB_ELECTRUM_URL";
+
+    internal static string WhereToLookAfterARestoreThisServerRolledBack =>
+        "Which of two states this store is now in is something you can see and this server cannot: open "
+        + "this store's RGB page. If it offers the restore form, no wallet record is held for this store "
+        + "and the step to take is to restore the same backup again. If instead it shows a wallet, a "
+        + "record was written and no further restore is accepted for this store while that record "
+        + "exists; the step to take is then the Refresh button on that page, which releases a wallet "
+        + "held pending recovery once this server can open that wallet's data and reach the indexer. "
+        + "If Refresh keeps failing the same way, that wallet cannot be deleted either, and someone "
+        + "with access to this server has to remove that record and its wallet data before this backup "
+        + "can be restored here again. Either way your "
+        + "backup file is undamaged and still holds everything, so nothing is lost.";
+
+    internal static string RefusalForRestoredWalletDataThatCouldNotBeBroughtOnline(
+        string walletNetwork, Exception failure) =>
+        "Your backup was decrypted and its wallet data was restored, but this server could not then open "
+        + "that wallet and bring it online against the RGB indexer, so this server attempted to roll "
+        + "that restore back. "
+        + WhereToLookAfterARestoreThisServerRolledBack
+        + " This is NOT evidence that your recovery phrase is wrong. The phrase was already checked "
+        + "against this backup one step earlier and it matched the wallet directory the backup carries, "
+        + "so keep that phrase. Several different faults reach this point and this server cannot tell "
+        + $"them apart on its own. The usual one is that the RGB indexer for the {walletNetwork} network "
+        + "was unreachable, was serving a different chain, or is misconfigured. The next most common is "
+        + "a fault on this server's own storage — a full disk, a read-only or exhausted volume, or a "
+        + "lock file that could not be written — because opening a wallet writes to this server before "
+        + "it ever reaches the network. Wallet data inside the backup that rgb-lib cannot open also "
+        + "reaches here, and so does a shutdown or another operation holding this wallet. Check free "
+        + "space and write access on this server's storage first, then take whichever of the two steps "
+        + "above this store's RGB page shows you, once the indexer is reachable. To point this server "
+        + "at a different indexer, set the "
+        + $"{IndexerUrlEnvironmentVariable} environment variable, which overrides the indexer for every "
+        + "network, and restart BTCPay. The full underlying error is in the BTCPay server log, and that "
+        + "entry is what identifies which of these it was."
+        + (Controllers.RgbOperatorFacingFailure.MessageComesFromAnOperatorFacingLayerNotTheDotnetRuntime(failure)
+            ? $" The underlying failure was: {failure.Message}"
+            : $" The underlying failure was a {failure.GetType().Name}; its text names server filesystem "
+              + "locations and is in the BTCPay server log rather than here.");
+
     static bool CanDiscardUnparseableRecoveryJournal(string journalPath, string dbPath) =>
         RgbSendRecoveryJournal.IsUnparseable(journalPath) && File.Exists(dbPath);
 
@@ -1661,7 +1759,18 @@ public class RGBWalletService : IRGBWalletService
                 var current = await ctx.RGBWallets.FindAsync([walletId], ct)
                     ?? throw new KeyNotFoundException($"wallet {walletId} not found");
                 ctx.RGBWallets.Remove(current);
-                await ctx.SaveChangesAsync(ct);
+                try { await ctx.SaveChangesAsync(ct); }
+                catch (DbUpdateConcurrencyException noRowWasThereForTheDeleteToAffect)
+                {
+                    _log.LogWarning(noRowWasThereForTheDeleteToAffect,
+                        "The delete of wallet row {WalletId} affected no rows, so that row was already "
+                        + "absent when the statement ran: an earlier execution of this same delete "
+                        + "committed and lost its acknowledgement, or another instance removed the row. "
+                        + "The record is gone either way, which is the outcome this deletion was for, so "
+                        + "it completes rather than reporting a failure the caller would answer by "
+                        + "restoring RGB payment configuration on a store that no longer has a wallet",
+                        walletId);
+                }
                 deletionCommitted = true;
 
                 _signerProvider.UnloadSigner(walletId);
@@ -1889,38 +1998,101 @@ public class RGBWalletService : IRGBWalletService
             MinConfirmations = minConfirmations,
             SignedPsbt = signedPsbt
         });
+        var limits = _cfg.ToNativeSendLimits();
         var result = await _nativeSendRunner.RunAsync(operation, request, leaseWalletDir,
-            () => _rgbLib.UnloadWallet(wallet.Id), _cfg.ToNativeSendLimits(), ct);
+            () => _rgbLib.UnloadWallet(wallet.Id), limits, ct);
         if (!result.ChildReaped)
             throw new NativeSendChildUnreapedException();
         if (result.Outcome == NativeSendOutcome.TimedOut)
             throw new NativeSendReapedFailureException(
-                $"RGB {operation} exceeded the native execution deadline");
+                RefusalForANativeSendThatRanOutOfTime(operation, limits.Timeout));
         if (result.Outcome == NativeSendOutcome.KilledRam)
             throw new NativeSendReapedFailureException(
-                $"RGB {operation} exceeded the native memory limit");
+                RefusalForANativeSendThatReachedItsMemoryBudget(operation, limits.RamCapBytes));
         if (result.ExitCode != 0)
         {
-            if (!string.IsNullOrWhiteSpace(result.StdErr))
-                _log.LogError(
-                    "RGB {Operation} helper exited with code {ExitCode}; helper stderr with host paths "
-                    + "intact and key material redacted: {StdErr} (wallet data dir {WalletDataDir}, "
-                    + "lease wallet dir {LeaseWalletDir}, helper {HelperDll})",
-                    operation, result.ExitCode, RgbNativeMessageSanitizer.Sanitize(result.StdErr),
-                    walletDataDir, leaseWalletDir, result.HelperDllHandedToTheDotnetHost);
-            throw new NativeSendReapedFailureException(string.IsNullOrWhiteSpace(result.StdErr)
-                ? $"RGB {operation} helper failed with exit code {result.ExitCode}"
-                : RgbHelperStderrRedaction
-                    .ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheNativeSendHelper(
-                        result.StdErr, walletDataDir, leaseWalletDir,
-                        result.HelperDllHandedToTheDotnetHost)
-                    .Trim());
+            _log.LogError(
+                "RGB {Operation} helper exited with code {ExitCode}; helper stderr with host paths "
+                + "intact and key material redacted: {StdErr} (wallet data dir {WalletDataDir}, "
+                + "lease wallet dir {LeaseWalletDir}, helper {HelperDll})",
+                operation, result.ExitCode,
+                string.IsNullOrWhiteSpace(result.StdErr)
+                    ? HelperWroteNothingToStdErr
+                    : RgbNativeMessageSanitizer.Sanitize(result.StdErr),
+                walletDataDir, leaseWalletDir, result.HelperDllHandedToTheDotnetHost);
+            var redactedStdErr = RgbHelperStderrRedaction
+                .ReplaceOnlyTheAbsolutePathsThePluginItselfHandedTheNativeSendHelper(
+                    result.StdErr, walletDataDir, leaseWalletDir,
+                    result.HelperDllHandedToTheDotnetHost)
+                .Trim();
+            throw new NativeSendReapedFailureException(
+                string.IsNullOrWhiteSpace(redactedStdErr)
+                || RgbBoundRefusal.AnExitStatusNoHelperInThisPluginReturnsOfItsOwnAccord(
+                    result.ExitCode)
+                    ? RefusalForANativeSendHelperWhoseExitCannotRuleOutTheBudgetsThisPluginGaveIt(
+                        operation, result.ExitCode, redactedStdErr, limits.RamCapBytes)
+                    : redactedStdErr);
         }
         if (string.IsNullOrWhiteSpace(result.StdOut))
             throw new NativeSendReapedFailureException(
                 $"RGB {operation} helper returned no result");
         return result.StdOut;
     }
+
+    internal const string HelperWroteNothingToStdErr = "(the helper wrote nothing to stderr)";
+
+    internal const string WhatANativeSendRefusalCanHonestlySayAboutTheWalletsState =
+        "Whether this attempt staged anything is recorded in the BTCPay server log and in this wallet's "
+        + "own recovery state, so do not delete this wallet: the plugin finishes or fails a partly "
+        + "staged transfer by itself.";
+
+    internal static string RefusalForANativeSendThatRanOutOfTime(string operation, TimeSpan timeout) =>
+        RgbBoundRefusal.ForABoundAnOperatorMustBeAbleToRaiseWithoutHostShellAccess(
+            $"The RGB {operation} helper reached the {(int)timeout.TotalSeconds} second native "
+            + "execution deadline and was stopped.",
+            "That deadline covers the whole out-of-process helper, including the rgb-lib wallet "
+            + "construction and the indexer handshake and chain sync every send pays before the native "
+            + "call starts, so a slow or congested indexer can reach it on an ordinary send.",
+            WhatANativeSendRefusalCanHonestlySayAboutTheWalletsState,
+            "RGB_NATIVE_SEND_TIMEOUT_SECONDS",
+            $"maximum {RGBConfiguration.NativeSendSecondsMax} seconds",
+            "retry the send");
+
+    internal static string RefusalForANativeSendThatReachedItsMemoryBudget(
+        string operation, long ramCapBytes) =>
+        RgbBoundRefusal.ForABoundAnOperatorMustBeAbleToRaiseWithoutHostShellAccess(
+            $"The RGB {operation} helper reached the {ramCapBytes / (1024 * 1024)} MB native memory "
+            + "limit and was stopped.",
+            "That limit covers the whole out-of-process helper, including the rgb-lib wallet "
+            + "construction and chain sync every send pays before the native call starts, so a wallet "
+            + "holding many transfers or allocations can need more than the shipped budget. A wallet "
+            + "whose helper is stopped here every time can never move its assets.",
+            WhatANativeSendRefusalCanHonestlySayAboutTheWalletsState,
+            "RGB_NATIVE_SEND_RAM_CAP_BYTES",
+            $"maximum {RGBConfiguration.NativeSendRamMaxBytes / (1024 * 1024)} MB",
+            "retry the send");
+
+    internal static string RefusalForANativeSendHelperWhoseExitCannotRuleOutTheBudgetsThisPluginGaveIt(
+        string operation, int? exitCode, string whatTheHelperPrintedBeforeItStopped, long ramCapBytes) =>
+        $"The RGB {operation} helper stopped with "
+        + RgbBoundRefusal.DescribeExitStatusForAnOperatorWithoutShellAccess(exitCode)
+        + (string.IsNullOrWhiteSpace(whatTheHelperPrintedBeforeItStopped)
+            ? " and wrote no error output at all."
+            : $", after writing: {whatTheHelperPrintedBeforeItStopped.Trim()}")
+        + " The helper applies this plugin's own memory and CPU budgets to itself before it constructs "
+        + $"the rgb-lib wallet, and an allocation the {ramCapBytes / (1024 * 1024)} MB memory budget "
+        + "refuses is answered inside the helper, which ends there without this server's watchdog ever "
+        + "seeing it grow — so an exit like this one does not rule the memory budget out. A helper "
+        + "killed from outside, by the memory the host or container allows BTCPay, ends the same way. "
+        + "The limits to raise first are therefore the native send memory limit "
+        + $"(RGB_NATIVE_SEND_RAM_CAP_BYTES, maximum "
+        + $"{RGBConfiguration.NativeSendRamMaxBytes / (1024 * 1024)} MB) and the native send CPU limit "
+        + "(RGB_NATIVE_SEND_CPU_LIMIT_SECONDS); restart BTCPay after changing either, then retry the "
+        + "send. Not every exit that reaches this message is a budget, though: a status the helper "
+        + "never returns of its own accord is also what a helper that could not start at all leaves "
+        + "behind, which an incomplete or mismatched BTCPay installation causes and which no limit will "
+        + $"fix. {WhatANativeSendRefusalCanHonestlySayAboutTheWalletsState} The BTCPay server log "
+        + "records this attempt in full, and that entry is what separates the two.";
 
     async Task<(string Txid, long AmountSent, string AssetId, string AssetTicker, string? RecoveryAdvisory)> SendAssetInternalAsync(
         string walletId, string rgbInvoice, string assetId, long amount, float feeRate, CancellationToken ct)

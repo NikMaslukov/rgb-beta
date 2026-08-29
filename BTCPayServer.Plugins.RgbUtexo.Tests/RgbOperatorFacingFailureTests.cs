@@ -11,7 +11,7 @@ public class RgbOperatorFacingFailureTests
 
     public static TheoryData<string> RefusalsTheOperatorMustBeAbleToActOn() => new()
     {
-        "A wallet already exists for this store. Delete it first if you want to restore a different one.",
+        RGBWalletService.RestoreFoundThisStoreAlreadyHoldsAWalletRecordRefusal,
         "Backup could not be loaded with the supplied mnemonic. The mnemonic does not match the keys in this backup.",
         "Restored wallet data exceeds size limit (512MB > 256MB)",
         "A wallet restore was attempted recently. Try again in 42 seconds.",
@@ -135,7 +135,7 @@ public class RgbOperatorFacingFailureTests
     }
 
     [Fact]
-    public void ControllerHasNoBareExceptionMessageLeftForTheOperator_ExceptTheTwoNarrowedSites()
+    public void ControllerHasNoBareExceptionMessageLeftForTheOperator_ExceptTheOneTypeNarrowedCatch()
     {
         var source = ControllerSource();
         var bareSites = source
@@ -144,15 +144,21 @@ public class RgbOperatorFacingFailureTests
             .Where(l => l.line.Contains("ex.Message", StringComparison.Ordinal))
             .ToList();
 
-        Assert.Equal(2, bareSites.Count);
+        Assert.True(bareSites.Count == 1,
+            "Every operator-facing catch must route through OperatorFacingLayerMessageOrFallback, whose "
+            + "trusted set is the single place this plugin decides which exception text a store Owner may "
+            + "see. A bare ex.Message outside a catch already narrowed to a trusted type either leaks a "
+            + "runtime message naming a host path, or silently disagrees with the shared set — the "
+            + "send-asset handler did the latter and dropped every RgbLibException diagnosis. Bare sites "
+            + "found: " + string.Join(", ", bareSites.Select(l => $"line {l.number}: {l.line}")));
 
         Assert.Contains(
             "catch (InvalidOperationException ex)\n        {\n"
             + "            ModelState.AddModelError(\"BackupFile\", ex.Message);",
             source.Replace("\r\n", "\n"));
 
-        Assert.Contains(bareSites, l => l.line.Contains(
-            "ex is InvalidOperationException or KeyNotFoundException ? ex.Message", StringComparison.Ordinal));
+        Assert.DoesNotContain("ex is InvalidOperationException or KeyNotFoundException ? ex.Message",
+            source, StringComparison.Ordinal);
     }
 
     [Theory]

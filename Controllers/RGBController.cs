@@ -658,7 +658,8 @@ public class RGBController : Controller
         catch (Exception ex)
         {
             _log.LogError(ex, "Failed to send RGB asset");
-            ModelState.AddModelError("", ex is InvalidOperationException or KeyNotFoundException ? ex.Message : "Failed to send asset. Check server logs for details.");
+            ModelState.AddModelError("", RgbOperatorFacingFailure.OperatorFacingLayerMessageOrFallback(
+                ex, $"Failed to send asset. {RgbOperatorFacingFailure.EscalateToServerLogs}"));
             await PopulateSendAssetData(wallet, model);
             return View(model);
         }

@@ -87,7 +87,7 @@ public class RGBConfiguration
     public long RestoreUploadMaxBytes { get; set; } = RestoreUploadBoundMinBytes;
 
     [JsonPropertyName("restore_ram_cap_bytes")]
-    public long RestoreRamCapBytes { get; set; } = 536_870_912;
+    public long RestoreRamCapBytes { get; set; } = RestoreRamMinBytes;
 
     [JsonPropertyName("restore_cpu_limit_seconds")]
     public int RestoreCpuLimitSeconds { get; set; } = 30;
@@ -148,11 +148,9 @@ public class RGBConfiguration
     // close. RgbBackupValidator admits up to MaxTotalUncompressedBytes (50 MiB) of OUTER-archive
     // content, and that content is the zstd-compressed, encrypted wallet zip, so the wallet directory
     // rgb-lib expands into the staging dir is always larger by the compression ratio: this floor is the
-    // NECESSARY minimum for a staging byte cap and never a sufficient one; the scrypt ceiling
-    // the pre-flight guard admits is DefaultMaxScryptMemoryBytes, so a RAM cap under that kills a
-    // backup the guard just passed (tightening the real bound is what RestoreScryptMemoryCapBytes
-    // is for); and an rgb-lib wallet directory is a few dozen files, so 1 000 entries is far above
-    // legitimate while still letting an operator tighten the 20 000 default.
+    // NECESSARY minimum for a staging byte cap and never a sufficient one; and an rgb-lib wallet
+    // directory is a few dozen files, so 1 000 entries is far above legitimate while still letting
+    // an operator tighten the 20 000 default.
     internal const long RestoreDiskCapMinBytes = RgbBackupValidator.MaxTotalUncompressedBytes;
     internal const long RestoreDiskCapMaxBytes = 4L * 1024 * 1024 * 1024;
 
@@ -162,7 +160,13 @@ public class RGBConfiguration
     internal const long RestoreUploadBoundMaxBytes = 100L * 1024 * 1024;
     internal const long MultipartFormBodyLengthCeilingBytes = 128L * 1024 * 1024;
 
-    internal const long RestoreRamMinBytes = RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes;
+    internal const long RestoreHelperResidentSetOutsideTheScryptArenaMeasuredBytes = 34L * 1024 * 1024;
+    internal const long RestoreRamHeadroomTheScryptArenaCeilingIsNotMeasuredWithBytes =
+        RestoreHelperResidentSetOutsideTheScryptArenaMeasuredBytes
+        + RgbBackupValidator.MaxTotalUncompressedBytes;
+    internal const long RestoreRamMinBytes =
+        RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes
+        + RestoreRamHeadroomTheScryptArenaCeilingIsNotMeasuredWithBytes;
     internal const long RestoreRamMaxBytes = 4L * 1024 * 1024 * 1024;
 
     internal const int RestoreMinStagingEntries = 1_000;

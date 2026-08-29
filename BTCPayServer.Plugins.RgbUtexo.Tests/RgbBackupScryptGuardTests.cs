@@ -36,11 +36,14 @@ public class RgbBackupScryptGuardTests
     [Fact]
     public void HonestParameters_CostExactlyOneHundredAndTwentyEightMegabytes()
     {
-        // Pins the arithmetic the ceiling is calibrated against: if this changes, the 512MB default
-        // is no longer "4x an honest backup" and the calibration comment is wrong.
         var honestCost = 128L * 8 * (1L << 17);
         Assert.Equal(134_217_728L, honestCost);
-        Assert.True(RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes > honestCost);
+        Assert.True(RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes > honestCost,
+            "rgb-lib writes Params::RECOMMENDED_LOG_N (17) at r=8, so this is what every genuine "
+            + "backup costs and a ceiling at or below it refuses every restore. The ceiling bounds "
+            + "the scrypt arena ONLY; whether a backup admitted here can actually complete is a "
+            + "separate question about the helper's whole resident set, pinned by "
+            + "RgbRestoreLimitClampTests against RGBConfiguration.RestoreRamMinBytes.");
     }
 
     [Fact]

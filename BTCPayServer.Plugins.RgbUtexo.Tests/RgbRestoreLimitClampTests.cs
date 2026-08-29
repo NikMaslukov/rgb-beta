@@ -80,14 +80,40 @@ public class RgbRestoreLimitClampTests
         Assert.Equal(cfg.RestoreMaxStagingEntries, limits.MaxStagingEntries);
     }
 
+    const long ResidentSetMeasuredOutsideAScryptArenaOfTwoHundredAndFiftySixMegabytes =
+        290L * 1024 * 1024 - 128L * 8 * (1L << 18);
+
     [Fact]
-    public void TheRestoreRamFloorStillAdmitsWhatTheScryptGuardAdmits()
+    public void TheShippedRestoreRamCapAdmitsTheWholeProcessARestoreAtTheScryptCeilingNeeds()
+    {
+        var limits = new RGBConfiguration().ToRestoreLimits();
+        var residentSetOfABackupAdmittedAtTheGuardsCeiling =
+            Services.RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes
+            + ResidentSetMeasuredOutsideAScryptArenaOfTwoHundredAndFiftySixMegabytes;
+
+        Assert.Equal(
+            Services.RestoreKillReason.None,
+            Services.RestoreWatchdog.ShouldKill(
+                dirSizeBytes: 0,
+                rssBytes: residentSetOfABackupAdmittedAtTheGuardsCeiling,
+                limits));
+    }
+
+    [Fact]
+    public void TheRestoreRamFloorAdmitsTheScryptCeilingPlusTheResidentSetItIsNotMeasuredWith()
     {
         Assert.True(
             RGBConfiguration.RestoreRamMinBytes
-                >= Services.RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes,
-            "the child now enforces the RAM cap on itself, so a floor below the scrypt cost the "
-            + "pre-flight guard admits would refuse a backup that guard just passed");
+                >= Services.RgbBackupScryptGuard.DefaultMaxScryptMemoryBytes
+                    + ResidentSetMeasuredOutsideAScryptArenaOfTwoHundredAndFiftySixMegabytes,
+            "the pre-flight guard bounds the scrypt ARENA alone, computed arithmetically from the "
+            + "backup's own log_n and r, while RestoreWatchdog.ShouldKill compares this cap against "
+            + "the helper process's TOTAL resident set — the arena PLUS the CLR, the helper "
+            + "assemblies, librgblibcffi and the decrypt/inflate buffers. Total resident set is "
+            + "strictly greater than the arena, so a floor EQUAL to the guard's ceiling kills a "
+            + "backup the guard just admitted, and because this constant is the clamp's floor an "
+            + "operator cannot compensate by lowering it. Restore is the only recovery route for a "
+            + "funded wallet, so that is a permanent false REJECT.");
         Assert.True(
             RGBConfiguration.RestoreDiskCapMinBytes
                 >= Services.RgbBackupValidator.MaxTotalUncompressedBytes,

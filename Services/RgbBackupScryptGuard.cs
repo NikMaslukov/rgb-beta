@@ -38,9 +38,6 @@ public static class RgbBackupScryptGuard
         + "out of temporary disk space or cannot write to it, and the underlying storage error is "
         + "recorded in the server log.";
 
-    // 512 MiB: four times the 128 MiB an honest rgb-lib backup asks for, so a legitimate file from a
-    // future rgb-lib that raises log_n by one or two still restores, while the multi-GiB requests
-    // that make this a DoS do not.
     public const long DefaultMaxScryptMemoryBytes = 536_870_912;
 
     // scrypt's work is proportional to p as well as to N*r, and no honest producer needs

@@ -48,7 +48,7 @@ RGB_ELECTRUM_URL=ssl://electrum.blockstream.info:60002
 RGB_BASE_DIR=/data
 
 # RGB proxy endpoint for consignment exchange
-RGB_PROXY_ENDPOINT=rpc://proxy.iriswallet.com:443/json-rpc
+RGB_PROXY_ENDPOINT=rpcs://proxy.iriswallet.com/0.2/json-rpc
 
 # Bounds on automatic colorable-UTXO creation, which signs and broadcasts a Bitcoin
 # transaction unattended. Set the cap to 0 to disable it entirely; the "Create UTXOs"
@@ -70,6 +70,31 @@ RGB_AUTO_UTXO_MAX_BACKOFF_MINUTES=160
 RGB_NATIVE_SEND_TIMEOUT_SECONDS=30
 RGB_NATIVE_SEND_CPU_LIMIT_SECONDS=30
 
+# Largest amount of memory the out-of-process RGB send helper may use, in bytes. Accepted range
+# 67108864..2147483648; a value outside it is clamped rather than ignored. The budget covers the
+# whole helper, including the rgb-lib wallet construction and chain sync every send pays before
+# the native call starts, so a wallet holding many transfers or allocations can need more than
+# the shipped 512 MiB. Raise it if sends are stopped with a native memory limit message; a wallet
+# whose helper is stopped there every time cannot move its assets at all.
+RGB_NATIVE_SEND_RAM_CAP_BYTES=536870912
+
+# Largest amount of memory the out-of-process backup restore may use, in bytes. Accepted range
+# 624951296..4294967296; a value outside it is clamped rather than ignored, so this knob can only
+# raise the budget. This limit is measured on the whole restore helper process, while the pre-flight
+# guard bounds only the scrypt arena declared inside the backup file, so the floor is that arena
+# ceiling plus the resident set the helper needs outside it: a floor at the arena ceiling alone would
+# kill a backup that guard had just passed.
+RGB_RESTORE_RAM_CAP_BYTES=624951296
+
+# Largest number of staging entries a restored wallet directory may hold. This counts directories
+# as well as files, and it is counted after rgb-lib decompresses the wallet directory, while
+# backup validation counts only the entries of the outer archive — which holds a single encrypted
+# file — so a backup validation accepted can still be refused here. rgb-lib never prunes the
+# per-transfer files and directories it writes, so a wallet with many thousands of transfers
+# reaches this count legitimately while staying far under RGB_RESTORE_DISK_CAP_BYTES. A value of
+# 0 or less is ignored; a value below 1000 is raised to 1000; there is no upper clamp.
+RGB_RESTORE_MAX_STAGING_ENTRIES=20000
+
 # Deadlines for the out-of-process backup restore. Accepted range 1-3600 seconds; a larger value
 # is raised to 3600. Raising these does not weaken the restore watchdog's other limits: its disk,
 # memory and staging-entry caps are evaluated on every poll independently of the deadline, so a
@@ -86,10 +111,10 @@ RGB_RESTORE_CPU_LIMIT_SECONDS=30
 RGB_RESTORE_DISK_CAP_BYTES=536870912
 ```
 
-An unparseable or non-positive value for any of the four timing knobs, or for
-`RGB_RESTORE_DISK_CAP_BYTES`, is ignored, leaving the configured value in place. A value above the
-stated range is raised to the range's maximum rather than ignored, so over-asking never silently
-leaves the 30-second default behind.
+An unparseable or non-positive value for any of the four timing knobs, or for any of the byte caps
+above, is ignored, leaving the configured value in place. A value above the stated range is raised to
+the range's maximum rather than ignored, so over-asking never silently leaves the 30-second default
+behind.
 
 ### Configuration File
 
@@ -192,9 +217,11 @@ API is ignored rather than rejected.
 
 | Network | Default Electrum URL | Proxy Endpoint |
 |---------|---------------------|----------------|
-| Mainnet | ssl://electrum.blockstream.info:60002 | rpc://proxy.iriswallet.com:443/json-rpc |
-| Testnet | ssl://electrum.blockstream.info:60002 | rpc://proxy.iriswallet.com:443/json-rpc |
-| Regtest | tcp://127.0.0.1:50001 (local electrs) | rpc://regtest.thunderstack.org:3000/json-rpc |
+| Mainnet | ssl://electrum.iriswallet.com:50003 | rpcs://proxy.iriswallet.com/0.2/json-rpc |
+| Testnet | ssl://electrum.iriswallet.com:50013 | rpcs://proxy.iriswallet.com/0.2/json-rpc |
+| Signet | ssl://electrum.iriswallet.com:50033 | rpcs://proxy.iriswallet.com/0.2/json-rpc |
+| Utexo | https://esplora-api.utexo.com | rpcs://rgb-proxy.utexo.com/json-rpc |
+| Regtest | tcp://regtest.thunderstack.org:50001 | rpc://regtest.thunderstack.org:3000/json-rpc |
 
 ## User Guide
 
