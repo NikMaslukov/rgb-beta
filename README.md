@@ -1,6 +1,6 @@
 # RGB BTCPay Server Plugin
 
-> **Beta notice:** This package is currently in beta. Please test thoroughly in development environments before using in production.
+> **Beta notice:** This plugin is beta because the RGB protocol implementation it builds on is still prerelease — no stable release of the underlying RGB libraries exists yet. Their versions are fixed by a committed lockfile, but a prerelease implementation can still change. Test thoroughly in a development environment before using in production.
 
 Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 
