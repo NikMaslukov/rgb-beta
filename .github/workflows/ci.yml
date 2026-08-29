@@ -169,6 +169,19 @@ jobs:
           rustc --version && cargo --version
           cargo test --release --locked
 
+      # Report-only, and deliberately so. RustSec publishes advisories continuously, so a hard gate here
+      # turns a pull request red for a change its author did not make, and every fix has to travel through
+      # a full RgbVerifyCffi republish before it can land — days of red on unrelated work. continue-on-error
+      # keeps the finding in the run summary without blocking a merge. The managed side is not silent
+      # either: NuGetAudit is on by SDK default (mode all, level low) and already emits NU190x advisory
+      # warnings during the restore steps in the other two jobs, also without failing them.
+      - name: Report RustSec advisories for native/rgb-verify's own Cargo.lock (rgb-lib and the SQLite it statically links are NOT covered - they arrive prebuilt inside the RgbLib NuGet package)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cargo install cargo-audit --locked
+          cargo audit
+
       # The manifest records the crate sources and build recipe the published RgbVerifyCffi native is
       # built from. It cannot show that the package's binary was compiled from them, but it does catch a
       # source change that was never recorded, and this is the job that owns those sources. release.yml

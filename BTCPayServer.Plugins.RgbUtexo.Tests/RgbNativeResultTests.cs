@@ -139,4 +139,55 @@ public class RgbNativeResultTests
         inner.SetValue(box, new IntPtr(1234));
         Assert.Equal(new IntPtr(1234), inner.GetValue(box));
     }
+
+    static RgbLib.CResult Opaque(RgbLib.CResultValue result, ulong opaqueType, IntPtr ptr) =>
+        new() { result = result, inner = new RgbLib.COpaqueStruct { ty = opaqueType, ptr = ptr } };
+
+    [Fact]
+    public void TheErrArmOfACResult_FreesItsOwnedErrorStringExactlyOnce()
+    {
+        var (svc, freed) = Build();
+        var ptr = Marshal.StringToCoTaskMemUTF8("InvalidInvoice");
+
+        svc.FreeCResultErrorString(
+            Opaque(RgbLib.CResultValue.Err, RgbLibService.RawUtf8StringOpaqueType, ptr));
+
+        Assert.Equal(new[] { ptr }, freed);
+    }
+
+    [Fact]
+    public void TheOkArmOfACResult_IsNeverFreedAsAString_ItsInnerIsABoxedObject()
+    {
+        var (svc, freed) = Build();
+        var ptr = Marshal.StringToCoTaskMemUTF8("not an error string");
+
+        svc.FreeCResultErrorString(
+            Opaque(RgbLib.CResultValue.Ok, RgbLibService.RawUtf8StringOpaqueType, ptr));
+
+        Assert.Empty(freed);
+        Marshal.FreeCoTaskMem(ptr);
+    }
+
+    [Fact]
+    public void ACResultErrWhoseOpaqueTypeIsNotTheRawStringTag_IsNeverFreedAsAString()
+    {
+        var (svc, freed) = Build();
+        var ptr = Marshal.StringToCoTaskMemUTF8("typed payload, not a CString");
+
+        svc.FreeCResultErrorString(Opaque(RgbLib.CResultValue.Err, 1, ptr));
+
+        Assert.Empty(freed);
+        Marshal.FreeCoTaskMem(ptr);
+    }
+
+    [Fact]
+    public void ACResultErrWithANullInnerPointer_IsNotHandedToTheDeallocator()
+    {
+        var (svc, freed) = Build();
+
+        svc.FreeCResultErrorString(
+            Opaque(RgbLib.CResultValue.Err, RgbLibService.RawUtf8StringOpaqueType, IntPtr.Zero));
+
+        Assert.Empty(freed);
+    }
 }

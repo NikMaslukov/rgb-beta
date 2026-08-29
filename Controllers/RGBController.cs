@@ -377,9 +377,11 @@ public class RGBController : Controller
             return View("Setup", model);
         }
 
-        var tempPath = Path.Combine(Path.GetTempPath(), $"rgb-restore-{Guid.NewGuid():N}.rgb");
+        string? uploadDir = null;
         try
         {
+            uploadDir = RgbRestoreUploadStaging.CreateDirectoryForAttempt(_cfg, model.SelectedNetwork);
+            var tempPath = Path.Combine(uploadDir, RgbRestoreUploadStaging.UploadedBackupFileName);
             await using (var stream = System.IO.File.Create(tempPath))
             {
                 await model.BackupFile.CopyToAsync(stream);
@@ -415,8 +417,7 @@ public class RGBController : Controller
         }
         finally
         {
-            if (System.IO.File.Exists(tempPath))
-                System.IO.File.Delete(tempPath);
+            RgbRestoreUploadStaging.DeleteDirectoryForAttemptWithEverythingRgbLibLeftInside(uploadDir, _log);
         }
     }
 

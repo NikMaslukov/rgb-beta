@@ -957,11 +957,25 @@ public class RgbLibService : IRgbLibService
         }, ct);
     }
 
+    internal const ulong RawUtf8StringOpaqueType = 0;
+
+    internal void FreeCResultErrorString(CResult result)
+    {
+        if (result.result == CResultValue.Ok)
+            return;
+        if (result.inner.ty != RawUtf8StringOpaqueType)
+            return;
+        if (result.inner.ptr == IntPtr.Zero)
+            return;
+        _stringFree(result.inner.ptr);
+    }
+
     public RgbInvoiceData DecodeInvoice(string invoiceString)
     {
         var newResult = rgblib_invoice_new(invoiceString);
         if (newResult.result != CResultValue.Ok)
         {
+            FreeCResultErrorString(newResult);
             throw new RgbLibException("Invalid RGB invoice");
         }
 

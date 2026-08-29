@@ -517,8 +517,8 @@ public class RgbNativeSourcePinTests
         string[] readers = ["ReadNativeResult", "ReadRgbLibString"];
 
         // Resolved by DECLARING TYPE, not by the identifier: this file also reads `.inner` on a
-        // CResult (the invoice_new path this change deliberately leaves unfreed), and a name-based
-        // clause would redden that correct code.
+        // CResult, whose opaque inner is freed by FreeCResultErrorString and free_invoice rather than
+        // by either of these two readers, and a name-based clause would redden that correct code.
         var typed = tree.GetRoot().DescendantNodes().OfType<MemberAccessExpressionSyntax>()
             .Where(m => m.Name.Identifier.ValueText == "inner")
             .Where(m => model.GetSymbolInfo(m).Symbol is IFieldSymbol f
@@ -697,6 +697,38 @@ public class RgbNativeSourcePinTests
         var declared = SingleDeclarator(body, "dataResult");
         var call = Assert.IsType<InvocationExpressionSyntax>(declared.Initializer!.Value);
         Assert.Equal("rgblib_invoice_data", NameOf(call));
+    }
+
+    [Fact]
+    public void DecodeInvoice_FreesTheInvoiceNewErrorStringBeforeItThrows()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(RgbLibFile);
+        var method = RoslynPins.Method(tree, "RgbLibService", "DecodeInvoice");
+        var body = RoslynPins.BodyOf(method);
+        RoslynPins.AssertNoLocalShadow(method, "FreeCResultErrorString");
+
+        var free = SingleInvocation(body, "FreeCResultErrorString");
+        var symbol = Assert.IsAssignableFrom<IMethodSymbol>(RoslynPins.BoundSymbol(plugin, tree, free));
+        Assert.Equal(RgbLibServiceType, symbol.ContainingType.ToDisplayString());
+
+        Assert.True(free.ArgumentList.Arguments.Count == 1
+                    && free.ArgumentList.Arguments[0].Expression
+                        is IdentifierNameSyntax { Identifier.ValueText: "newResult" },
+            "the free must be given invoice_new's own result, or the leaked error string is not the "
+            + $"one freed, found '{free.ArgumentList}'");
+
+        var branch = free.Ancestors().OfType<IfStatementSyntax>().FirstOrDefault();
+        Assert.True(branch != null,
+            "the free must sit inside the non-Ok branch; on the Ok arm the same pointer is a boxed "
+            + "Invoice and freeing it as a string is heap corruption");
+
+        var statements = Assert.IsType<BlockSyntax>(branch!.Statement).Statements;
+        var freeIndex = statements.IndexOf(free.FirstAncestorOrSelf<StatementSyntax>()!);
+        var throwIndex = statements.IndexOf(statements.OfType<ThrowStatementSyntax>().Single());
+        Assert.True(freeIndex >= 0 && freeIndex < throwIndex,
+            $"the free must be a statement of the branch that precedes the throw, found free at "
+            + $"{freeIndex} and throw at {throwIndex}");
     }
 
     static void AssertReadsTheNativeResult(PluginCompilation plugin, SyntaxTree tree,
