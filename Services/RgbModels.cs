@@ -23,6 +23,8 @@ public class UtxoInfo
 
 public record Outpoint(string Txid, int Vout);
 
+public sealed record UnspentWithConfirmation(Outpoint Outpoint, bool ConfirmedInABlock);
+
 public class RgbAllocation
 {
     [JsonPropertyName("asset_id")] public string AssetId { get; set; } = "";

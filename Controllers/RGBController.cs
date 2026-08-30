@@ -609,7 +609,8 @@ public class RGBController : Controller
         {
             var balance = await _wallets.GetBtcBalanceAsync(wallet.Id);
             var unspents = await _wallets.ListUnspentsAsync(wallet.Id);
-            model.VanillaBalance = balance.Vanilla.Spendable;
+            model.VanillaBalance = balance.Vanilla.Settled;
+            model.PendingVanillaBalance = Math.Max(0, balance.Vanilla.Future - balance.Vanilla.Settled);
             model.ColoredBalance = balance.Colored.Spendable;
             model.VanillaUtxoCount = unspents.Count(u => !u.Utxo.Colorable);
             return null;

@@ -30,9 +30,16 @@
                 else
                 {
                     <div class="d-flex justify-content-between mb-2">
-                        <span>Vanilla (sendable)</span>
+                        <span>Vanilla (confirmed, sendable)</span>
                         <strong>@Model.VanillaBalance.ToString("N0") sats</strong>
                     </div>
+                    @if (Model.PendingVanillaBalance > 0)
+                    {
+                        <div class="d-flex justify-content-between mb-2 text-muted">
+                            <span>Awaiting confirmation</span>
+                            <span>@Model.PendingVanillaBalance.ToString("N0") sats</span>
+                        </div>
+                    }
                     <div class="d-flex justify-content-between mb-2 text-muted">
                         <span>Colored (reserved for RGB)</span>
                         <span>@Model.ColoredBalance.ToString("N0") sats</span>
@@ -102,7 +109,7 @@
                     </div>
 
                     <button type="submit" class="btn btn-primary" id="sendBtn"
-                            onclick="if(!this.form.reportValidity()) return false; if(!confirm(document.getElementById('Amount').value === '@Model.VanillaBalance' ? 'Send your entire spendable balance of ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?\n\nThe network fee is deducted from this amount, so the destination receives slightly less.' : 'Send ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
+                            onclick="if(!this.form.reportValidity()) return false; if(!confirm(document.getElementById('Amount').value === '@Model.VanillaBalance' ? 'Send your entire confirmed balance of ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?\n\nThe network fee is deducted from this amount, so the destination receives slightly less.' : 'Send ' + document.getElementById('Amount').value + ' sats to ' + document.getElementById('DestinationAddress').value + '?')) return false; this.disabled=true; this.innerHTML='<span class=\'fa fa-spinner fa-spin\'></span> Sending...'; this.form.submit(); return false;">
                         <span class="fa fa-paper-plane"></span> Send BTC
                     </button>
                 </form>

@@ -207,6 +207,7 @@ public class RGBSendBtcViewModel : StoreViewModel
     public float FeeRate { get; set; } = 2.0f;
 
     public long VanillaBalance { get; set; }
+    public long PendingVanillaBalance { get; set; }
     public long ColoredBalance { get; set; }
     public int VanillaUtxoCount { get; set; }
 

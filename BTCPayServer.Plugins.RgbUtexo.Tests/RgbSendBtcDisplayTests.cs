@@ -74,7 +74,8 @@ public class RgbSendBtcDisplayTests
         var controller = Build(new BalanceWalletService
         {
             Balance = () => new BtcBalance(
-                new BalanceInfo { Spendable = 12_345 }, new BalanceInfo { Spendable = 678 }),
+                new BalanceInfo { Settled = 12_345, Future = 20_000, Spendable = 19_000 },
+                new BalanceInfo { Spendable = 678 }),
             Unspents = () => [Utxo(false), Utxo(false), Utxo(true)]
         });
         var model = new RGBSendBtcViewModel();
@@ -84,8 +85,27 @@ public class RgbSendBtcDisplayTests
         Assert.Null(failure);
         Assert.False(model.BalanceUnavailable);
         Assert.Equal(12_345, model.VanillaBalance);
+        Assert.Equal(7_655, model.PendingVanillaBalance);
         Assert.Equal(678, model.ColoredBalance);
         Assert.Equal(2, model.VanillaUtxoCount);
+    }
+
+    [Fact]
+    public async Task TheSendFormNeverOffersMoreThanTheSendPathWillActuallySpend()
+    {
+        var controller = Build(new BalanceWalletService
+        {
+            Balance = () => new BtcBalance(
+                new BalanceInfo { Settled = 1_000, Future = 500_000, Spendable = 499_000 },
+                new BalanceInfo()),
+            Unspents = () => [Utxo(false)]
+        });
+        var model = new RGBSendBtcViewModel();
+
+        await controller.PopulateSendBtcBalance(new RGBWallet { Id = "w" }, model);
+
+        Assert.Equal(1_000, model.VanillaBalance);
+        Assert.Equal(499_000, model.PendingVanillaBalance);
     }
 
     [Fact] // G1-T11 — failure arm; the returned message is the only thing preserving the native detail

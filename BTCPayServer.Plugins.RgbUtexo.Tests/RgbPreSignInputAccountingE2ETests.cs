@@ -271,8 +271,8 @@ public sealed class RgbPreSignInputAccountingE2ETests
 
         public Task<string> BroadcastTransactionAsync(string rawTxHex, CancellationToken ct = default) => throw Unreached();
 
-        public Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(Script script, CancellationToken ct = default)
-            => throw Unreached();
+        public Task<IReadOnlyList<UnspentWithConfirmation>> ListUnspentWithConfirmationByScriptAsync(
+            Script script, CancellationToken ct = default) => throw Unreached();
 
         public void Dispose() { }
 

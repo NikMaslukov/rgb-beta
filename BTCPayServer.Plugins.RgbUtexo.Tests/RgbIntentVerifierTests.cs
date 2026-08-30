@@ -13,13 +13,22 @@ public class RgbIntentVerifierTests
     {
         public Func<string, string>? RawTx;
         public Func<Script, IReadOnlyList<Outpoint>>? Unspent;
+        public bool UnspentRowsAreConfirmed = true;
+        public int UnspentCallCount;
         public Task ConnectAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<string> GetRawTransactionAsync(string txid, CancellationToken ct = default)
             => Task.FromResult(RawTx?.Invoke(txid) ?? throw new InvalidOperationException("no raw tx"));
         public Task<string> BroadcastTransactionAsync(string rawTxHex, CancellationToken ct = default)
             => throw new NotSupportedException();
-        public Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(Script script, CancellationToken ct = default)
-            => Task.FromResult(Unspent?.Invoke(script) ?? (IReadOnlyList<Outpoint>)Array.Empty<Outpoint>());
+        public Task<IReadOnlyList<UnspentWithConfirmation>> ListUnspentWithConfirmationByScriptAsync(
+            Script script, CancellationToken ct = default)
+        {
+            UnspentCallCount++;
+            return Task.FromResult<IReadOnlyList<UnspentWithConfirmation>>(
+                (Unspent?.Invoke(script) ?? Array.Empty<Outpoint>())
+                    .Select(o => new UnspentWithConfirmation(o, UnspentRowsAreConfirmed))
+                    .ToList());
+        }
         public void Dispose() { }
     }
 
@@ -365,6 +374,55 @@ public class RgbIntentVerifierTests
             Amount = 900
         };
         await c.Run();
+    }
+
+    [Fact]
+    public async Task TheGateReachesTheSameVerdictWhetherTheIndexerRowsAreConfirmedOrNot()
+    {
+        var confirmed = await RunConcreteChangeVerificationWithChainRowsConfirmed(true);
+        var unconfirmed = await RunConcreteChangeVerificationWithChainRowsConfirmed(false);
+
+        Assert.Equal("accepted", confirmed);
+        Assert.True(confirmed == unconfirmed,
+            "The pre-sign gate matches staged inputs by outpoint and must not change its verdict "
+            + "when confirmation state changes; if this fails, widening IBitcoinChainClient altered "
+            + $"the gate's contract, which this change is required to leave untouched. Confirmed rows gave '{confirmed}', unconfirmed rows gave '{unconfirmed}'.");
+    }
+
+    async Task<string> RunConcreteChangeVerificationWithChainRowsConfirmed(bool rowsAreConfirmed)
+    {
+        var c = Valid();
+        var fundingTx = Net.CreateTransaction();
+        fundingTx.Inputs.Add(new OutPoint(uint256.One, 0));
+        fundingTx.Outputs.Add(new TxOut(Money.Coins(1), c.ChangeScript));
+        var fundingTxid = fundingTx.GetHash().ToString();
+        c.Chain.RawTx = _ => fundingTx.ToHex();
+        c.Chain.Unspent = _ => new List<Outpoint> { new(fundingTxid, 0) };
+        c.Chain.UnspentRowsAreConfirmed = rowsAreConfirmed;
+        c.Validate.Legs[1] = new RgbLeg
+        {
+            AssignmentType = 4000,
+            SealKind = "revealedConcreteOutpoint",
+            Outpoint = $"{fundingTxid}:0",
+            DerivationPath = c.ChangePath.ToString(),
+            Amount = 900
+        };
+
+        string verdict;
+        try
+        {
+            await c.Run();
+            verdict = "accepted";
+        }
+        catch (RgbIntentVerificationException ex)
+        {
+            verdict = $"rejected: {ex.Message}";
+        }
+
+        Assert.True(c.Chain.UnspentCallCount > 0,
+            "This fixture must actually reach the gate's unspent lookup, or it proves nothing about "
+            + "whether confirmation state can influence the gate's verdict.");
+        return verdict;
     }
 
     [Fact]

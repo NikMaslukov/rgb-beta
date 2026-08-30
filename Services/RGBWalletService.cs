@@ -1828,6 +1828,104 @@ public class RGBWalletService : IRGBWalletService
         finally { sendLock.Release(); }
     }
 
+    internal static string RefusalForABroadcastThisServerCouldNotAccountFor(
+        string txid, Exception broadcastFailure) =>
+        "This server signed a Bitcoin transaction and could not confirm that it reached the network. "
+        + (Controllers.RgbOperatorFacingFailure.MessageComesFromAnOperatorFacingLayerNotTheDotnetRuntime(
+                broadcastFailure)
+            ? $"The broadcast reported: {broadcastFailure.Message} "
+            : "What the broadcast reported is in the BTCPay server log. ")
+        + $"The transaction this server signed has id {txid}. Look that id up in a block explorer for "
+        + "this wallet's network before sending again, because this server cannot tell you whether it "
+        + "is there: if it is, the payment is already on its way and sending again would pay a second "
+        + "time.";
+
+    internal static bool TheIndexerReturnedExactlyThisTransaction(
+        string rawHex, Transaction signed, Network network)
+    {
+        try
+        {
+            var returned = Transaction.Parse(rawHex.Trim(), network);
+            return returned.GetHash() == signed.GetHash()
+                && returned.GetWitHash() == signed.GetWitHash();
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    internal static readonly TimeSpan BroadcastReconciliationDeadline = TimeSpan.FromSeconds(20);
+
+    async Task<bool> TheNetworkAlreadyHoldsTheSignedTransactionAsync(
+        string walletNetwork, Transaction signed)
+    {
+        var txid = signed.GetHash().ToString();
+        try
+        {
+            using var deadline = new CancellationTokenSource(BroadcastReconciliationDeadline);
+            var settings = RGBConfiguration.GetNetworkSettings(walletNetwork);
+            using var probe = BitcoinChainClientFactory.Create(
+                settings.ElectrumUrl, allowInsecure: NetworkSettings.AllowsPlainElectrum(walletNetwork));
+            await probe.ConnectAsync(deadline.Token);
+            var rawHex = await probe.GetRawTransactionAsync(txid, deadline.Token);
+            return TheIndexerReturnedExactlyThisTransaction(
+                rawHex, signed, NetworkHelper.GetNetwork(walletNetwork));
+        }
+        catch (Exception probeFailure)
+        {
+            _log.LogWarning(probeFailure,
+                "Could not determine whether transaction {Txid} reached the network", txid);
+            return false;
+        }
+    }
+
+    internal static async Task<Transaction> ParentTransactionAsync(
+        IBitcoinChainClient electrum,
+        Dictionary<string, Transaction> cache,
+        string expectedTxid,
+        Network network,
+        CancellationToken ct)
+    {
+        if (cache.TryGetValue(expectedTxid, out var cached))
+            return cached;
+
+        var rawHex = await electrum.GetRawTransactionAsync(expectedTxid, ct);
+        var rawTx = Transaction.Parse(rawHex, network);
+        if (rawTx.GetHash().ToString() != expectedTxid)
+            throw new InvalidOperationException(
+                $"Electrum returned transaction with wrong txid: expected {expectedTxid}, got {rawTx.GetHash()}");
+        cache[expectedTxid] = rawTx;
+        return rawTx;
+    }
+
+    internal static async Task<bool?> ConfirmationOfAsync(
+        IBitcoinChainClient electrum,
+        Dictionary<string, Transaction> cache,
+        HashSet<Script> scriptsAlreadyAsked,
+        Dictionary<(string Txid, int Vout), bool> confirmationByOutpoint,
+        Outpoint outpoint,
+        Network network,
+        CancellationToken ct)
+    {
+        if (confirmationByOutpoint.TryGetValue((outpoint.Txid, outpoint.Vout), out var alreadyAnswered))
+            return alreadyAnswered;
+
+        var parent = await ParentTransactionAsync(electrum, cache, outpoint.Txid, network, ct);
+        if (outpoint.Vout < 0 || outpoint.Vout >= parent.Outputs.Count)
+            return null;
+
+        var script = parent.Outputs[outpoint.Vout].ScriptPubKey;
+        if (!scriptsAlreadyAsked.Add(script))
+            return null;
+
+        var rows = await electrum.ListUnspentWithConfirmationByScriptAsync(script, ct);
+        foreach (var row in rows)
+            confirmationByOutpoint[(row.Outpoint.Txid, row.Outpoint.Vout)] = row.ConfirmedInABlock;
+
+        return ConfirmedBtcInputSelection.ConfirmationOf(outpoint, rows);
+    }
+
     async Task<(string Txid, long AmountSent, long Fee)> SendBtcInternalAsync(string walletId, string destinationAddress, long amountSats, float feeRate, CancellationToken ct)
     {
         var wallet = await GetWalletOrThrow(walletId, ct);
@@ -1844,58 +1942,41 @@ public class RGBWalletService : IRGBWalletService
         if (spendableUtxos.Count == 0)
             throw new InvalidOperationException("No spendable UTXOs available (all UTXOs have RGB allocations)");
 
-        var selected = new List<UnspentOutput>();
-        long totalInput = 0;
-        foreach (var utxo in spendableUtxos)
-        {
-            selected.Add(utxo);
-            totalInput += utxo.Utxo.BtcAmount;
-            if (totalInput >= amountSats + EstimateTaprootFee(selected.Count, 2, feeRate))
-                break;
-        }
-
-        var minFee = EstimateTaprootFee(selected.Count, 1, feeRate);
-        if (amountSats == totalInput)
-        {
-            amountSats = totalInput - minFee;
-            if (amountSats < 546)
-                throw new InvalidOperationException("Amount after fee would be below dust limit (546 sats)");
-        }
-        else if (totalInput < amountSats + minFee)
-        {
-            var maxSendable = totalInput - minFee;
-            throw new InvalidOperationException(
-                $"Insufficient funds after fee. Maximum sendable: {maxSendable:N0} sats (from {totalInput:N0} sats, fee ~{minFee:N0} sats)");
-        }
-
         var networkSettings = RGBConfiguration.GetNetworkSettings(wallet.Network);
         var allowsPlainElectrum = NetworkSettings.AllowsPlainElectrum(wallet.Network);
         using var electrum = BitcoinChainClientFactory.Create(networkSettings.ElectrumUrl, allowInsecure: allowsPlainElectrum);
         await electrum.ConnectAsync(ct);
 
         var rawTxCache = new Dictionary<string, Transaction>();
-        foreach (var utxo in selected)
-        {
-            if (!rawTxCache.ContainsKey(utxo.Utxo.Outpoint.Txid))
-            {
-                var expectedTxid = utxo.Utxo.Outpoint.Txid;
-                var rawHex = await electrum.GetRawTransactionAsync(expectedTxid, ct);
-                var rawTx = Transaction.Parse(rawHex, network);
-                if (rawTx.GetHash().ToString() != expectedTxid)
-                    throw new InvalidOperationException(
-                        $"Electrum returned transaction with wrong txid: expected {expectedTxid}, got {rawTx.GetHash()}");
-                rawTxCache[expectedTxid] = rawTx;
-            }
-        }
+        var scriptsAlreadyAsked = new HashSet<Script>();
+        var confirmationByOutpoint = new Dictionary<(string Txid, int Vout), bool>();
+
+        var walk = await ConfirmedBtcInputSelection.WalkConfirmedCandidatesAsync(
+            spendableUtxos
+                .Select(u => new ConfirmedBtcInputSelection.Candidate(u.Utxo.Outpoint, u.Utxo.BtcAmount))
+                .ToList(),
+            amountSats,
+            feeRate,
+            (outpoint, token) =>
+                ConfirmationOfAsync(
+                    electrum, rawTxCache, scriptsAlreadyAsked, confirmationByOutpoint,
+                    outpoint, network, token),
+            ct);
+
+        var choice = ConfirmedBtcInputSelection.ChooseOrRefuse(
+            walk.Confirmed, amountSats, feeRate, walk.UnconfirmedSatsSkipped);
+
+        var byOutpoint = spendableUtxos.ToDictionary(u => (u.Utxo.Outpoint.Txid, u.Utxo.Outpoint.Vout));
+        var selected = choice.Inputs
+            .Select(c => byOutpoint[(c.Outpoint.Txid, c.Outpoint.Vout)])
+            .ToList();
+        amountSats = choice.AmountSats;
+        var fee = choice.Fee;
+        var change = choice.Change;
+        var hasChange = choice.HasChange;
 
         var changeAddress = BitcoinAddress.Create(
             await _rgbLib.GetAddressAsync(walletId, ct), network);
-
-        var fee = EstimateTaprootFee(selected.Count, 2, feeRate);
-        var change = totalInput - amountSats - fee;
-        var hasChange = change >= 546;
-        if (!hasChange)
-            fee = totalInput - amountSats;
 
         var tx = Transaction.Create(network);
         foreach (var utxo in selected)
@@ -1916,7 +1997,8 @@ public class RGBWalletService : IRGBWalletService
         for (int i = 0; i < selected.Count; i++)
         {
             var utxo = selected[i];
-            var prevTx = rawTxCache[utxo.Utxo.Outpoint.Txid];
+            var prevTx = await ParentTransactionAsync(
+                electrum, rawTxCache, utxo.Utxo.Outpoint.Txid, network, ct);
             var prevOut = prevTx.Outputs[utxo.Utxo.Outpoint.Vout];
             psbt.Inputs[i].WitnessUtxo = prevOut;
         }
@@ -1937,7 +2019,21 @@ public class RGBWalletService : IRGBWalletService
 
         var signedTx = psbt.ExtractTransaction();
         var localTxid = signedTx.GetHash().ToString();
-        var broadcastTxid = await electrum.BroadcastTransactionAsync(signedTx.ToHex(), ct);
+        string broadcastTxid;
+        try
+        {
+            broadcastTxid = await electrum.BroadcastTransactionAsync(signedTx.ToHex(), ct);
+        }
+        catch (Exception broadcastFailure)
+        {
+            if (!await TheNetworkAlreadyHoldsTheSignedTransactionAsync(wallet.Network, signedTx))
+                throw new InvalidOperationException(
+                    RefusalForABroadcastThisServerCouldNotAccountFor(localTxid, broadcastFailure),
+                    broadcastFailure);
+            _log.LogWarning(broadcastFailure,
+                "Broadcast reply was lost for {Txid}, but the indexer holds that transaction", localTxid);
+            broadcastTxid = localTxid;
+        }
         if (!string.Equals(broadcastTxid, localTxid, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"Broadcast returned mismatched txid: expected {localTxid}, got {broadcastTxid}");

@@ -426,7 +426,7 @@ public class StagedSendRecoveryTests : IDisposable
                 : Task.FromResult(BroadcastResult!);
         }
 
-        public Task<IReadOnlyList<Outpoint>> ListUnspentByScriptAsync(
+        public Task<IReadOnlyList<UnspentWithConfirmation>> ListUnspentWithConfirmationByScriptAsync(
             Script script, CancellationToken ct = default) => throw new NotSupportedException();
 
         public void Dispose() { }
