@@ -58,7 +58,7 @@ public static class RgbNativeSend
         });
 
         var wallet = new RgbLibWallet(walletConfig, keysConfig);
-        wallet.GoOnline(request.ElectrumUrl, true);
+        BringOnlineFreeingTheNativeOnlinePayload(wallet, request.ElectrumUrl, true);
         return operation switch
         {
             "send-begin" => InvokeNative(wallet, "rgblib_send_begin",
@@ -69,6 +69,36 @@ public static class RgbNativeSend
                 request.FeeRate, request.MinConfirmations),
             _ => throw new InvalidDataException($"unknown native send operation '{operation}'")
         };
+    }
+
+    static void BringOnlineFreeingTheNativeOnlinePayload(RgbLibWallet wallet, string electrumUrl,
+        bool skipConsistencyCheck)
+    {
+        var assembly = typeof(RgbLibWallet).Assembly;
+        var native = assembly.GetType("RgbLib.NativeMethods")
+            ?? throw new MissingMemberException("RgbLib.NativeMethods");
+        var walletField = typeof(RgbLibWallet).GetField("_wallet", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingFieldException("RgbLibWallet._wallet");
+        var onlineField = typeof(RgbLibWallet).GetField("_onlineJson", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingFieldException("RgbLibWallet._onlineJson");
+        var method = native.GetMethod("rgblib_go_online")
+            ?? throw new MissingMethodException("rgblib_go_online");
+
+        var onlineOptionsJson = JsonSerializer.Serialize(new
+        {
+            indexer_url = electrumUrl,
+            skip_consistency_check = skipConsistencyCheck,
+            vanilla_sync_lookback = 100u
+        });
+
+        object?[] args = [walletField.GetValue(wallet)!, onlineOptionsJson];
+        var result = method.Invoke(null, args);
+        walletField.SetValue(wallet, args[0]);
+
+        var onlineJson = ReadResult(result, "rgblib_go_online");
+        if (onlineJson.Length == 0)
+            throw new InvalidOperationException("go_online returned an empty online JSON");
+        onlineField.SetValue(wallet, onlineJson);
     }
 
     static string InvokeNative(RgbLibWallet wallet, string methodName, string payload, float feeRate,

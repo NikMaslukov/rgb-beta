@@ -67,12 +67,19 @@ public class RgbDryRunSourcePinTests
     static string NameOf(InvocationExpressionSyntax invocation) => invocation.Expression switch
     {
         MemberAccessExpressionSyntax m => m.Name.Identifier.ValueText,
+        MemberBindingExpressionSyntax b => b.Name.Identifier.ValueText,
         IdentifierNameSyntax i => i.Identifier.ValueText,
         _ => string.Empty
     };
 
-    static string ReceiverOf(InvocationExpressionSyntax invocation) =>
-        invocation.Expression is MemberAccessExpressionSyntax m ? m.Expression.ToString() : string.Empty;
+    static string ReceiverOf(InvocationExpressionSyntax invocation) => invocation.Expression switch
+    {
+        MemberAccessExpressionSyntax m => m.Expression.ToString(),
+        MemberBindingExpressionSyntax => invocation.Ancestors()
+            .OfType<ConditionalAccessExpressionSyntax>().FirstOrDefault()?.Expression.ToString()
+            ?? string.Empty,
+        _ => string.Empty
+    };
 
     static int StringLiteralOccurrences(SyntaxNode root, string value) =>
         root.DescendantTokens()
@@ -97,6 +104,38 @@ public class RgbDryRunSourcePinTests
         root.DescendantNodes().OfType<InvocationExpressionSyntax>()
             .Where(i => NameOf(i) == "GetMethod" && i.ArgumentList.Arguments.Count >= 1)
             .ToList();
+
+    static Dictionary<(string Member, string Local), string> LiteralBoundMethodInfoLocalsByDeclaringMember(
+        SyntaxNode root) =>
+        root.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Initializer != null
+                        && Unwrap(v.Initializer.Value) is InvocationExpressionSyntax call
+                        && NameOf(call) == "GetMethod"
+                        && call.ArgumentList.Arguments.Count >= 1
+                        && Unwrap(call.ArgumentList.Arguments[0].Expression)
+                            is LiteralExpressionSyntax { Token.Value: string })
+            .GroupBy(v => (EnclosingMember(v), v.Identifier.ValueText))
+            .Select(g => (g.Key, Natives: g
+                .Select(v => (string)((LiteralExpressionSyntax)Unwrap(
+                        ((InvocationExpressionSyntax)Unwrap(v.Initializer!.Value))
+                            .ArgumentList.Arguments[0].Expression)).Token.Value!)
+                .Distinct(StringComparer.Ordinal)
+                .ToList()))
+            .Where(x => x.Natives.Count == 1)
+            .ToDictionary(x => x.Key, x => x.Natives[0]);
+
+    static bool NativeMethodDeclaresNoDryRunParameter(string nativeMethod)
+    {
+        var nativeMethods = typeof(RgbLibWallet).Assembly.GetType("RgbLib.NativeMethods");
+        Assert.True(nativeMethods != null,
+            "RgbLib.NativeMethods is absent from the shipped RgbLib assembly; a literal-bound native "
+            + "call site cannot be cleared of dry_run without it");
+        var method = nativeMethods!.GetMethod(nativeMethod);
+        Assert.True(method != null,
+            $"RgbLib.NativeMethods.{nativeMethod} is absent from the shipped RgbLib assembly, so the "
+            + "literal-bound call site naming it resolves to null at run time");
+        return method!.GetParameters().All(p => p.Name != DryRun);
+    }
 
     static string SoleDynamicallyDispatchedMethodInfoLocal(SyntaxNode root, string where)
     {
@@ -395,14 +434,86 @@ public class RgbDryRunSourcePinTests
             $"{HelperFile} {HelperMember}");
 
         var methodInfoLocal = SoleDynamicallyDispatchedMethodInfoLocal(helperRoot, HelperFile);
+        var literalBoundNativeByLocal = LiteralBoundMethodInfoLocalsByDeclaringMember(helperRoot);
         var invokeCalls = helperRoot.DescendantNodes().OfType<InvocationExpressionSyntax>()
-            .Where(i => NameOf(i) == "Invoke" && ReceiverOf(i) == methodInfoLocal)
+            .Where(i => NameOf(i) == "Invoke")
             .ToList();
-        Assert.True(invokeCalls.Count == 1,
-            $"expected exactly one `{methodInfoLocal}.Invoke` in {HelperFile}, found {invokeCalls.Count}. "
-            + $"A second one is a call site whose dry_run this pin does not inspect. " + Asymmetry);
-        Assert.True(EnclosingMember(invokeCalls[0]) == HelperMember,
+        var literalBoundInvokes = invokeCalls
+            .Where(i => literalBoundNativeByLocal.ContainsKey((EnclosingMember(i), ReceiverOf(i))))
+            .ToList();
+
+        var dynamicInvokes = invokeCalls.Except(literalBoundInvokes).ToList();
+        Assert.True(dynamicInvokes.Count == 1,
+            $"expected exactly one `.Invoke` in {HelperFile} whose receiver is not a local bound from a "
+            + $"literal native name, found {dynamicInvokes.Count} "
+            + $"({string.Join(", ", dynamicInvokes.Select(i => $"{EnclosingMember(i)}:{ReceiverOf(i)}"))}). "
+            + "Anything this pin cannot prove is literal-bound counts as a native dispatch whose dry_run "
+            + "it does not inspect — a MethodInfo reached through a parameter, a field or an alias is "
+            + "exactly how an eight-argument send_begin call can be routed past the args array this pin "
+            + "reads. If a receiver here is not a MethodInfo at all, give it a name this pin is not "
+            + $"asked to judge rather than relaxing the clause. " + Asymmetry);
+        Assert.True(EnclosingMember(dynamicInvokes[0]) == HelperMember,
             $"the live native invocation must stay inside {HelperType}.{HelperMember}; it is now in "
-            + $"'{EnclosingMember(invokeCalls[0])}'. " + Asymmetry);
+            + $"'{EnclosingMember(dynamicInvokes[0])}'. " + Asymmetry);
+        Assert.True(ReceiverOf(dynamicInvokes[0]) == methodInfoLocal,
+            $"the live native invocation dispatches through '{ReceiverOf(dynamicInvokes[0])}'; it must "
+            + $"dispatch through '{methodInfoLocal}', the one local this pin proved is bound from a "
+            + $"non-literal native name. " + Asymmetry);
+
+        foreach (var call in literalBoundInvokes)
+        {
+            var native = literalBoundNativeByLocal[(EnclosingMember(call), ReceiverOf(call))];
+            Assert.True(NativeMethodDeclaresNoDryRunParameter(native),
+                $"{HelperFile} invokes the literal-bound native '{native}' inside "
+                + $"{EnclosingMember(call)}, and RgbLib.NativeMethods.{native} declares a "
+                + $"'{DryRun}' parameter that no clause of this pin inspects. " + Asymmetry);
+        }
+
+        var methodInfoLocals = helperRoot.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Initializer != null
+                        && Unwrap(v.Initializer.Value) is InvocationExpressionSyntax bind
+                        && NameOf(bind) == "GetMethod")
+            .Select(v => (EnclosingMember(v), v.Identifier.ValueText))
+            .ToHashSet();
+        var argumentArrayLocals = helperRoot.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => (v.Parent as VariableDeclarationSyntax)?.Type is ArrayTypeSyntax
+                        || (v.Initializer != null
+                            && Unwrap(v.Initializer.Value)
+                                is CollectionExpressionSyntax or ArrayCreationExpressionSyntax
+                                    or ImplicitArrayCreationExpressionSyntax))
+            .Select(v => (EnclosingMember(v), v.Identifier.ValueText))
+            .ToHashSet();
+
+        var rebinds = helperRoot.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is IdentifierNameSyntax id
+                        && (methodInfoLocals.Contains((EnclosingMember(a), id.Identifier.ValueText))
+                            || argumentArrayLocals.Contains((EnclosingMember(a), id.Identifier.ValueText))))
+            .ToList();
+        Assert.True(rebinds.Count == 0,
+            $"{HelperFile} reassigns a MethodInfo local or a native argument array after binding it "
+            + $"({string.Join(", ", rebinds.Select(a => $"{EnclosingMember(a)}: {a}"))}). Every clause "
+            + "above reads a call site's receiver and arguments where they are DECLARED, so a later "
+            + "rebind lets a cleared receiver carry send_begin to rgb-lib, or replaces the inspected "
+            + $"array with one whose dry_run this pin never reads. " + Asymmetry);
+        var argumentWrites = helperRoot.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => a.Left is ElementAccessExpressionSyntax element
+                        && element.Expression is IdentifierNameSyntax id
+                        && argumentArrayLocals.Contains((EnclosingMember(a), id.Identifier.ValueText)))
+            .ToList();
+        Assert.True(argumentWrites.Count == 0,
+            $"{HelperFile} writes into a native argument array after building it "
+            + $"({string.Join(", ", argumentWrites.Select(a => $"{EnclosingMember(a)}: {a}"))}). This "
+            + "pin reads the argument list where the array is CONSTRUCTED, so a later element write can "
+            + $"set dry_run = true on send_begin while every clause above stays green. " + Asymmetry);
+
+        var indirectDispatch = helperRoot.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Select(NameOf)
+            .Where(n => n is "CreateDelegate" or "DynamicInvoke")
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        Assert.True(indirectDispatch.Count == 0,
+            $"{HelperFile} dispatches reflectively through {string.Join(", ", indirectDispatch)}. Every "
+            + "clause above finds native call sites by looking for `.Invoke`, so a MethodInfo turned "
+            + $"into a delegate reaches rgb-lib without any of them reading its dry_run. " + Asymmetry);
     }
 }
