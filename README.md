@@ -9,7 +9,10 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 
 ## Features
 
-- Accept RGB20 token payments alongside Bitcoin
+- Accept RGB payments alongside Bitcoin. The supported schema is **NIA** (non-inflatable fungible
+  assets). CFA and UDA are **not** supported, and the plugin declares that to rgb-lib rather than
+  claiming otherwise, so an asset it could not afterwards enumerate or spend is never accepted
+  into a wallet in the first place
 - Issue new RGB assets directly from BTCPay
 - Two-step invoice settlement (Processing → Settled) matching BTCPay's native Bitcoin flow
 - Full UTXO management for RGB allocations
@@ -37,8 +40,10 @@ Accept RGB asset payments (tokens, stablecoins) in BTCPay Server.
 ### Environment Variables
 
 ```bash
-# Electrum server for blockchain data
-RGB_ELECTRUM_URL=ssl://electrum.blockstream.info:60002
+# Indexer for blockchain data. This overrides the per-network default from the Network Defaults
+# table below for EVERY network, so set it only when you run your own indexer, and make sure the
+# value matches the network your wallets are on. Leave it unset to use the defaults.
+RGB_ELECTRUM_URL=ssl://electrum.iriswallet.com:50003
 
 # Parent directory for RGB wallet data; each wallet lands in
 # <base>/<Network>/rgb-wallets/<wallet-id>. Without rgb.json the base is this variable, or the
@@ -213,6 +218,13 @@ on any of these notices.
 Both keys are simply absent from the configuration type, so sending either through the Greenfield
 API is ignored rather than rejected.
 
+**3. CFA is no longer declared to rgb-lib.** No action is needed, but the behaviour is worth knowing.
+The plugin reads only the NIA collection from rgb-lib's asset list, so a CFA asset was never shown,
+never priced and never spendable — yet earlier versions told rgb-lib they supported the schema, so
+such an asset could be accepted into a wallet and then sit there invisible. It is now refused at the
+boundary instead. If a wallet took in a CFA asset under an earlier version it was already invisible
+and still is; nothing about this release makes a previously usable asset unusable.
+
 ### Network Defaults
 
 | Network | Default Electrum URL | Proxy Endpoint |
@@ -231,7 +243,7 @@ API is ignored rather than rejected.
 2. In the left sidebar, click **RGB Wallet**
 3. You will land on the **Setup** page
 4. Enter a wallet name (e.g. "My RGB Wallet")
-5. Select the network (Mainnet, Testnet, or Regtest)
+5. Select the network — **Regtest**, **Testnet**, **Signet**, **Utexo** or **Mainnet**
 6. Click **Create Wallet**
 
 The plugin generates a new wallet with two keypairs: one for regular BTC transactions and one for RGB (colored) operations. The mnemonic is encrypted and stored securely within BTCPay.
@@ -299,6 +311,29 @@ Once configured, RGB will appear as a payment method on your invoices:
    - **Processing** — Payment detected, waiting for blockchain confirmations
    - **Settled** — Payment fully confirmed
 
+### Sending BTC and RGB Assets
+
+**Send RGB Asset** takes an `rgb:` invoice from the recipient, the asset and the amount. Every send
+passes the pre-sign gate described under [Security Model](#security-model) before anything is signed.
+
+**Send BTC** moves plain (vanilla) sats out of the wallet — used to recover funds, or to clear a
+stuck rgb-lib reservation.
+
+**This path spends confirmed outputs only.** An unconfirmed output can still be replaced or evicted
+by whoever created it, and a payment built on one can then never confirm — while BTCPay has already
+reported it sent, with a txid. So the send form shows two figures:
+
+- **Vanilla (confirmed, sendable)** — what the wallet can actually spend right now. This is the
+  number **Send max** fills in and the maximum the amount field will accept.
+- **Awaiting confirmation** — deposits seen but not yet mined. This is *not* spendable, and appears
+  only when there is some.
+
+If the confirmed balance cannot cover the amount plus the network fee, the send is refused and the
+message tells you how much is confirmed, roughly what the fee would be, how much is still waiting to
+be mined, and an amount that will go through. Waiting for a block is the whole remedy — nothing needs
+to be reconfigured. Sending the full confirmed balance deducts the fee from the amount rather than
+refusing, so the destination receives slightly less than the figure shown.
+
 ### Monitoring
 
 - **Dashboard** — Overview of BTC balance, colored balance, UTXO count, and asset list
@@ -313,6 +348,12 @@ Once configured, RGB will appear as a payment method on your invoices:
 3. Confirm the action
 
 This removes the wallet from BTCPay (DB records, assets, invoices) but leaves the wallet data directory on disk for backup purposes.
+
+Deletion is **refused**, not queued, while the wallet could still be mid-transfer — the message names
+which case you hit: a pending durable recovery, a staged outbound transfer rgb-lib has not resolved,
+or native access still in flight. This is deliberate: deleting the row is what the startup recovery
+sweep uses to find such a transfer again, so removing it early would strand the transfer with no way
+back. Let the transfer settle or fail, then retry the deletion.
 
 ## Invoice Settlement Flow
 
@@ -413,7 +454,17 @@ A non-custodial mode with external signer support (offline PSBT signing, hardwar
 
 ### DataProtection Key Backup
 
-The mnemonic encryption keys are stored in your BTCPay data directory (e.g., `~/.btcpayserver/Main/DataProtection/`). If these files are lost (disk failure, container recreation without persistent volume), all encrypted mnemonics become permanently unrecoverable. **Back up these files alongside your database.**
+The mnemonic encryption keys are the `key-*.xml` files written **directly in your BTCPay data
+directory** — for a default mainnet install, `~/.btcpayserver/Main/key-*.xml`. There is no
+`DataProtection/` subdirectory; backing one up copies nothing. The directory is per network
+(`Main`, `TestNet`, `Signet`, `RegTest`), and the ring that matters is the one belonging to the
+data directory BTCPay actually ran with when the wallet was created — starting BTCPay with a
+different `BTCPAY_NETWORK` makes it read a different ring, and the mnemonics stop decrypting
+until the original ring is copied across.
+
+If these files are lost (disk failure, container recreation without a persistent volume), every
+encrypted mnemonic becomes permanently unrecoverable and the assets go with them. **Back up the
+key ring together with the `RGB_Wallets` rows — either alone is useless.**
 
 ## Dependencies
 
@@ -487,11 +538,15 @@ An extra native supplied by either package does not expand this table by itself.
 ### How the `linux-x64` gate native reaches you
 
 The `linux-x64` gate native comes from the **`RgbVerifyCffi` package on nuget.org**, pinned by the
-`<PackageReference Include="RgbVerifyCffi" Version="0.11.1-rc.10-native.2" />` item in
-`BTCPayServer.Plugins.RgbUtexo.csproj` and hash-locked in `packages.lock.json`. No binary is tracked in
-this repository. BTCPay's hosted Plugin Builder runs only `dotnet restore` + `dotnet publish`, the
-package drops its asset at `runtimes/linux-x64/native/librgbverifycffi.so`, and the `.btcpay` bundle is a
-flat ZIP of that publish directory, so the package's native is in the artifact a merchant installs.
+`<PackageReference Include="RgbVerifyCffi" Version="[0.11.1-rc.10-native.2]" />` item in
+`BTCPayServer.Plugins.RgbUtexo.csproj` and hash-locked in `packages.lock.json`. The square brackets are
+NuGet's exact-version syntax and are load-bearing: `scripts/verify-gate-native-package-hashes.sh`
+rejects any range form, because a floating version lets the gate native change under a hash line
+nobody rewrote. No binary is tracked in this repository.
+
+BTCPay's hosted Plugin Builder runs only `dotnet restore` + `dotnet publish`, the package drops its
+asset at `runtimes/linux-x64/native/librgbverifycffi.so`, and the `.btcpay` bundle is a flat ZIP of
+that publish directory, so the package's native is in the artifact a merchant installs.
 
 The core native (`librgblibcffi.so`) comes from the `RgbLib` package on nuget.org, so a `linux-x64`
 publish carries the complete pair the pre-sign gate needs.
@@ -546,14 +601,18 @@ The pre-sign verification library (`native/rgb-verify`, built by `native/rgb-ver
 
 ```bash
 # stage every gate-package RID and pack (host RID natively, cross RIDs in containers)
-scripts/pack-rgbverify.sh --require-all-rids --version 0.11.1-rc.10-native.1
+scripts/pack-rgbverify.sh --require-all-rids --version <NEW-VERSION>
 
 # pack only what is already staged (what CI's assemble job does)
-scripts/pack-rgbverify.sh --pack-only --require-all-rids --version 0.11.1-rc.10-native.1
+scripts/pack-rgbverify.sh --pack-only --require-all-rids --version <NEW-VERSION>
 
 # run the pack-pipeline checks: package layout, both RID guards, and the Debian load check
 scripts/pack-rgbverify.sh --verify
 ```
+
+`<NEW-VERSION>` must be a version that has never been published: the currently pinned
+`0.11.1-rc.10-native.2` cannot be re-packed, because Rust builds are not byte-reproducible and a
+restore that already holds that version fails with `NU1403`.
 
 `--stage` and `--pack-only` are independent switches, not modes; passing neither does both. The
 gate-package RID set (`linux-x64`, `linux-arm64`, `osx-arm64`) is declared in the packaging project's
