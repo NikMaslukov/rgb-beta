@@ -158,7 +158,7 @@ public class RgbLibService : IRgbLibService
             ["bitcoin_network"] = NetworkHelper.MapNetworkToRgbLibFormat(walletNetwork),
             ["database_type"] = "Sqlite",
             ["max_allocations_per_utxo"] = maxAllocationsPerUtxo,
-            ["supported_schemas"] = new[] { "Nia", "Cfa" }
+            ["supported_schemas"] = RgbAssetSchemaSupport.TheOnlySchemasThisPluginCanEnumerateAndSpend
         };
 
         var keysConfig = new Dictionary<string, object?>

@@ -46,7 +46,7 @@ public static class RgbNativeSend
             ["bitcoin_network"] = request.BitcoinNetwork,
             ["database_type"] = "Sqlite",
             ["max_allocations_per_utxo"] = request.MaxAllocationsPerUtxo,
-            ["supported_schemas"] = new[] { "Nia", "Cfa" }
+            ["supported_schemas"] = RgbAssetSchemaSupport.TheOnlySchemasThisPluginCanEnumerateAndSpend
         });
         var keysConfig = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
