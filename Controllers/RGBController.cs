@@ -309,6 +309,7 @@ public class RGBController : Controller
     [HttpPost("restore-backup")]
     [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
     [BoundRgbBackupUploadToConfiguredLimit]
+    [BoundRgbBackupUploadConcurrency]
     public async Task<IActionResult> RestoreFromBackup([FromRoute] string storeId, RGBSetupViewModel model)
     {
         if (await _wallets.GetWalletForStoreAsync(storeId) != null)
@@ -900,7 +901,7 @@ public class RGBController : Controller
         string? tempPath = null;
         try
         {
-            tempPath = await _wallets.BackupWalletAsync(wallet.Id, password);
+            tempPath = await _wallets.BackupWalletAsync(wallet.Id, password, HttpContext.RequestAborted);
             var stream = new FileStream(tempPath, FileMode.Open, FileAccess.Read,
                 FileShare.Read, 4096, FileOptions.DeleteOnClose);
             return File(stream, "application/octet-stream", $"rgb-wallet-backup-{DateTime.UtcNow:yyyyMMdd}.rgb");

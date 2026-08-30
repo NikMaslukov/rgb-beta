@@ -343,7 +343,7 @@ public class RgbNativeSourcePinTests
     }
 
     // Every field this service resolves out of RgbLib.NativeMethods, against the entry point it must
-    // resolve. Pinning the field at the CALL SITE leaves a transposition among these twelve near-identical
+    // resolve. Pinning the field at the CALL SITE leaves a transposition among these sixteen near-identical
     // constructor lines completely invisible: the site still reads _getBtcBalanceMethod, the argument array
     // and the freeing reader are still right, every source pin stays green, and production calls the wrong
     // native function. Measured: binding _getBtcBalanceMethod to rgblib_get_address passed 38/38.
@@ -361,6 +361,10 @@ public class RgbNativeSourcePinTests
         ("_listTransactionsMethod", "rgblib_list_transactions"),
         ("_sendBeginMethod", "rgblib_send_begin"),
         ("_sendEndMethod", "rgblib_send_end"),
+        ("_goOnlineMethod", "rgblib_go_online"),
+        ("_generateKeysMethod", "rgblib_generate_keys"),
+        ("_restoreKeysMethod", "rgblib_restore_keys"),
+        ("_backupMethod", "rgblib_backup"),
     ];
 
     public static TheoryData<string, string> NativeBindingRows()
@@ -590,25 +594,6 @@ public class RgbNativeSourcePinTests
         // this file is where every native call in the plugin is funnelled.
         var reviewed = new Dictionary<string, string>
         {
-            // Reflected onto NativeMethods + ReadNativeResult, which reads once and frees in a finally.
-            // Kept as keys rather than deleted so re-introducing a typed call is a visible change here.
-            ["GoOnline"] =
-                "LEAKS ONE STRING PER WALLET LOAD, deliberately not reflected. The document is NOT "
-                + "unknowable: beta.30 serialises exactly indexer_url, the supplied skip_consistency_check "
-                + "and a constant vanilla_sync_lookback=100. It is not reflected because this is the one "
-                + "wrapper whose failure means no wallet ever comes online, and it leaks only per wallet "
-                + "LOAD — on the pathological path that re-loads it (a failed write-ahead evicts the "
-                + "handle, so the next poll rebuilds), rgb-lib reconstructs an entire wallet each time and "
-                + "this string is a rounding error beside that. Recorded as debt, not as impossible.",
-            ["GenerateKeys"] =
-                "LEAKS ONE STRING PER WALLET CREATION, deliberately not reflected. The earlier reason "
-                + "recorded here — that witness_version is a value the call site does not have — was "
-                + "FALSE: the one-argument overload forwards the visible literal \"Taproot\". It stays "
-                + "unreflected on value, not on ignorance: the argument selects KEY DERIVATION, so an "
-                + "error here is fund loss, and the whole prize is one string per wallet ever created.",
-            ["Backup"] =
-                "NOT IN THIS CLASS: rgblib_backup returns a CResult whose inner is a COpaqueStruct, not a "
-                + "string, so there is no marshalled payload for ReadNativeResult to own or free.",
             ["Dispose"] =
                 "MARSHALS NOTHING: rgblib_drop_wallet returns void, so there is no CResultString payload "
                 + "for ReadNativeResult to own or free. It is called on the failure path of wallet "
@@ -616,10 +601,7 @@ public class RgbNativeSourcePinTests
                 + "otherwise abandon a LIVE native wallet still holding rgb_runtime.lock — the failed Lazy "
                 + "is never IsValueCreated so the cache cannot reach it, and beta.30 declares no finalizer "
                 + "so the Rust Drop that removes that marker would never run. The next construction would "
-                + "then reclaim a live owner's marker and open a second wallet on one directory.",
-            ["RestoreKeys"] =
-                "LEAKS ONE STRING PER WALLET RESTORE, deliberately not reflected: same witness_version "
-                + "literal, same derivation risk, same one-string prize as GenerateKeys."
+                + "then reclaim a live owner's marker and open a second wallet on one directory."
         };
 
         var called = tree.GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>()

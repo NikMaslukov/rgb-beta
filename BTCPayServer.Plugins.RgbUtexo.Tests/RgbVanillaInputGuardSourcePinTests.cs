@@ -208,14 +208,22 @@ public class RgbVanillaInputGuardSourcePinTests
         Assert.True(byMember.Count == expected.Count + 1,
             $"{CreateUtxos}'s SigningPolicy assigns {byMember.Count} member(s): "
             + $"{string.Join(", ", byMember.Keys)}. It must assign exactly "
-            + $"{string.Join(", ", expected.Keys)} and AllowedScripts — no more, no fewer. A dropped "
-            + "member falls back to a permissive default; an added one is an unpinned policy decision.");
+            + $"{string.Join(", ", expected.Keys)} and AllowedScripts — no more, no fewer. Most dropped "
+            + "members fall back to a more permissive default; the one exception is "
+            + "MaxFeeSatsPerAdditionalInput, whose zero default trips the MORE restrictive "
+            + "value-proportional/absolute-floor branch instead. An added member is an unpinned policy "
+            + "decision either way.");
 
         foreach (var (member, value) in expected)
         {
             Assert.True(byMember.TryGetValue(member, out var actual),
-                $"{CreateUtxos}'s SigningPolicy no longer assigns {member}; its default is more "
-                + "permissive than the value this path requires");
+                member == "MaxFeeSatsPerAdditionalInput"
+                    ? $"{CreateUtxos}'s SigningPolicy no longer assigns {member}; its zero default trips "
+                      + "the value-proportional/absolute-floor branch instead of the shape-bounded pair, "
+                      + "which is MORE restrictive on dust-valued inputs and can permanently false-reject "
+                      + "an honest sweep — the opposite of a permissive default"
+                    : $"{CreateUtxos}'s SigningPolicy no longer assigns {member}; its default is more "
+                      + "permissive than the value this path requires");
             var normalized = string.Concat(actual!.ToString().Where(c => !char.IsWhiteSpace(c)));
             Assert.True(normalized == value,
                 $"{CreateUtxos}: {member} must be `{value}`, it is `{normalized}`. These six values are "
@@ -248,6 +256,207 @@ public class RgbVanillaInputGuardSourcePinTests
                     && initializer.Contains("GetAddressAsync", StringComparison.Ordinal),
             $"{CreateUtxos}: the single allowed script must derive from this wallet's own address, "
             + $"obtained through GetAddressAsync; '{addressLocal}' is initialised from `{initializer}`");
+    }
+
+    [Fact]
+    public void SendAssetPolicy_BindsEverySecurityCriticalValue()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ServiceFile);
+        var method = RoslynPins.Method(tree, ServiceType, SendAsset);
+        var policy = PolicyReaching(plugin, SendAsset, LocalSink, 3);
+
+        var assignments = policy.Initializer?.Expressions.OfType<AssignmentExpressionSyntax>().ToList()
+            ?? [];
+        var byMember = assignments.ToDictionary(a => a.Left.ToString(), a => a.Right);
+
+        var expected = new Dictionary<string, string>
+        {
+            ["MaxUnknownOutputSats"] = "0",
+            ["MaxFeeSats"] = "SendAssetMaxFeeSatsAtOneInput(sendAssetRoundedFeeRate)",
+            ["MaxFeeSatsPerAdditionalInput"] = "SendAssetMaxFeeSatsPerAdditionalInput(sendAssetRoundedFeeRate)",
+            ["MaxOutputCount"] = "10",
+            ["RequireUnfinalizedWitnessProgramInputs"] = "true"
+        };
+
+        Assert.True(byMember.Count == expected.Count + 1,
+            $"{SendAsset}'s SigningPolicy assigns {byMember.Count} member(s): "
+            + $"{string.Join(", ", byMember.Keys)}. It must assign exactly "
+            + $"{string.Join(", ", expected.Keys)} and AllowedScripts — no more, no fewer. Most dropped "
+            + "members fall back to a more permissive default; the one exception is "
+            + "MaxFeeSatsPerAdditionalInput, whose zero default trips the MORE restrictive "
+            + "value-proportional/absolute-floor branch instead. An added member is an unpinned policy "
+            + "decision either way. In particular, a MaxFeeSats with no MaxFeeSatsPerAdditionalInput "
+            + "beside it is a flat ceiling that does not scale with input count: rgb-lib's send_begin "
+            + "can select as many vanilla and colored inputs as the invoice needs, so a flat ceiling "
+            + "refuses the honest fee of any send that needs enough inputs — permanently, because the "
+            + "ceiling is bounded in input count while the honest fee is not, so some input count is "
+            + "eventually refused at every feeRate even though the exact count where refusal starts is "
+            + "feeRate-dependent.");
+
+        foreach (var (member, value) in expected)
+        {
+            Assert.True(byMember.TryGetValue(member, out var actual),
+                member == "MaxFeeSatsPerAdditionalInput"
+                    ? $"{SendAsset}'s SigningPolicy no longer assigns {member}; its zero default trips "
+                      + "the value-proportional/absolute-floor branch instead of the shape-bounded pair, "
+                      + "which is MORE restrictive on dust-valued inputs and can permanently false-reject "
+                      + "an honest send — the opposite of a permissive default"
+                    : $"{SendAsset}'s SigningPolicy no longer assigns {member}; its default is more "
+                      + "permissive than the value this path requires");
+            var normalized = string.Concat(actual!.ToString().Where(c => !char.IsWhiteSpace(c)));
+            Assert.True(normalized == value,
+                $"{SendAsset}: {member} must be `{value}`, it is `{normalized}`. These five values plus "
+                + "AllowedScripts (checked below) are the whole of the SendAsset signing policy; any "
+                + "drift is a security regression, not a "
+                + "refactor. MaxFeeSats and MaxFeeSatsPerAdditionalInput must stay a PAIR here exactly as "
+                + "on the create-UTXOs path, and for the same reason: collapsing the pair back into one "
+                + "absolute number reintroduces a ceiling that cannot scale with the actual number of "
+                + "inputs rgb-lib selects, which is a PERMANENT false-reject for any send that needs "
+                + "enough of them.");
+        }
+
+        var allowed = Assert.IsType<ObjectCreationExpressionSyntax>(byMember["AllowedScripts"]);
+        Assert.True(allowed.Type.ToString() == "HashSet<Script>",
+            $"{SendAsset}: AllowedScripts must be a HashSet<Script>, it is `{allowed.Type}`");
+        var element = Assert.Single(allowed.Initializer?.Expressions ?? default);
+        var access = Assert.IsType<MemberAccessExpressionSyntax>(element);
+        Assert.True(access.Name.Identifier.ValueText == "ScriptPubKey",
+            $"{SendAsset}: the single allowed script must be a ScriptPubKey, it is `{element}`");
+
+        var addressLocal = Assert.IsType<IdentifierNameSyntax>(access.Expression).Identifier.ValueText;
+        var declarator = RoslynPins.BodyOf(method).DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Single(v => v.Identifier.ValueText == addressLocal);
+        var initializer = declarator.Initializer?.Value.ToString() ?? string.Empty;
+        Assert.True(initializer.Contains("BitcoinAddress.Create", StringComparison.Ordinal)
+                    && initializer.Contains("GetAddressAsync", StringComparison.Ordinal),
+            $"{SendAsset}: the single allowed script must derive from this wallet's own address, "
+            + $"obtained through GetAddressAsync; '{addressLocal}' is initialised from `{initializer}`");
+    }
+
+    [Fact]
+    public void SendAssetSendBeginFeeRateArgument_IsTheSameRoundedLocalTheFeeCeilingIsBuiltFrom()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ServiceFile);
+        var method = RoslynPins.Method(tree, ServiceType, SendAsset);
+        var body = RoslynPins.BodyOf(method);
+
+        var roundedDeclarators = body.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Initializer != null
+                && v.Initializer.Value.ToString() == "SendAssetRoundedFeeRate(feeRate)")
+            .ToList();
+        Assert.True(roundedDeclarators.Count == 1,
+            $"{SendAsset} must declare exactly one local initialised from "
+            + $"SendAssetRoundedFeeRate(feeRate); found {roundedDeclarators.Count}. The defect this pins "
+            + "against is NOT two independent (int)Math.Round(feeRate) calls disagreeing with each other "
+            + "— given the same feeRate, Math.Round is deterministic and two such calls always agree. It "
+            + "is one rounded local feeding both rgb-lib and the fee ceiling versus a SEPARATE call site "
+            + "that instead used the UNROUNDED float: at feeRate 1.49, rgb-lib builds at "
+            + "round(1.49)=1 while a ceiling built from the float 1.49 directly is computed at a "
+            + "different rate than the one the signer was told to enforce.");
+        var roundedLocal = roundedDeclarators[0].Identifier.ValueText;
+
+        var sendBeginCalls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "RunNativeSendIsolatedAsync"
+                && i.ArgumentList.Arguments.Any(a => a.Expression is LiteralExpressionSyntax lit
+                    && lit.Token.ValueText == "send-begin"))
+            .ToList();
+        Assert.True(sendBeginCalls.Count == 1,
+            $"{SendAsset} must call RunNativeSendIsolatedAsync with operation \"send-begin\" exactly "
+            + $"once; found {sendBeginCalls.Count}");
+        var feeRateArgument = sendBeginCalls[0].ArgumentList.Arguments[3].Expression.ToString();
+        Assert.True(feeRateArgument == roundedLocal,
+            $"{SendAsset} hands send-begin's feeRate argument `{feeRateArgument}`, not the rounded local "
+            + $"`{roundedLocal}` the fee ceiling below is built from. If these differ, rgb-lib can build "
+            + "the transaction at one rate while the signer's fee ceiling is computed at another, which "
+            + "is the exact shape of the feeRate-mismatch defect this pin exists to close.");
+
+        var bodyText = body.ToString();
+        Assert.Contains($"SendAssetMaxFeeSatsAtOneInput({roundedLocal})", bodyText, StringComparison.Ordinal);
+        Assert.Contains(
+            $"SendAssetMaxFeeSatsPerAdditionalInput({roundedLocal})", bodyText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SendAssetSendEndFeeRateArgument_IsTheSameRoundedLocalTheFeeCeilingIsBuiltFrom()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ServiceFile);
+        var method = RoslynPins.Method(tree, ServiceType, SendAsset);
+        var body = RoslynPins.BodyOf(method);
+
+        var roundedDeclarators = body.DescendantNodes().OfType<VariableDeclaratorSyntax>()
+            .Where(v => v.Initializer != null
+                && v.Initializer.Value.ToString() == "SendAssetRoundedFeeRate(feeRate)")
+            .ToList();
+        Assert.True(roundedDeclarators.Count == 1,
+            $"{SendAsset} must declare exactly one local initialised from "
+            + $"SendAssetRoundedFeeRate(feeRate); found {roundedDeclarators.Count}. "
+            + $"{nameof(SendAssetSendBeginFeeRateArgument_IsTheSameRoundedLocalTheFeeCeilingIsBuiltFrom)} "
+            + "already explains why this local must be single and shared.");
+        var roundedLocal = roundedDeclarators[0].Identifier.ValueText;
+
+        var sendEndCalls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(i => i.Expression.ToString() == "RunNativeSendIsolatedAsync"
+                && i.ArgumentList.Arguments.Any(a => a.Expression is LiteralExpressionSyntax lit
+                    && lit.Token.ValueText == "send-end"))
+            .ToList();
+        Assert.True(sendEndCalls.Count == 1,
+            $"{SendAsset} must call RunNativeSendIsolatedAsync with operation \"send-end\" exactly "
+            + $"once; found {sendEndCalls.Count}");
+        var feeRateArgument = sendEndCalls[0].ArgumentList.Arguments[3].Expression.ToString();
+        Assert.True(feeRateArgument == roundedLocal,
+            $"{SendAsset} hands send-end's feeRate argument `{feeRateArgument}`, not the rounded local "
+            + $"`{roundedLocal}` the fee ceiling is built from and send-begin also receives. Send-begin's "
+            + "own argument is checked by "
+            + $"{nameof(SendAssetSendBeginFeeRateArgument_IsTheSameRoundedLocalTheFeeCeilingIsBuiltFrom)}, "
+            + "but that pin never inspects the send-end call, so a send-end fed the raw unrounded "
+            + "feeRate instead would pass every other test in this file: rgb-lib would build or verify "
+            + "the transfer at a rate the signer's own fee ceiling was never computed against.");
+    }
+
+    [Fact]
+    public void SendAssetFeeCeilingHelpers_PassTheShapeConstantNotALiteralToEstimateTaprootFee()
+    {
+        var plugin = PluginCompilation.Shared;
+        var tree = plugin.Tree(ServiceFile);
+        var model = plugin.Model(tree);
+
+        var shapeConstantField = plugin.Compilation
+            .GetTypeByMetadataName("BTCPayServer.Plugins.RgbUtexo.Services." + ServiceType)
+            ?.GetMembers("SendAssetFeeShapeOutputCount").OfType<IFieldSymbol>().SingleOrDefault();
+        Assert.True(shapeConstantField != null,
+            $"{ServiceType}.SendAssetFeeShapeOutputCount does not resolve in the plugin compilation");
+
+        foreach (var methodName in new[]
+                 { "SendAssetMaxFeeSatsAtOneInput", "SendAssetMaxFeeSatsPerAdditionalInput" })
+        {
+            var method = RoslynPins.Method(tree, ServiceType, methodName);
+            var body = RoslynPins.BodyOf(method);
+
+            var calls = body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(i => i.Expression.ToString() == "EstimateTaprootFee")
+                .ToList();
+            Assert.True(calls.Count > 0, $"{methodName} must call EstimateTaprootFee; found none");
+
+            foreach (var call in calls)
+            {
+                var outputArg = call.ArgumentList.Arguments[1].Expression;
+                var bound = model.GetSymbolInfo(outputArg).Symbol as IFieldSymbol;
+                Assert.True(
+                    bound != null && SymbolEqualityComparer.Default.Equals(bound, shapeConstantField),
+                    $"{methodName}: EstimateTaprootFee's output-count argument is `{outputArg}`, not the "
+                    + "SendAssetFeeShapeOutputCount field. "
+                    + $"{nameof(RgbSignerFeeCeilingTests.SendAssetFeeShapeOutputCount_IsExactlyTwoNotThree)} "
+                    + "in RgbSignerFeeCeilingTests only pins the field's declared VALUE (2); nothing else "
+                    + "pinned that these two helpers actually CONSUME that field rather than a hardcoded "
+                    + "literal — replacing this argument with a literal 3 in both helpers left the "
+                    + "field's own value unchanged, compiled, and kept the whole managed suite green, "
+                    + "while silently inflating the fee ceiling's base term for a PSBT shape this plugin "
+                    + "can never produce.");
+            }
+        }
     }
 
     // (a) The flag belongs on exactly the two paths that sign a PSBT they did not build, and must NOT

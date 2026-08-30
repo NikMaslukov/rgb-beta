@@ -5,7 +5,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <Product>RGB Payments</Product>
-        <Description>Accept RGB (client-side validated assets) payments in BTCPay Server. Issue and receive RGB20 tokens on Bitcoin.</Description>
+        <Description>Beta: custodial hot-wallet plugin. Accept RGB (client-side validated assets) payments in BTCPay Server. Issue and receive RGB20 tokens on Bitcoin.</Description>
         <Version>1.0.12</Version>
         <Authors>Utexo</Authors>
         <EmbedUntrackedSources>true</EmbedUntrackedSources>

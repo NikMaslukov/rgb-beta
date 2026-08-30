@@ -1340,8 +1340,8 @@ public class RGBWalletService : IRGBWalletService
         var nowUtc = DateTimeOffset.UtcNow;
         if (cooldown.IsCoolingDown(nowUtc))
             throw new InvalidOperationException(
-                "A wallet restore was attempted recently. "
-                + $"Try again in {Math.Ceiling(cooldown.Remaining(nowUtc).TotalSeconds)} seconds.");
+                "A wallet restore was attempted recently. Try again in "
+                + $"{RgbLibService.DescribeRetryDelayWithoutUnderstatingIt(cooldown.Remaining(nowUtc))}.");
 
         // SECURITY: Backup file is validated before reaching native code:
         // - ZIP structure + entry validation (controller ValidateBackupFileHeader)
@@ -2157,8 +2157,9 @@ public class RGBWalletService : IRGBWalletService
             await SetNeedsRecoveryAsync(walletId, ct);
             RgbSendRecoveryJournal.Write(recoveryJournal, RgbSendRecoveryPhase.Staged);
             sendBeginMayHaveRun = true;
+            var sendAssetRoundedFeeRate = SendAssetRoundedFeeRate(feeRate);
             var sendBeginResult = await RunNativeSendIsolatedAsync(
-                wallet, "send-begin", recipientMap, feeRate, 1, signedPsbt: null, ct);
+                wallet, "send-begin", recipientMap, sendAssetRoundedFeeRate, 1, signedPsbt: null, ct);
 
             var parsedSendBegin = JsonSerializer.Deserialize<SendBeginResult>(sendBeginResult)
                 ?? throw new RgbIntentVerificationException("send_begin returned an unparseable result");
@@ -2186,7 +2187,9 @@ public class RGBWalletService : IRGBWalletService
                     new SigningPolicy
                     {
                         MaxUnknownOutputSats = 0,
-                        MaxFeeSats = EstimateTaprootFee(3, 3, feeRate) * 3,
+                        MaxFeeSats = SendAssetMaxFeeSatsAtOneInput(sendAssetRoundedFeeRate),
+                        MaxFeeSatsPerAdditionalInput =
+                            SendAssetMaxFeeSatsPerAdditionalInput(sendAssetRoundedFeeRate),
                         AllowedScripts = new HashSet<Script> { changeAddr.ScriptPubKey },
                         MaxOutputCount = 10,
                         RequireUnfinalizedWitnessProgramInputs = true
@@ -2223,7 +2226,7 @@ public class RGBWalletService : IRGBWalletService
                 sendEndStarted = true;
                 RgbSendRecoveryJournal.FsyncPreSendEndArtifacts(leaseWalletDir, txid);
                 var sendEndResult = await RunNativeSendIsolatedAsync(
-                    wallet, "send-end", recipientMapJson: null, feeRate, 1, signedPsbt, ct);
+                    wallet, "send-end", recipientMapJson: null, sendAssetRoundedFeeRate, 1, signedPsbt, ct);
                 ValidateSendEndTransactionId(sendEndResult, txid);
                 RgbSendRecoveryJournal.RestoreAndFsyncAckBroadcastArtifacts(
                     leaseWalletDir, txid, signedPsbt);
@@ -2414,6 +2417,20 @@ public class RGBWalletService : IRGBWalletService
     internal static long CreateUtxosMaxFeeSatsPerAdditionalInput(int requestCount)
         => EstimateTaprootFee(2, requestCount + 1, CreateUtxosFeeRate) * CreateUtxosFeeCeilingMultiplier
            - CreateUtxosMaxFeeSatsAtOneInput(requestCount);
+
+    internal const int SendAssetFeeShapeOutputCount = 2;
+    internal const int SendAssetFeeCeilingMultiplier = 3;
+    internal const int SendAssetFeeMarginalMultiplier = 2;
+
+    internal static int SendAssetRoundedFeeRate(float feeRate) => (int)Math.Round(feeRate);
+
+    internal static long SendAssetMaxFeeSatsAtOneInput(int feeRate)
+        => EstimateTaprootFee(1, SendAssetFeeShapeOutputCount, feeRate) * SendAssetFeeCeilingMultiplier;
+
+    internal static long SendAssetMaxFeeSatsPerAdditionalInput(int feeRate)
+        => (EstimateTaprootFee(2, SendAssetFeeShapeOutputCount, feeRate)
+            - EstimateTaprootFee(1, SendAssetFeeShapeOutputCount, feeRate))
+           * SendAssetFeeMarginalMultiplier;
 
     async Task<RGBWallet> GetWalletOrThrow(string id, CancellationToken ct = default) =>
         await GetWalletAsync(id, ct) ?? throw new KeyNotFoundException($"wallet {id} not found");

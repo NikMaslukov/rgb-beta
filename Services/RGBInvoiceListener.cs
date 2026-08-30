@@ -653,14 +653,20 @@ public class RGBInvoiceListener : IHostedService
             else if (result.NewStatus.HasValue)
             {
                 var registrationFailed = false;
+                var unregisterable = false;
                 if (result.PaymentStatus.HasValue && !string.IsNullOrEmpty(inv.BtcPayInvoiceId))
                 {
                     foreach (var t in result.PaymentsToRecord)
                     {
                         try
                         {
-                            if (await RecordOrUpdatePayment(inv, t, result.PaymentStatus.Value, wallet.StoreId, ct)
-                                == PaymentRegistration.Failed)
+                            var registration = await RecordOrUpdatePayment(
+                                inv, t, result.PaymentStatus.Value, wallet.StoreId, ct);
+                            if (registration == PaymentRegistration.Unregisterable)
+                            {
+                                unregisterable = true;
+                            }
+                            else if (registration == PaymentRegistration.Failed)
                             {
                                 registrationFailed = true;
                                 pageSucceeded = false;
@@ -679,16 +685,28 @@ public class RGBInvoiceListener : IHostedService
                     }
                 }
 
+                if (unregisterable)
+                {
+                    inv.Status = RGBInvoiceStatus.Failed;
+                    inv.Txid = result.Txid;
+                    inv.ReceivedAmount = result.ReceivedAmount;
+                    _log.LogCritical(
+                        "invoice {Id} marked Failed: the BTCPay invoice cannot register this RGB payment; the asset arrived (txid {Txid}, amount {Amount}); before crediting anything by hand, check the BTCPay invoice for a payment already recorded against it, which a legacy prompt can leave standing and unadvanced",
+                        inv.Id, inv.Txid, inv.ReceivedAmount);
+                    continue;
+                }
+
                 // The condition is CALLED, not inlined, so it can be tested as a pure function and
                 // pinned as a call site.
                 if (!ShouldCommitAdvance(result.NewStatus, registrationFailed))
                 {
                     // LogCritical, not LogWarning, and deliberately repeated every sweep. A held invoice
                     // is a paid customer whose invoice will not settle — the same customer-visible
-                    // symptom as the bug this change fixes. A deterministic failure holds it forever, and
-                    // a warning logged once per poll is not an alarm. This matches the existing
+                    // symptom as the bug this change fixes, and a warning logged once per poll is not an
+                    // alarm. A refusal known to be deterministic no longer reaches here: it classifies
+                    // Unregisterable and closes the row terminally. This matches the existing
                     // zero-amount escalation in this same method.
-                    _log.LogCritical("invoice {Id} held at {Status}: payment registration failed, will retry next sweep",
+                    _log.LogCritical("invoice {Id} held at {Status}: payment registration failed, will be retried on a later sweep",
                         inv.Id, inv.Status);
                     continue;
                 }
@@ -831,6 +849,7 @@ public class RGBInvoiceListener : IHostedService
     {
         Recorded,
         Declined,
+        Unregisterable,
         Failed
     }
 
@@ -856,7 +875,7 @@ public class RGBInvoiceListener : IHostedService
         InvoiceEntity? after, PaymentPrompt? prompt, string paymentId)
     {
         if (after is null) return PaymentRegistration.Declined;
-        if (prompt is null) return PaymentRegistration.Declined;
+        if (prompt is null) return PaymentRegistration.Unregisterable;
         return after.GetPayments(false).Any(p => p.Id == paymentId)
             ? PaymentRegistration.Recorded
             : PaymentRegistration.Failed;
@@ -873,21 +892,22 @@ public class RGBInvoiceListener : IHostedService
 
         if (!RGBPaymentMethodHandler.WalletBelongsToStore(invoiceEntity.StoreId, expectedStoreId))
         {
-            _log.LogWarning("BTCPay invoice {Id} (store {InvoiceStoreId}) does not belong to wallet store {ExpectedStoreId}; skipping payment record",
+            _log.LogCritical("BTCPay invoice {Id} (store {InvoiceStoreId}) does not belong to wallet store {ExpectedStoreId}; refusing to credit a received RGB payment",
                 rgbInv.BtcPayInvoiceId, invoiceEntity.StoreId, expectedStoreId);
-            return PaymentRegistration.Declined;
+            return PaymentRegistration.Unregisterable;
         }
 
         var prompt = invoiceEntity.GetPaymentPrompt(RGBPlugin.RGBPaymentMethodId);
         if (prompt == null)
         {
-            _log.LogWarning("No RGB payment prompt on invoice {Id}", rgbInv.BtcPayInvoiceId);
-            return PaymentRegistration.Declined;
+            _log.LogCritical("No RGB payment prompt on invoice {Id}; refusing to credit a received RGB payment",
+                rgbInv.BtcPayInvoiceId);
+            return PaymentRegistration.Unregisterable;
         }
 
         var details = _handler.ParsePaymentPromptDetails(prompt.Details);
         var identity = ClassifyPromptPricingIdentity(rgbInv, details, out var paymentCurrency);
-        if (identity == PaymentRegistration.Failed)
+        if (identity == PaymentRegistration.Unregisterable)
         {
             _log.LogCritical(
                 "RGB payment for invoice {InvoiceId} has no securely contract-bound current pricing code; refusing registration",
@@ -1109,7 +1129,7 @@ public class RGBInvoiceListener : IHostedService
     {
         paymentCurrency = "";
         if (!IsAssetMatch(rgbInvoice.AssetId, details.AssetId ?? ""))
-            return PaymentRegistration.Failed;
+            return PaymentRegistration.Unregisterable;
 
         try
         {
@@ -1118,7 +1138,7 @@ public class RGBInvoiceListener : IHostedService
         }
         catch (FormatException)
         {
-            return PaymentRegistration.Failed;
+            return PaymentRegistration.Unregisterable;
         }
     }
 

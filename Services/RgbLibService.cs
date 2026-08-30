@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -42,6 +43,10 @@ public class RgbLibService : IRgbLibService
     readonly MethodInfo _listTransactionsMethod;
     readonly MethodInfo _sendBeginMethod;
     readonly MethodInfo _sendEndMethod;
+    readonly MethodInfo _goOnlineMethod;
+    readonly MethodInfo _generateKeysMethod;
+    readonly MethodInfo _restoreKeysMethod;
+    readonly MethodInfo _backupMethod;
 
     bool _disposed;
 
@@ -94,6 +99,10 @@ public class RgbLibService : IRgbLibService
         _listTransactionsMethod = _nativeMethodsType.GetMethod("rgblib_list_transactions")!;
         _sendBeginMethod = _nativeMethodsType.GetMethod("rgblib_send_begin")!;
         _sendEndMethod = _nativeMethodsType.GetMethod("rgblib_send_end")!;
+        _goOnlineMethod = _nativeMethodsType.GetMethod("rgblib_go_online")!;
+        _generateKeysMethod = _nativeMethodsType.GetMethod("rgblib_generate_keys")!;
+        _restoreKeysMethod = _nativeMethodsType.GetMethod("rgblib_restore_keys")!;
+        _backupMethod = _nativeMethodsType.GetMethod("rgblib_backup")!;
     }
 
     public async Task<RgbLibWalletHandle> GetOrCreateWalletAsync(string walletId, CancellationToken ct = default)
@@ -168,7 +177,7 @@ public class RgbLibService : IRgbLibService
             var wallet = new RgbLibWallet(configJson, keysJson);
             return CreateHandleOrDisposeWallet(
                 wallet,
-                w => w.GoOnline(networkSettings.ElectrumUrl, true),
+                w => GoOnline(w, networkSettings.ElectrumUrl, true),
                 w =>
                 {
                     _log.LogInformation("Wallet {WalletId} connected to {Electrum}", walletId, networkSettings.ElectrumUrl);
@@ -189,6 +198,25 @@ public class RgbLibService : IRgbLibService
             throw new RgbWalletConstructionException(WalletBringUpFailureForTheOperator(
                 walletId, walletNetwork, ex, detailWithKeyMaterialRemoved));
         }
+    }
+
+    internal void GoOnline(RgbLibWallet wallet, string electrumUrl, bool skipConsistencyCheck)
+    {
+        var walletStruct = _walletField.GetValue(wallet)!;
+        var onlineOptionsJson = JsonSerializer.Serialize(new
+        {
+            indexer_url = electrumUrl,
+            skip_consistency_check = skipConsistencyCheck,
+            vanilla_sync_lookback = 100u,
+        });
+
+        var args = new object?[] { walletStruct, onlineOptionsJson };
+        var result = _goOnlineMethod.Invoke(null, args);
+
+        _walletField.SetValue(wallet, args[0]);
+
+        var onlineJson = Require(ReadNativeResult(result), "go_online");
+        _onlineJsonField.SetValue(wallet, onlineJson);
     }
 
     internal const string DotnetRuntimeDetailWithheldBecauseItNamesServerFilesystemPaths =
@@ -871,6 +899,53 @@ public class RgbLibService : IRgbLibService
         }, ct);
     }
 
+    static readonly SemaphoreSlim _backupGate = new(1, 1);
+    static readonly ConcurrentDictionary<string, RestoreCooldownGate> _backupCooldowns = new();
+    static long _backupGateHolderSinceMonotonicTimestamp;
+    static string? _backupGateHolderWalletId;
+
+    internal static RestoreCooldownGate GetOrCreateBackupCooldown(string walletId, Func<RestoreCooldownGate> create) =>
+        _backupCooldowns.GetOrAdd(walletId, _ => create());
+
+    internal static string DescribeElapsedWithoutOverstatingIt(TimeSpan elapsed) =>
+        elapsed.TotalMinutes >= 1
+            ? $"{(int)elapsed.TotalMinutes} minute{((int)elapsed.TotalMinutes == 1 ? "" : "s")}"
+            : $"{(int)elapsed.TotalSeconds} second{((int)elapsed.TotalSeconds == 1 ? "" : "s")}";
+
+    internal static TimeSpan ResolveBackupCooldown(RGBConfiguration cfg) =>
+        TimeSpan.FromSeconds(Math.Clamp(cfg.BackupCooldownSeconds,
+            RGBConfiguration.BackupCooldownSecondsMin, RGBConfiguration.BackupCooldownSecondsMax));
+
+    internal static TimeSpan ResolveBackupStartWaitTimeout(RGBConfiguration cfg) =>
+        TimeSpan.FromSeconds(Math.Clamp(cfg.BackupStartWaitTimeoutSeconds,
+            RGBConfiguration.BackupStartWaitTimeoutSecondsMin,
+            RGBConfiguration.BackupStartWaitTimeoutSecondsMax));
+
+    internal static TimeSpan ResolveBackupStuckThreshold(RGBConfiguration cfg) =>
+        TimeSpan.FromSeconds(Math.Clamp(cfg.BackupStuckThresholdSeconds,
+            RGBConfiguration.BackupStuckThresholdSecondsMin,
+            RGBConfiguration.BackupStuckThresholdSecondsMax));
+
+    internal static string DescribeRetryDelayWithoutUnderstatingIt(TimeSpan remaining)
+    {
+        var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        if (seconds < 60)
+            return $"{seconds} second{(seconds == 1 ? "" : "s")}";
+        var minutes = (int)Math.Ceiling(seconds / 60.0);
+        return $"{minutes} minute{(minutes == 1 ? "" : "s")}";
+    }
+
+    internal static string DescribeBackupCooldownRefusal(TimeSpan remaining) =>
+        "A wallet backup was attempted recently. Try again in "
+        + $"{DescribeRetryDelayWithoutUnderstatingIt(remaining)}.";
+
+    internal static string DescribeBackupGateRefusal(TimeSpan heldFor, TimeSpan stuckThreshold) =>
+        heldFor > stuckThreshold
+            ? "Another wallet backup has been holding this lock for at least "
+              + $"{DescribeElapsedWithoutOverstatingIt(heldFor)}. If it does not clear on its own, "
+              + "restart BTCPay to release it."
+            : "Another wallet backup is currently in progress. Try again shortly.";
+
     public async Task<string> BackupWalletAsync(string walletId, string password, CancellationToken ct = default)
     {
         if (RestoreProcessRunner.ContainsALineBreakTheSingleLineStdinTransportCannotCarry(password))
@@ -878,15 +953,85 @@ public class RgbLibService : IRgbLibService
                 RestoreProcessRunner.BackupPasswordLineBreakRefusal);
 
         var handle = await GetOrCreateWalletAsync(walletId, ct);
+
+        var cooldown = GetOrCreateBackupCooldown(walletId,
+            () => new RestoreCooldownGate(ResolveBackupCooldown(_config)));
+        var nowUtc = DateTimeOffset.UtcNow;
+        if (cooldown.IsCoolingDown(nowUtc))
+            throw new InvalidOperationException(DescribeBackupCooldownRefusal(cooldown.Remaining(nowUtc)));
+
         var tempPath = Path.Combine(Path.GetTempPath(), $"rgb-backup-{walletId}-{Guid.NewGuid():N}.rgb");
 
-        await handle.ExecuteAsync(wallet =>
+        var entered = await _backupGate.WaitAsync(TimeSpan.Zero, ct);
+        if (!entered)
         {
-            ct.ThrowIfCancellationRequested();
-            wallet.Backup(tempPath, password);
-        }, ct);
+            var holderSinceTimestamp = Interlocked.Read(ref _backupGateHolderSinceMonotonicTimestamp);
+            var heldFor = holderSinceTimestamp == 0
+                ? TimeSpan.Zero
+                : Stopwatch.GetElapsedTime(holderSinceTimestamp);
+            var stuckThreshold = ResolveBackupStuckThreshold(_config);
+            if (heldFor > stuckThreshold)
+                _log.LogWarning(
+                    "Wallet backup gate has been held by wallet {HolderWalletId} for {HeldForSeconds:N0}s, past the {ThresholdSeconds}s stuck threshold",
+                    Volatile.Read(ref _backupGateHolderWalletId), heldFor.TotalSeconds, stuckThreshold.TotalSeconds);
+            throw new InvalidOperationException(DescribeBackupGateRefusal(heldFor, stuckThreshold));
+        }
+
+        try
+        {
+            var afterAcquiringTheGateUtc = DateTimeOffset.UtcNow;
+            if (cooldown.IsCoolingDown(afterAcquiringTheGateUtc))
+                throw new InvalidOperationException(
+                    DescribeBackupCooldownRefusal(cooldown.Remaining(afterAcquiringTheGateUtc)));
+
+            Interlocked.Exchange(ref _backupGateHolderSinceMonotonicTimestamp, Stopwatch.GetTimestamp());
+            Volatile.Write(ref _backupGateHolderWalletId, walletId);
+            using var startWait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            startWait.CancelAfter(ResolveBackupStartWaitTimeout(_config));
+
+            try
+            {
+                await handle.ExecuteAsync(wallet =>
+                {
+                    startWait.Token.ThrowIfCancellationRequested();
+                    Backup(wallet, tempPath, password);
+                }, startWait.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    "Timed out waiting to start the wallet backup. No backup was written; try again. "
+                    + "If it keeps timing out, restart BTCPay — that releases any wallet operation "
+                    + "still holding this wallet.");
+            }
+            finally
+            {
+                cooldown.RecordAttempt(DateTimeOffset.UtcNow);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _backupGateHolderWalletId, null);
+            Interlocked.Exchange(ref _backupGateHolderSinceMonotonicTimestamp, 0);
+            _backupGate.Release();
+        }
 
         return tempPath;
+    }
+
+    internal void Backup(RgbLibWallet wallet, string backupPath, string password)
+    {
+        var walletStruct = _walletField.GetValue(wallet)!;
+        var args = new object?[] { walletStruct, backupPath, password };
+        var result = (CResult)_backupMethod.Invoke(null, args)!;
+
+        _walletField.SetValue(wallet, args[0]);
+
+        if (result.result != CResultValue.Ok)
+        {
+            FreeCResultErrorString(result);
+            throw new RgbLibException("Failed to backup");
+        }
     }
 
     [DllImport("rgblibcffi", CallingConvention = CallingConvention.Cdecl)]
@@ -998,7 +1143,9 @@ public class RgbLibService : IRgbLibService
 
     public RgbKeys GenerateKeys(string network)
     {
-        var keysJson = RgbLibWallet.GenerateKeys(NetworkHelper.MapNetworkToRgbLibFormat(network));
+        var args = new object?[] { NetworkHelper.MapNetworkToRgbLibFormat(network), "Taproot" };
+        var result = _generateKeysMethod.Invoke(null, args);
+        var keysJson = Require(ReadNativeResult(result), "generate_keys");
         var keys = JsonSerializer.Deserialize<GenerateKeysResponse>(keysJson);
 
         return new RgbKeys
@@ -1013,7 +1160,9 @@ public class RgbLibService : IRgbLibService
 
     public RgbKeys RestoreKeysFromMnemonic(string mnemonic, string network)
     {
-        var keysJson = RgbLibWallet.RestoreKeys(NetworkHelper.MapNetworkToRgbLibFormat(network), mnemonic);
+        var args = new object?[] { NetworkHelper.MapNetworkToRgbLibFormat(network), mnemonic, "Taproot" };
+        var result = _restoreKeysMethod.Invoke(null, args);
+        var keysJson = Require(ReadNativeResult(result), "restore_keys");
         var keys = JsonSerializer.Deserialize<GenerateKeysResponse>(keysJson);
 
         return new RgbKeys

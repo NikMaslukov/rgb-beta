@@ -102,6 +102,15 @@ public class ReplenishCooldownTrackerTests
         Assert.Equal(Now + Base, tracker.NextEligibleAt("w2"));
     }
 
+    [Fact]
+    public void Prune_TreatsWalletIdsWithTheSameCaseSensitivityAsBefore()
+    {
+        var tracker = New();
+        tracker.RecordAttemptSucceeded("w1", Now);
+        tracker.Prune(new[] { "W1" });
+        Assert.Null(tracker.NextEligibleAt("w1"));
+    }
+
     // `base * 2^failures` wraps or throws at roughly 31 consecutive failures — about three days of uptime for
     // an unfunded wallet — and a wrapped delay lands in the past, restoring the every-sweep retry storm.
     [Fact]

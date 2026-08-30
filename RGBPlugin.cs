@@ -196,6 +196,12 @@ public class RGBPlugin : BaseBTCPayServerPlugin
             && uploadBound > 0)
             cfg.RestoreUploadMaxBytes = Math.Clamp(uploadBound,
                 RGBConfiguration.RestoreUploadBoundMinBytes, RGBConfiguration.RestoreUploadBoundMaxBytes);
+
+        if (int.TryParse(read(RgbRestoreUploadConcurrencyGate.EnvironmentVariableName), out var uploadConcurrency)
+            && uploadConcurrency > 0)
+            cfg.RestoreUploadMaxConcurrentUploads = Math.Clamp(uploadConcurrency,
+                RGBConfiguration.RestoreUploadMaxConcurrentUploadsMin,
+                RGBConfiguration.RestoreUploadMaxConcurrentUploadsMax);
     }
 
     internal static void ApplyResolvedRgbBaseDir(

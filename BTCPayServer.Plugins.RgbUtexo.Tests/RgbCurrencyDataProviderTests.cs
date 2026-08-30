@@ -199,7 +199,7 @@ public class RgbCurrencyDataProviderTests
         var outcome = RGBInvoiceListener.ClassifyPromptPricingIdentity(
             new RGBInvoice { AssetId = AssetA }, details, out _);
 
-        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed, outcome);
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Unregisterable, outcome);
     }
 
     [Fact]

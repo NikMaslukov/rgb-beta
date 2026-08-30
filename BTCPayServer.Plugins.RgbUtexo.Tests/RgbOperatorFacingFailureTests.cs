@@ -115,10 +115,12 @@ public class RgbOperatorFacingFailureTests
             + "plugin: EmptyFile and InvalidFilePath are raised only in src/wallet/offline.rs for CFA/UDA "
             + "media paths and inspect_rgb_transfer's fascia path, and the plugin calls neither; "
             + "FileAlreadyExists is raised only in src/wallet/backup.rs backup_raw, which the plugin reaches "
-            + "only via RgbLib.RgbLibWallet.Backup, and that managed wrapper discards the native detail "
-            + "entirely (it throws RgbLib.RgbLibException with the constant text \"Failed to backup\" — a "
-            + "different type from this plugin's Services.RgbLibException, so it already lands on the "
-            + "fallback). Every plugin-side RgbLibException is built in RgbLibService/RGBWalletService from "
+            + "only via RgbLibService.Backup, which frees the native error string WITHOUT reading it into "
+            + "the message and throws this plugin's Services.RgbLibException with the constant text "
+            + "\"Failed to backup\" — so the interpolated path is discarded before it can reach an "
+            + "operator, even though that constant, unlike the package wrapper's differently-typed "
+            + "exception it replaced, is now itself trusted and shown verbatim rather than falling back. "
+            + "Every plugin-side RgbLibException is built in RgbLibService/RGBWalletService from "
             + "the direct rgblib_* P/Invoke surface, which reaches no path-interpolating variant. Re-check "
             + "that surface before trusting this pin if a new rgblib_* entry point or a rgb-lib bump lands.");
     }

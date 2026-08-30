@@ -59,7 +59,7 @@ public class RgbPaymentCurrencyTests
     [Theory]
     [InlineData(null)]
     [InlineData("RGB0123456789ABCDEF")]
-    public void LegacyPromptIdentity_FailsRegistrationAndBlocksSettlement(string? pricingCode)
+    public void LegacyPromptIdentity_IsUnregisterableNotFailed(string? pricingCode)
     {
         var invoice = new RGBInvoice { AssetId = Asset };
         var details = new RGBPromptDetails
@@ -70,21 +70,19 @@ public class RgbPaymentCurrencyTests
         var registration = RGBInvoiceListener.ClassifyPromptPricingIdentity(
             invoice, details, out var paymentCurrency);
 
-        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed, registration);
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Unregisterable, registration);
         Assert.Equal("", paymentCurrency);
-        Assert.False(RGBInvoiceListener.ShouldCommitAdvance(
-            RGBInvoiceStatus.Settled, registration == RGBInvoiceListener.PaymentRegistration.Failed));
     }
 
     [Fact]
-    public void PromptAssetMismatch_FailsRegistration()
+    public void PromptAssetMismatch_IsUnregisterableNotFailed()
     {
         var details = new RGBPromptDetails
         {
             AssetId = Asset, PricingCode = RgbPricingCode.For(Asset), AssetTicker = "USDT"
         };
 
-        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Failed,
+        Assert.Equal(RGBInvoiceListener.PaymentRegistration.Unregisterable,
             RGBInvoiceListener.ClassifyPromptPricingIdentity(
                 new RGBInvoice { AssetId = Asset + "other" }, details, out _));
     }

@@ -39,12 +39,14 @@ internal sealed class ReplenishCooldownTracker
 
     internal void Prune(IReadOnlyCollection<string> activeWalletIds)
     {
+        var activeWalletIdsByOrdinalHash = new HashSet<string>(activeWalletIds);
+
         foreach (var walletId in _nextEligible.Keys)
-            if (!activeWalletIds.Contains(walletId))
+            if (!activeWalletIdsByOrdinalHash.Contains(walletId))
                 _nextEligible.TryRemove(walletId, out _);
 
         foreach (var walletId in _failures.Keys)
-            if (!activeWalletIds.Contains(walletId))
+            if (!activeWalletIdsByOrdinalHash.Contains(walletId))
                 _failures.TryRemove(walletId, out _);
     }
 

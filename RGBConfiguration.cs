@@ -86,6 +86,9 @@ public class RGBConfiguration
     [JsonPropertyName("restore_upload_max_bytes")]
     public long RestoreUploadMaxBytes { get; set; } = RestoreUploadBoundMinBytes;
 
+    [JsonPropertyName("restore_upload_max_concurrent_uploads")]
+    public int RestoreUploadMaxConcurrentUploads { get; set; } = RestoreUploadMaxConcurrentUploadsDefault;
+
     [JsonPropertyName("restore_ram_cap_bytes")]
     public long RestoreRamCapBytes { get; set; } = RestoreRamMinBytes;
 
@@ -117,6 +120,15 @@ public class RGBConfiguration
     // completed in 399 ms, so a threshold left meaningful resource use immediately retryable forever.
     [JsonPropertyName("restore_kill_cooldown_seconds")]
     public int RestoreKillCooldownSeconds { get; set; } = 60;
+
+    [JsonPropertyName("backup_cooldown_seconds")]
+    public int BackupCooldownSeconds { get; set; } = 60;
+
+    [JsonPropertyName("backup_start_wait_timeout_seconds")]
+    public int BackupStartWaitTimeoutSeconds { get; set; } = 30;
+
+    [JsonPropertyName("backup_stuck_threshold_seconds")]
+    public int BackupStuckThresholdSeconds { get; set; } = 300;
 
     [JsonPropertyName("native_send_timeout_seconds")]
     public int NativeSendTimeoutSeconds { get; set; } = 30;
@@ -160,6 +172,10 @@ public class RGBConfiguration
     internal const long RestoreUploadBoundMaxBytes = 100L * 1024 * 1024;
     internal const long MultipartFormBodyLengthCeilingBytes = 128L * 1024 * 1024;
 
+    internal const int RestoreUploadMaxConcurrentUploadsDefault = 4;
+    internal const int RestoreUploadMaxConcurrentUploadsMin = 1;
+    internal const int RestoreUploadMaxConcurrentUploadsMax = 32;
+
     internal const long RestoreHelperResidentSetOutsideTheScryptArenaMeasuredBytes = 34L * 1024 * 1024;
     internal const long RestoreRamHeadroomTheScryptArenaCeilingIsNotMeasuredWithBytes =
         RestoreHelperResidentSetOutsideTheScryptArenaMeasuredBytes
@@ -176,6 +192,13 @@ public class RGBConfiguration
 
     internal const int RestoreReapGraceSecondsMin = 1;
     internal const int RestoreReapGraceSecondsMax = 30;
+
+    internal const int BackupCooldownSecondsMin = 0;
+    internal const int BackupCooldownSecondsMax = 3_600;
+    internal const int BackupStartWaitTimeoutSecondsMin = 1;
+    internal const int BackupStartWaitTimeoutSecondsMax = 3_600;
+    internal const int BackupStuckThresholdSecondsMin = 1;
+    internal const int BackupStuckThresholdSecondsMax = 86_400;
 
     // MUST exceed RGBInvoiceListener.UtxoCheckMinutes (10). At 10 the cooldown was inert: the sweep stamps
     // its own clock AFTER the sweep returns, so sweep N+1 begins later than end_N + 10 min, while a wallet
